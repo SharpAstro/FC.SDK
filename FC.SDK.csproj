@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	<TargetFramework>net10.0</TargetFramework>
+	<RootNamespace>FC.SDK</RootNamespace>
+	<AssemblyName>FC.SDK</AssemblyName>
+	<PackageId>FC.SDK</PackageId>
+	<PackageTags>Astronomy,Canon,PTP,DSLR,USB,WiFi</PackageTags>
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+	<IsAotCompatible>true</IsAotCompatible>
+	<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+	<DebugType>embedded</DebugType>
+	<PackageLicenseFile>license.txt</PackageLicenseFile>
+	<RepositoryUrl>https://github.com/SharpAstro/FC.SDK</RepositoryUrl>
+	<PackageProjectUrl>https://github.com/SharpAstro/FC.SDK</PackageProjectUrl>
+	<PublishRepositoryUrl>true</PublishRepositoryUrl>
+	<EmbedUntrackedSources>true</EmbedUntrackedSources>
+	<Description>Canon EOS camera control via PTP over USB and WiFi — pure managed C#, no EDSDK binary required</Description>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+	<CheckForOverflowUnderflow>False</CheckForOverflowUnderflow>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+	<CheckForOverflowUnderflow>False</CheckForOverflowUnderflow>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<None Include="license.txt" PackagePath="" Pack="True" />
+  </ItemGroup>
+
+  <ItemGroup>
+<PackageReference Include="LibUsbDotNet" Version="2.2.75" />
+	<PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.200" PrivateAssets="All" />
+  </ItemGroup>
+
+</Project>
