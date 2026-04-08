@@ -230,6 +230,28 @@ internal sealed class WpdPtpTransport : IPtpTransport
             yield return id;
     }
 
+    public static string? GetDeviceFriendlyName(string deviceId)
+    {
+        IWpdDeviceManager manager;
+        try { manager = WpdInterop.CreateInstance<IWpdDeviceManager>(WpdInterop.CLSID_PortableDeviceManager); }
+        catch { return null; }
+
+        uint nameLen = 0;
+        int hr = manager.GetDeviceFriendlyName(deviceId, 0, ref nameLen);
+        if (hr < 0 || nameLen == 0) return null;
+
+        nint buf = Marshal.AllocCoTaskMem((int)(nameLen * 2));
+        try
+        {
+            hr = manager.GetDeviceFriendlyName(deviceId, buf, ref nameLen);
+            return hr >= 0 ? Marshal.PtrToStringUni(buf) : null;
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(buf);
+        }
+    }
+
     public ValueTask DisposeAsync()
     {
         _device?.Close();

@@ -20,6 +20,12 @@ internal sealed class PtpSession(IPtpTransport transport) : IAsyncDisposable
         CancellationToken ct,
         params uint[] @params)
     {
+        if (OperatingSystem.IsWindows() && transport is WpdPtpTransport wpd)
+        {
+            var (respCode, respParams) = await wpd.ExecuteCommandAsync((ushort)opCode, @params, ct);
+            return WpdToResponse(respCode, respParams);
+        }
+
         await _lock.WaitAsync(ct);
         try
         {
@@ -49,6 +55,12 @@ internal sealed class PtpSession(IPtpTransport transport) : IAsyncDisposable
         CancellationToken ct,
         params uint[] @params)
     {
+        if (OperatingSystem.IsWindows() && transport is WpdPtpTransport wpd)
+        {
+            var (respCode, respParams) = await wpd.ExecuteCommandWriteDataAsync((ushort)opCode, @params, data.ToArray(), ct);
+            return WpdToResponse(respCode, respParams);
+        }
+
         await _lock.WaitAsync(ct);
         try
         {
@@ -93,6 +105,12 @@ internal sealed class PtpSession(IPtpTransport transport) : IAsyncDisposable
         CancellationToken ct,
         params uint[] @params)
     {
+        if (OperatingSystem.IsWindows() && transport is WpdPtpTransport wpd)
+        {
+            var (respCode, respParams, data) = await wpd.ExecuteCommandReadDataAsync((ushort)opCode, @params, ct);
+            return (WpdToResponse(respCode, respParams), data);
+        }
+
         await _lock.WaitAsync(ct);
         try
         {
@@ -149,6 +167,17 @@ internal sealed class PtpSession(IPtpTransport transport) : IAsyncDisposable
         {
             _lock.Release();
         }
+    }
+
+    private static PtpResponse WpdToResponse(ushort responseCode, uint[] responseParams)
+    {
+        return new PtpResponse
+        {
+            Code = (PtpResponseCode)responseCode,
+            Param1 = responseParams.Length > 0 ? responseParams[0] : 0,
+            Param2 = responseParams.Length > 1 ? responseParams[1] : 0,
+            Param3 = responseParams.Length > 2 ? responseParams[2] : 0,
+        };
     }
 
     private async Task<PtpResponse> ReceiveResponseAsync(CancellationToken ct)

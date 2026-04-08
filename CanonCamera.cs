@@ -1,6 +1,7 @@
 using FC.SDK.Canon;
 using FC.SDK.Protocol;
 using FC.SDK.Transport;
+using System.Runtime.Versioning;
 
 namespace FC.SDK;
 
@@ -41,6 +42,32 @@ public sealed class CanonCamera : IAsyncDisposable
 
     public static IEnumerable<UsbDeviceInfo> EnumerateUsbCameras() =>
         UsbPtpTransport.Enumerate();
+
+    /// <summary>
+    /// Creates a WPD (Windows Portable Devices) connection to a Canon camera.
+    /// Uses the stock MTP driver — no WinUSB/Zadig required.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static CanonCamera ConnectWpd(string wpdDeviceId) =>
+        new(new WpdPtpTransport(wpdDeviceId));
+
+    /// <summary>
+    /// Enumerates Canon cameras visible via WPD (Windows Portable Devices).
+    /// Returns PnP device IDs that can be passed to <see cref="ConnectWpd"/>.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static IEnumerable<(string DeviceId, string FriendlyName)> EnumerateWpdCameras()
+    {
+        foreach (var deviceId in WpdPtpTransport.EnumerateDeviceIds())
+        {
+            // Filter for Canon devices by checking the PnP device ID for Canon's USB VID
+            if (deviceId.Contains("VID_04A9", StringComparison.OrdinalIgnoreCase))
+            {
+                var friendlyName = WpdPtpTransport.GetDeviceFriendlyName(deviceId) ?? "Canon Camera";
+                yield return (deviceId, friendlyName);
+            }
+        }
+    }
 
     public async Task<EdsError> OpenSessionAsync(CancellationToken ct = default)
     {
