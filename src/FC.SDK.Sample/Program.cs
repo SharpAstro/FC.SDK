@@ -1,7 +1,7 @@
 using FC.SDK;
 using FC.SDK.Canon;
 
-Console.WriteLine("FC.SDK — WPD vendor data-phase test");
+Console.WriteLine("FC.SDK — TakePicture → GetEvent → Download test");
 
 CanonCamera? camera = null;
 if (OperatingSystem.IsWindows())
@@ -15,42 +15,46 @@ if (OperatingSystem.IsWindows())
 }
 if (camera is null) { Console.WriteLine("No camera."); return 1; }
 
-// Test 1: WITHOUT our PTP session (WPD manages its own session internally)
-Console.WriteLine("\n=== Test 1: WPD-managed session (no OpenSession) ===");
-// Just connect the transport, don't open Canon session
-await camera.ConnectTransportAsync();
-
-Console.WriteLine("GetEvent (0x9116) data-read:");
-var evtResult = await camera.TestVendorDataReadAsync(0x9116);
-Console.WriteLine($"  {evtResult}");
-
-Console.WriteLine("GetDevicePropValue(BatteryLevel 0x5001):");
-var batResult = await camera.TestStandardDataReadAsync(0x1015, 0x5001);
-Console.WriteLine($"  {batResult}");
-
-Console.WriteLine("GetDevicePropValue(Canon ISO 0xD103):");
-var isoResult = await camera.TestStandardDataReadAsync(0x1015, 0xD103);
-Console.WriteLine($"  {isoResult}");
-
-// Test 2: WITH our PTP session (OpenSession + SetRemoteMode)
-Console.WriteLine("\n=== Test 2: Canon remote mode session ===");
 var result = await camera.OpenSessionAsync();
-Console.WriteLine($"OpenSession: {result}");
+if (result is not EdsError.OK) { Console.WriteLine($"OpenSession: {result}"); return 1; }
+Console.WriteLine("Connected with remote mode!");
 
-Console.WriteLine("GetEvent (0x9116) data-read:");
-evtResult = await camera.TestVendorDataReadAsync(0x9116);
-Console.WriteLine($"  {evtResult}");
+// Drain initial events
+Console.WriteLine("\nGetEvent (initial drain):");
+var evt1 = await camera.TestVendorDataReadAsync(0x9116);
+Console.WriteLine($"  {evt1}");
 
-Console.WriteLine("GetProperty ISO via Canon path:");
-var (isoErr, isoVal) = await camera.GetPropertyAsync(EdsPropertyId.ISOSpeed);
-Console.WriteLine($"  err={isoErr} val=0x{isoVal:X}");
-
-// Shutter still works
-Console.WriteLine("\nTakePicture:");
+// Take picture
+Console.WriteLine("\nTaking picture...");
 var takeResult = await camera.TakePictureAsync();
-Console.WriteLine($"  {takeResult}");
+Console.WriteLine($"TakePicture: {takeResult}");
+
+if (takeResult is EdsError.OK)
+{
+    // Wait for camera to process
+    Console.WriteLine("Waiting 3s for camera...");
+    await Task.Delay(3000);
+
+    // Try GetEvent — should now have ObjectAdded
+    Console.WriteLine("\nGetEvent (after TakePicture):");
+    var evt2 = await camera.TestVendorDataReadAsync(0x9116);
+    Console.WriteLine($"  {evt2}");
+
+    // Try multiple times
+    for (int i = 0; i < 5; i++)
+    {
+        await Task.Delay(1000);
+        var evt = await camera.TestVendorDataReadAsync(0x9116);
+        Console.WriteLine($"  Poll {i+1}: {evt}");
+        if (evt.Contains("dataLen=") && !evt.Contains("dataLen=0"))
+        {
+            Console.WriteLine("  *** GOT EVENT DATA! ***");
+            break;
+        }
+    }
+}
 
 await camera.CloseSessionAsync();
 await camera.DisposeAsync();
-Console.WriteLine("\nDone.");
+Console.WriteLine("Done.");
 return 0;
