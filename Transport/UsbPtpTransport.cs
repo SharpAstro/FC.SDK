@@ -98,12 +98,26 @@ internal sealed class UsbPtpTransport : IPtpTransport
             reg.DeviceProperties.TryGetValue("Mfg", out object? mfg);
             reg.DeviceProperties.TryGetValue("DeviceDesc", out object? desc);
 
+            string serial = string.Empty;
+            try
+            {
+                if (reg.Open(out var dev))
+                {
+                    serial = dev.Info?.SerialString ?? string.Empty;
+                    dev.Close();
+                }
+            }
+            catch
+            {
+                // Device may be in use — serial stays empty
+            }
+
             yield return new UsbDeviceInfo(
                 (ushort)reg.Vid,
                 (ushort)reg.Pid,
                 mfg?.ToString() ?? "Canon",
                 desc?.ToString() ?? $"Canon Camera (PID={reg.Pid:X4})",
-                string.Empty
+                serial
             );
         }
     }
