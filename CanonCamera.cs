@@ -80,8 +80,9 @@ public sealed class CanonCamera : IAsyncDisposable
     {
         foreach (var deviceId in WpdPtpTransport.EnumerateDeviceIds())
         {
-            // Filter for Canon devices by checking the PnP device ID for Canon's USB VID
-            if (deviceId.Contains("VID_04A9", StringComparison.OrdinalIgnoreCase))
+            // Filter for Canon USB cameras — exclude printers/scanners (SWD\) by requiring USB prefix
+            if (deviceId.Contains("USB", StringComparison.OrdinalIgnoreCase)
+                && deviceId.Contains("VID_04A9", StringComparison.OrdinalIgnoreCase))
             {
                 var friendlyName = WpdPtpTransport.GetDeviceFriendlyName(deviceId) ?? "Canon Camera";
                 yield return (deviceId, friendlyName);

@@ -227,7 +227,10 @@ internal sealed class WpdPtpTransport : IPtpTransport
         manager.GetDevices(ids, ref count);
 
         foreach (var id in ids)
-            yield return id;
+        {
+            if (!string.IsNullOrWhiteSpace(id))
+                yield return id;
+        }
     }
 
     public static string? GetDeviceFriendlyName(string deviceId)
