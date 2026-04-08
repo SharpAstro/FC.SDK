@@ -186,14 +186,23 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     private IWpdValues SendWpdCommand(IWpdValues cmd)
     {
         if (_device is null) throw new InvalidOperationException("Transport not connected.");
-        Marshal.ThrowExceptionForHR(_device.SendCommand(0, cmd, out var results));
+        int hr = _device.SendCommand(0, cmd, out var results);
+        Console.Error.WriteLine($"[WPD] SendCommand hr=0x{hr:X8}");
+        Marshal.ThrowExceptionForHR(hr);
         return results!;
     }
+
+    private const int E_ELEMENT_NOT_FOUND = unchecked((int)0x80070490);
 
     private static void CheckHResult(IWpdValues results)
     {
         int hr = results.GetErrorValue(WpdInterop.CommonKey(WpdInterop.PID_HRESULT), out int errorValue);
-        if (hr >= 0 && errorValue != 0)
+        Console.Error.WriteLine($"[WPD] CheckHResult: GetErrorValue hr=0x{hr:X8} errorValue=0x{errorValue:X8}");
+        // 0x80070490 (ELEMENT_NOT_FOUND) is returned when:
+        // - GetEvent has no events (normal)
+        // - A property code is not recognized by the WPD driver
+        // Treat as "no data" rather than a hard error
+        if (hr >= 0 && errorValue != 0 && errorValue != E_ELEMENT_NOT_FOUND)
             throw new COMException($"WPD command failed with HRESULT 0x{errorValue:X8}", errorValue);
     }
 
