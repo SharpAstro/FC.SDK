@@ -16,6 +16,7 @@ internal static partial class WpdInterop
     // WPD command GUIDs
     internal static readonly Guid WPD_COMMAND_COMMON = new("F0422A9C-5DC8-4440-B5BD-5DF28835658A");
     internal static readonly Guid WPD_COMMAND_MTP_EXT = new("4d545058-1a2e-4106-a357-771e0819fc56");
+    internal static readonly Guid WPD_CLIENT_INFO = new("204D9F0C-2292-4080-9F42-40664E70F859");
 
     // Common property PIDs
     internal const uint PID_COMMAND_CATEGORY = 1001;

@@ -23,6 +23,17 @@ internal sealed class WpdPtpTransport : IPtpTransport
     {
         _device = WpdInterop.CreateInstance<IWpdDevice>(WpdInterop.CLSID_PortableDevice);
         var clientInfo = WpdInterop.CreateInstance<IWpdValues>(WpdInterop.CLSID_PortableDeviceValues);
+
+        // WPD requires client identity — name, major/minor version, revision
+        var clientKey = new PropertyKey { fmtid = WpdInterop.WPD_CLIENT_INFO, pid = 2 }; // WPD_CLIENT_NAME
+        clientInfo.SetStringValue(in clientKey, "TianWen");
+        clientKey.pid = 3; // WPD_CLIENT_MAJOR_VERSION
+        clientInfo.SetUnsignedIntegerValue(in clientKey, 1);
+        clientKey.pid = 4; // WPD_CLIENT_MINOR_VERSION
+        clientInfo.SetUnsignedIntegerValue(in clientKey, 0);
+        clientKey.pid = 5; // WPD_CLIENT_REVISION
+        clientInfo.SetUnsignedIntegerValue(in clientKey, 0);
+
         Marshal.ThrowExceptionForHR(_device.Open(_deviceId, clientInfo));
         return Task.CompletedTask;
     }
