@@ -308,6 +308,42 @@ public sealed class CanonCamera : IAsyncDisposable
         }
     }
 
+    /// <summary>Connects the transport without opening a PTP session.</summary>
+    public Task ConnectTransportAsync(CancellationToken ct = default) => _transport.ConnectAsync(ct);
+
+    /// <summary>Tests a vendor data-read command. Returns description of result.</summary>
+    public async Task<string> TestVendorDataReadAsync(ushort opCode)
+    {
+        try
+        {
+            var (resp, data) = await _ptp.SendCommandReceiveDataAsync((PtpOperationCode)opCode, default);
+            return $"PTP response=0x{(ushort)resp.Code:X4} dataLen={data.Length}";
+        }
+        catch (Exception ex)
+        {
+            return $"Exception: {ex.Message}";
+        }
+    }
+
+    /// <summary>Tests a standard PTP data-read command with one parameter.</summary>
+    public async Task<string> TestStandardDataReadAsync(ushort opCode, uint param)
+    {
+        try
+        {
+            var (resp, data) = await _ptp.SendCommandReceiveDataAsync((PtpOperationCode)opCode, default, param);
+            if (data.Length > 0)
+            {
+                var hex = string.Join("", data.Select(b => b.ToString("X2")));
+                return $"PTP response=0x{(ushort)resp.Code:X4} dataLen={data.Length} data={hex}";
+            }
+            return $"PTP response=0x{(ushort)resp.Code:X4} dataLen={data.Length}";
+        }
+        catch (Exception ex)
+        {
+            return $"Exception: {ex.Message}";
+        }
+    }
+
     /// <summary>Sends a raw PTP no-data command with optional parameters.</summary>
     public async Task<EdsError> SendRawCommandAsync(ushort opCode, params uint[] @params)
     {
