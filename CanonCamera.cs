@@ -1,9 +1,27 @@
 using FC.SDK.Canon;
 using FC.SDK.Protocol;
 using FC.SDK.Transport;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Runtime.Versioning;
 
 namespace FC.SDK;
+
+public sealed class CanonCameraFactory(ILogger<CanonCamera> logger)
+{
+    public CanonCamera ConnectUsb(UsbDeviceInfo device) =>
+        new(new UsbPtpTransport(device), logger);
+
+    public CanonCamera ConnectUsb(ushort vendorId, ushort productId) =>
+        new(new UsbPtpTransport(vendorId, productId), logger);
+
+    public CanonCamera ConnectWifi(string host, string? clientName = null) =>
+        new(new PtpIpTransport(host, clientName: clientName), logger);
+
+    [SupportedOSPlatform("windows")]
+    public CanonCamera ConnectWpd(string wpdDeviceId) =>
+        new(new WpdPtpTransport(wpdDeviceId), logger);
+}
 
 public sealed class CanonCamera : IAsyncDisposable
 {
@@ -12,6 +30,7 @@ public sealed class CanonCamera : IAsyncDisposable
     private readonly IPtpTransport _transport;
     private readonly PtpSession _ptp;
     private readonly CanonPtpSession _canon;
+    private readonly ILogger<CanonCamera> _logger;
     private EventPoller? _poller;
 
     public event EventHandler<CanonPropertyChangedEventArgs>? PropertyChanged;
@@ -24,21 +43,22 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </summary>
     public string DeviceId => _transport.DeviceId;
 
-    private CanonCamera(IPtpTransport transport)
+    internal CanonCamera(IPtpTransport transport, ILogger<CanonCamera> logger)
     {
         _transport = transport;
         _ptp = new PtpSession(transport);
         _canon = new CanonPtpSession(_ptp);
+        _logger = logger;
     }
 
     public static CanonCamera ConnectUsb(UsbDeviceInfo device) =>
-        new(new UsbPtpTransport(device));
+        new(new UsbPtpTransport(device), NullLogger<CanonCamera>.Instance);
 
     public static CanonCamera ConnectUsb(ushort vendorId, ushort productId) =>
-        new(new UsbPtpTransport(vendorId, productId));
+        new(new UsbPtpTransport(vendorId, productId), NullLogger<CanonCamera>.Instance);
 
     public static CanonCamera ConnectWifi(string host, string? clientName = null) =>
-        new(new PtpIpTransport(host, clientName: clientName));
+        new(new PtpIpTransport(host, clientName: clientName), NullLogger<CanonCamera>.Instance);
 
     public static IEnumerable<UsbDeviceInfo> EnumerateUsbCameras() =>
         UsbPtpTransport.Enumerate();
@@ -49,7 +69,7 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </summary>
     [SupportedOSPlatform("windows")]
     public static CanonCamera ConnectWpd(string wpdDeviceId) =>
-        new(new WpdPtpTransport(wpdDeviceId));
+        new(new WpdPtpTransport(wpdDeviceId), NullLogger<CanonCamera>.Instance);
 
     /// <summary>
     /// Enumerates Canon cameras visible via WPD (Windows Portable Devices).
@@ -71,27 +91,52 @@ public sealed class CanonCamera : IAsyncDisposable
 
     public async Task<EdsError> OpenSessionAsync(CancellationToken ct = default)
     {
+        _logger.LogDebug("Opening PTP session via {Transport}", _transport.GetType().Name);
         await _transport.ConnectAsync(ct);
-        return await _canon.OpenAsync(ct);
+        var result = await _canon.OpenAsync(ct);
+        if (result is EdsError.OK)
+        {
+            _logger.LogInformation("PTP session opened, DeviceId={DeviceId}", DeviceId);
+        }
+        else
+        {
+            _logger.LogError("Failed to open PTP session: {Error}", result);
+        }
+        return result;
     }
 
-    public Task<EdsError> CloseSessionAsync(CancellationToken ct = default) =>
-        _canon.CloseAsync(ct);
+    public async Task<EdsError> CloseSessionAsync(CancellationToken ct = default)
+    {
+        _logger.LogDebug("Closing PTP session");
+        return await _canon.CloseAsync(ct);
+    }
 
     public async Task<(EdsError Error, uint Value)> GetPropertyAsync(EdsPropertyId id, CancellationToken ct = default)
     {
         var ptpCode = CanonPropertyMap.GetPtpCodeOrThrow(id);
-        return await _canon.GetPropertyUInt32Async(ptpCode, ct);
+        var (err, value) = await _canon.GetPropertyUInt32Async(ptpCode, ct);
+        if (err is not EdsError.OK)
+        {
+            _logger.LogDebug("GetProperty {PropertyId} failed: {Error}", id, err);
+        }
+        return (err, value);
     }
 
     public async Task<EdsError> SetPropertyAsync(EdsPropertyId id, uint value, CancellationToken ct = default)
     {
         var ptpCode = CanonPropertyMap.GetPtpCodeOrThrow(id);
-        return await _canon.SetPropertyUInt32Async(ptpCode, value, ct);
+        var result = await _canon.SetPropertyUInt32Async(ptpCode, value, ct);
+        if (result is not EdsError.OK)
+        {
+            _logger.LogWarning("SetProperty {PropertyId}={Value} failed: {Error}", id, value, result);
+        }
+        return result;
     }
 
     public async Task<EdsError> TakePictureAsync(CancellationToken ct = default)
     {
+        _logger.LogDebug("Taking picture");
+
         // Half-press AF
         var err = await _canon.RemoteReleaseOnAsync(0x01, ct);
         if (err is not EdsError.OK) return err;
@@ -114,11 +159,17 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<EdsError> ReleaseShutterAsync(CancellationToken ct = default) =>
         _canon.RemoteReleaseOffAsync(0x01, ct);
 
-    public Task<EdsError> BulbStartAsync(CancellationToken ct = default) =>
-        _canon.BulbStartAsync(ct);
+    public Task<EdsError> BulbStartAsync(CancellationToken ct = default)
+    {
+        _logger.LogDebug("Bulb start");
+        return _canon.BulbStartAsync(ct);
+    }
 
-    public Task<EdsError> BulbEndAsync(CancellationToken ct = default) =>
-        _canon.BulbEndAsync(ct);
+    public Task<EdsError> BulbEndAsync(CancellationToken ct = default)
+    {
+        _logger.LogDebug("Bulb end");
+        return _canon.BulbEndAsync(ct);
+    }
 
     public Task<EdsError> EnableMirrorLockupAsync(CancellationToken ct = default) =>
         SetPropertyAsync(EdsPropertyId.MirrorUpSetting, (uint)EdsMirrorUpSetting.On, ct);
