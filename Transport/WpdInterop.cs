@@ -89,9 +89,7 @@ internal struct PropVariant
 internal partial interface IWpdDeviceManager
 {
     [PreserveSig]
-    int GetDevices(
-        [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPWStr, SizeParamIndex = 1)] string[]? pPnPDeviceIDs,
-        ref uint pcPnPDeviceIDs);
+    int GetDevices(nint pPnPDeviceIDs, ref uint pcPnPDeviceIDs);
 
     [PreserveSig]
     int RefreshDeviceList();

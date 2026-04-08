@@ -220,14 +220,26 @@ internal sealed class WpdPtpTransport : IPtpTransport
         manager.RefreshDeviceList();
 
         uint count = 0;
-        manager.GetDevices(null, ref count);
+        manager.GetDevices(0, ref count);
         if (count == 0) yield break;
 
-        string[] ids = new string[count];
-        manager.GetDevices(ids, ref count);
-
-        foreach (var id in ids)
+        // Manual marshalling: WPD fills an array of LPWSTR pointers
+        var ptrs = new nint[(int)count];
+        var pinned = GCHandle.Alloc(ptrs, GCHandleType.Pinned);
+        try
         {
+            manager.GetDevices(pinned.AddrOfPinnedObject(), ref count);
+        }
+        finally
+        {
+            pinned.Free();
+        }
+
+        for (var i = 0; i < (int)count; i++)
+        {
+            if (ptrs[i] == 0) continue;
+            var id = Marshal.PtrToStringUni(ptrs[i]);
+            Marshal.FreeCoTaskMem(ptrs[i]);
             if (!string.IsNullOrWhiteSpace(id))
                 yield return id;
         }
