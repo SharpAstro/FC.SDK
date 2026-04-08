@@ -106,6 +106,53 @@ public sealed class CanonCamera : IAsyncDisposable
         return result;
     }
 
+    /// <summary>
+    /// Opens a PTP session without enabling Canon remote mode.
+    /// Use with <see cref="InitiateCaptureAsync"/> for WPD-friendly capture
+    /// where the image is saved to card and WPD events fire normally.
+    /// </summary>
+    public async Task<EdsError> OpenSessionNoRemoteModeAsync(CancellationToken ct = default)
+    {
+        _logger.LogDebug("Opening PTP session (no remote mode) via {Transport}", _transport.GetType().Name);
+        await _transport.ConnectAsync(ct);
+        var result = await _canon.OpenNoRemoteModeAsync(ct);
+        if (result is EdsError.OK)
+        {
+            _logger.LogInformation("PTP session opened (no remote mode), DeviceId={DeviceId}", DeviceId);
+        }
+        else
+        {
+            _logger.LogError("Failed to open PTP session: {Error}", result);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Standard PTP InitiateCapture — camera takes picture using its current settings
+    /// and saves to card. Works without Canon remote mode.
+    /// </summary>
+    public async Task<EdsError> InitiateCaptureAsync(CancellationToken ct = default)
+    {
+        _logger.LogDebug("InitiateCapture (standard PTP)");
+        return await _canon.InitiateCaptureAsync(ct);
+    }
+
+    /// <summary>Exits Canon remote mode. WPD can then see new objects on the card.</summary>
+    public async Task<EdsError> ExitRemoteModeAsync(CancellationToken ct = default)
+    {
+        var resp = await _canon.SetRemoteModeAsync(0, ct);
+        _logger.LogDebug("ExitRemoteMode: {Result}", resp);
+        return resp;
+    }
+
+    /// <summary>Re-enters Canon remote mode (needed for shutter/bulb/property control).</summary>
+    public async Task<EdsError> EnterRemoteModeAsync(CancellationToken ct = default)
+    {
+        var resp = await _canon.SetRemoteModeAsync(1, ct);
+        _logger.LogDebug("EnterRemoteMode: {Result}", resp);
+        return resp;
+    }
+
     public async Task<EdsError> CloseSessionAsync(CancellationToken ct = default)
     {
         _logger.LogDebug("Closing PTP session");
@@ -258,6 +305,68 @@ public sealed class CanonCamera : IAsyncDisposable
                 StateChanged?.Invoke(this, new CanonStateChangedEventArgs(evt.Type, evt.Param1));
                 break;
         }
+    }
+
+    // --- WPD Content API (hybrid: WPD events + downloads when MTP EXT data-phase fails) ---
+
+    /// <summary>
+    /// Whether this camera is connected via WPD. When true, use <see cref="RegisterWpdObjectAddedCallback"/>
+    /// instead of <see cref="StartEventPolling"/> for new-image notifications.
+    /// </summary>
+    public bool IsWpdTransport => _transport is WpdPtpTransport;
+
+    /// <summary>
+    /// Registers for WPD object-added events. The callback receives the WPD object ID.
+    /// Only works when <see cref="IsWpdTransport"/> is true.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public void RegisterWpdObjectAddedCallback(Action<string> callback)
+    {
+        if (_transport is WpdPtpTransport wpd)
+        {
+            wpd.RegisterObjectAddedCallback(callback);
+        }
+    }
+
+    /// <summary>Unregisters the WPD object-added callback.</summary>
+    [SupportedOSPlatform("windows")]
+    public void UnregisterWpdObjectAddedCallback()
+    {
+        if (_transport is WpdPtpTransport wpd)
+        {
+            wpd.UnregisterObjectAddedCallback();
+        }
+    }
+
+    /// <summary>
+    /// Downloads a WPD object by its object ID to a stream.
+    /// Only works when <see cref="IsWpdTransport"/> is true.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public Task DownloadWpdObjectAsync(string objectId, Stream destination, CancellationToken ct = default)
+    {
+        if (_transport is not WpdPtpTransport wpd)
+            throw new InvalidOperationException("Not connected via WPD");
+        return wpd.DownloadObjectAsync(objectId, destination, ct);
+    }
+
+    /// <summary>Gets the original filename of a WPD object.</summary>
+    [SupportedOSPlatform("windows")]
+    public string? GetWpdObjectFileName(string objectId)
+    {
+        return _transport is WpdPtpTransport wpd ? wpd.GetObjectFileName(objectId) : null;
+    }
+
+    /// <summary>
+    /// Enumerates all objects (files) on the camera via WPD content API.
+    /// Returns list of (objectId, fileName) pairs.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public List<(string ObjectId, string? FileName)> EnumerateWpdObjects(bool forceRefresh = false)
+    {
+        if (_transport is not WpdPtpTransport wpd)
+            return [];
+        return wpd.EnumerateObjects(forceRefresh);
     }
 
     public async ValueTask DisposeAsync()

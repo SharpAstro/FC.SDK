@@ -29,6 +29,31 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         return EdsError.OK;
     }
 
+    /// <summary>
+    /// Opens a PTP session without Canon remote/event mode.
+    /// Standard PTP commands (InitiateCapture) work; Canon vendor commands (RemoteRelease) do not.
+    /// </summary>
+    internal async Task<EdsError> OpenNoRemoteModeAsync(CancellationToken ct = default)
+    {
+        var resp = await ptp.SendCommandAsync(PtpOperationCode.OpenSession, ct, SessionId);
+        return resp.ToEdsError();
+    }
+
+    /// <summary>
+    /// Standard PTP InitiateCapture (0x100E). Camera takes a picture using its current settings.
+    /// </summary>
+    internal async Task<EdsError> InitiateCaptureAsync(CancellationToken ct = default)
+    {
+        var resp = await ptp.SendCommandAsync(PtpOperationCode.InitiateCapture, ct, 0u, 0u);
+        return resp.ToEdsError();
+    }
+
+    internal async Task<EdsError> SetRemoteModeAsync(uint mode, CancellationToken ct = default)
+    {
+        var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonSetRemoteMode, ct, mode);
+        return resp.ToEdsError();
+    }
+
     internal async Task<EdsError> CloseAsync(CancellationToken ct = default)
     {
         // Disable remote mode

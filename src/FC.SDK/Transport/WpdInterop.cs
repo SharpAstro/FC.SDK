@@ -18,6 +18,24 @@ internal static partial class WpdInterop
     internal static readonly Guid WPD_COMMAND_MTP_EXT = new("4d545058-1a2e-4106-a357-771e0819fc56");
     internal static readonly Guid WPD_CLIENT_INFO = new("204D9F0C-2292-4080-9F42-40664E70F859");
 
+    // WPD object property GUIDs
+    internal static readonly Guid WPD_OBJECT_PROPERTIES = new("EF6B490D-5CD8-437A-AFFC-DA8B60EE4A3C");
+    internal static readonly Guid WPD_EVENT_PROPERTIES = new("15AB1953-F817-4FEF-A921-5676E838F6E0");
+    // WPD_RESOURCE_DEFAULT — {E81E79BE-34F0-41BF-B53F-F1A06AE87842}.0
+    internal static readonly Guid WPD_RESOURCE_DEFAULT_FMTID = new("E81E79BE-34F0-41BF-B53F-F1A06AE87842");
+    internal static readonly PropertyKey WPD_RESOURCE_DEFAULT = new() { fmtid = WPD_RESOURCE_DEFAULT_FMTID, pid = 0 };
+    // WPD_OBJECT_NAME pid=4, WPD_OBJECT_CONTENT_TYPE pid=7, WPD_OBJECT_SIZE pid=11
+    internal const uint PID_OBJECT_NAME = 4;
+    internal const uint PID_OBJECT_CONTENT_TYPE = 7;
+    internal const uint PID_OBJECT_SIZE = 11;
+    internal const uint PID_OBJECT_ORIGINAL_FILE_NAME = 12;
+    internal const uint PID_OBJECT_ID = 2;
+    // WPD_EVENT_OBJECT_CREATION_COOKIE pid=unused, WPD_EVENT_PARAMETER_PNP_DEVICE_ID pid=2
+    internal const uint PID_EVENT_PARAMETER_OBJECT_PARENT_PERSISTENT_UNIQUE_ID = 7;
+
+    // STGM_READ for GetStream
+    internal const uint STGM_READ = 0x00000000;
+
     // Common property PIDs
     internal const uint PID_COMMAND_CATEGORY = 1001;
     internal const uint PID_COMMAND_ID = 1002;
@@ -225,6 +243,83 @@ internal partial interface IWpdPropVariantCollection
     [PreserveSig] int RemoveAt(uint dwIndex);
 }
 
+// IPortableDeviceContent — {6a96ed84-7c73-4480-9938-bf5af477d426}
+[GeneratedComInterface]
+[Guid("6a96ed84-7c73-4480-9938-bf5af477d426")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal partial interface IWpdContent
+{
+    // 0: EnumObjects
+    [PreserveSig] int EnumObjects(uint dwFlags, [MarshalAs(UnmanagedType.LPWStr)] string pszParentObjectID, nint pFilter, out nint ppEnum);
+    // 1: Properties
+    [PreserveSig] int Properties(out nint ppProperties);
+    // 2: Transfer
+    [PreserveSig] int Transfer(out nint ppResources);
+    // 3: CreateObjectWithPropertiesOnly
+    [PreserveSig] int CreateObjectWithPropertiesOnly(IWpdValues pValues, [MarshalAs(UnmanagedType.LPWStr)] out string ppszObjectID);
+    // 4: CreateObjectWithPropertiesAndData
+    [PreserveSig] int CreateObjectWithPropertiesAndData(IWpdValues pValues, out nint ppData, out uint pdwOptimalWriteBufferSize, [MarshalAs(UnmanagedType.LPWStr)] out string ppszCookie);
+    // 5: Delete
+    [PreserveSig] int Delete(uint dwOptions, nint pObjectIDs, out nint ppResults);
+    // 6: GetObjectIDsFromPersistentUniqueIDs
+    [PreserveSig] int GetObjectIDsFromPersistentUniqueIDs(nint pPersistentUniqueIDs, out nint ppObjectIDs);
+    // 7: Cancel
+    [PreserveSig] int Cancel();
+    // 8: Move
+    [PreserveSig] int Move(nint pObjectIDs, [MarshalAs(UnmanagedType.LPWStr)] string pszDestinationFolderObjectID, out nint ppResults);
+    // 9: Copy
+    [PreserveSig] int Copy(nint pObjectIDs, [MarshalAs(UnmanagedType.LPWStr)] string pszDestinationFolderObjectID, out nint ppResults);
+}
+
+// IPortableDeviceProperties — {7f6d695c-03df-4439-a809-59266beee3a6}
+[GeneratedComInterface]
+[Guid("7f6d695c-03df-4439-a809-59266beee3a6")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal partial interface IWpdProperties
+{
+    // 0: GetSupportedProperties
+    [PreserveSig] int GetSupportedProperties([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, out nint ppKeys);
+    // 1: GetPropertyAttributes
+    [PreserveSig] int GetPropertyAttributes([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, in PropertyKey key, out IWpdValues? ppAttributes);
+    // 2: GetValues
+    [PreserveSig] int GetValues([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, nint pKeys, out IWpdValues? ppValues);
+    // 3: SetValues
+    [PreserveSig] int SetValues([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, IWpdValues pValues, out IWpdValues? ppResults);
+    // 4: Delete
+    [PreserveSig] int Delete([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, nint pKeys);
+    // 5: Cancel
+    [PreserveSig] int Cancel();
+}
+
+// IPortableDeviceResources — {fd8878ac-d250-43ba-b2a5-e75cee4260d2}
+[GeneratedComInterface]
+[Guid("fd8878ac-d250-43ba-b2a5-e75cee4260d2")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal partial interface IWpdResources
+{
+    // 0: GetSupportedResources
+    [PreserveSig] int GetSupportedResources([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, out nint ppKeys);
+    // 1: GetResourceAttributes
+    [PreserveSig] int GetResourceAttributes([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, in PropertyKey key, out IWpdValues? ppResourceAttributes);
+    // 2: GetStream
+    [PreserveSig] int GetStream([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, in PropertyKey key, uint dwMode, out uint pdwOptimalBufferSize, out nint ppStream);
+    // 3: Delete
+    [PreserveSig] int Delete([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, nint pKeys);
+    // 4: Cancel
+    [PreserveSig] int Cancel();
+    // 5: CreateResource
+    [PreserveSig] int CreateResource(IWpdValues pResourceAttributes, out nint ppData, out uint pdwOptimalWriteBufferSize, [MarshalAs(UnmanagedType.LPWStr)] out string ppszCookie);
+}
+
+// IPortableDeviceEventCallback — {a8792a31-f385-493c-a893-40f64eb45f6e}
+[GeneratedComInterface]
+[Guid("a8792a31-f385-493c-a893-40f64eb45f6e")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal partial interface IWpdEventCallback
+{
+    [PreserveSig] int OnEvent(IWpdValues pEventParameters);
+}
+
 // IPortableDevice — {625e2df8-6392-4cf0-9ad1-3cfa5f17775c}
 [GeneratedComInterface]
 [Guid("625e2df8-6392-4cf0-9ad1-3cfa5f17775c")]
@@ -236,7 +331,7 @@ internal partial interface IWpdDevice
     // 1: SendCommand
     [PreserveSig] int SendCommand(uint dwFlags, IWpdValues pParameters, out IWpdValues? ppResults);
     // 2: Content
-    [PreserveSig] int Content(out nint ppContent);
+    [PreserveSig] int Content(out IWpdContent? ppContent);
     // 3: Capabilities
     [PreserveSig] int Capabilities(out nint ppCapabilities);
     // 4: Cancel
