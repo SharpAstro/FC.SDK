@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using FC.SDK.Transport;
 
 namespace FC.SDK.Protocol;
@@ -57,8 +58,15 @@ internal sealed class PtpSession(IPtpTransport transport) : IAsyncDisposable
     {
         if (OperatingSystem.IsWindows() && transport is WpdPtpTransport wpd)
         {
-            var (respCode, respParams) = await wpd.ExecuteCommandWriteDataAsync((ushort)opCode, @params, data.ToArray(), ct);
-            return WpdToResponse(respCode, respParams);
+            try
+            {
+                var (respCode, respParams) = await wpd.ExecuteCommandWriteDataAsync((ushort)opCode, @params, data.ToArray(), ct);
+                return WpdToResponse(respCode, respParams);
+            }
+            catch (COMException)
+            {
+                return new PtpResponse { Code = PtpResponseCode.GeneralError };
+            }
         }
 
         await _lock.WaitAsync(ct);
@@ -107,8 +115,15 @@ internal sealed class PtpSession(IPtpTransport transport) : IAsyncDisposable
     {
         if (OperatingSystem.IsWindows() && transport is WpdPtpTransport wpd)
         {
-            var (respCode, respParams, data) = await wpd.ExecuteCommandReadDataAsync((ushort)opCode, @params, ct);
-            return (WpdToResponse(respCode, respParams), data);
+            try
+            {
+                var (respCode, respParams, data) = await wpd.ExecuteCommandReadDataAsync((ushort)opCode, @params, ct);
+                return (WpdToResponse(respCode, respParams), data);
+            }
+            catch (COMException)
+            {
+                return (new PtpResponse { Code = PtpResponseCode.GeneralError }, []);
+            }
         }
 
         await _lock.WaitAsync(ct);

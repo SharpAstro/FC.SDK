@@ -6,7 +6,6 @@ Console.WriteLine();
 
 // Try WPD first (Windows, no driver swap), then USB
 CanonCamera? camera = null;
-string transport;
 
 if (OperatingSystem.IsWindows())
 {
@@ -15,7 +14,6 @@ if (OperatingSystem.IsWindows())
     {
         Console.WriteLine($"  Found: {friendlyName}");
         camera = CanonCamera.ConnectWpd(deviceId);
-        transport = "WPD";
         break;
     }
 }
@@ -27,7 +25,6 @@ if (camera is null)
     {
         Console.WriteLine($"  Found: {usb.Product} (SN={usb.SerialNumber})");
         camera = CanonCamera.ConnectUsb(usb);
-        transport = "USB";
         break;
     }
 }
@@ -49,15 +46,15 @@ Console.WriteLine($"Connected! DeviceId={camera.DeviceId}");
 
 // Read current ISO
 var (isoErr, isoVal) = await camera.GetPropertyAsync(EdsPropertyId.ISOSpeed);
-Console.WriteLine($"Current ISO: 0x{isoVal:X4} (err={isoErr})");
+Console.WriteLine($"GetProperty ISO: err={isoErr} val=0x{isoVal:X4}");
 
-// Set ISO 800 (0x60)
-Console.WriteLine("Setting ISO 800...");
-await camera.SetPropertyAsync(EdsPropertyId.ISOSpeed, 0x00000060);
+// Try SetProperty ISO 800
+var setResult = await camera.SetPropertyAsync(EdsPropertyId.ISOSpeed, 0x00000060);
+Console.WriteLine($"SetProperty ISO 800: {setResult}");
 
-// Enable mirror lockup
-Console.WriteLine("Enabling mirror lockup...");
-await camera.EnableMirrorLockupAsync();
+// Try mirror lockup
+var (mluErr, mluSetting) = await camera.GetMirrorUpSettingAsync();
+Console.WriteLine($"Mirror lockup: err={mluErr} setting={mluSetting}");
 
 // Set up object download handler
 var downloadTcs = new TaskCompletionSource<uint>();
@@ -68,36 +65,34 @@ camera.ObjectAdded += (_, e) =>
 };
 camera.StartEventPolling();
 
-// Take a 10s bulb exposure
-Console.WriteLine("Starting 10s bulb exposure...");
-await camera.BulbStartAsync();
-await Task.Delay(TimeSpan.FromSeconds(10));
-await camera.BulbEndAsync();
-Console.WriteLine("Exposure complete, waiting for image...");
+// Try TakePicture (no-data command, should work via WPD)
+Console.WriteLine("Taking picture (Tv mode)...");
+var takeResult = await camera.TakePictureAsync();
+Console.WriteLine($"TakePicture: {takeResult}");
 
-// Wait for the image with timeout
-using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-try
+if (takeResult is EdsError.OK)
 {
-    var handle = await downloadTcs.Task.WaitAsync(cts.Token);
-
-    // Download
-    var outputPath = Path.Combine(Environment.CurrentDirectory, $"canon_test_{DateTime.Now:yyyyMMdd_HHmmss}.cr2");
-    await using (var fs = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
+    Console.WriteLine("Waiting for image...");
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+    try
     {
-        await camera.DownloadAsync(handle, fs);
+        var handle = await downloadTcs.Task.WaitAsync(cts.Token);
+        var outputPath = Path.Combine(Environment.CurrentDirectory, $"canon_test_{DateTime.Now:yyyyMMdd_HHmmss}.cr2");
+        await using (var fs = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
+        {
+            await camera.DownloadAsync(handle, fs);
+        }
+        await camera.TransferCompleteAsync(handle);
+        Console.WriteLine($"Image saved: {outputPath}");
     }
-    await camera.TransferCompleteAsync(handle);
-    Console.WriteLine($"Image saved: {outputPath}");
-}
-catch (OperationCanceledException)
-{
-    Console.WriteLine("Timed out waiting for image.");
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine("Timed out waiting for image.");
+    }
 }
 
 // Cleanup
 await camera.StopEventPollingAsync();
-await camera.DisableMirrorLockupAsync();
 await camera.CloseSessionAsync();
 await camera.DisposeAsync();
 Console.WriteLine("Done.");
