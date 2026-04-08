@@ -38,6 +38,11 @@ await camera.BulbStartAsync();
 await Task.Delay(TimeSpan.FromSeconds(30));
 await camera.BulbEndAsync();
 
+// Mirror lockup (reduces vibration for long exposures)
+await camera.EnableMirrorLockupAsync();
+// ... shoot ...
+await camera.DisableMirrorLockupAsync();
+
 // Events
 camera.ObjectAdded += (s, e) => Console.WriteLine($"New image: {e.ObjectHandle}");
 camera.StartEventPolling();

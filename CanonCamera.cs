@@ -87,6 +87,18 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<EdsError> BulbEndAsync(CancellationToken ct = default) =>
         _canon.BulbEndAsync(ct);
 
+    public Task<EdsError> EnableMirrorLockupAsync(CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.MirrorUpSetting, (uint)EdsMirrorUpSetting.On, ct);
+
+    public Task<EdsError> DisableMirrorLockupAsync(CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.MirrorUpSetting, (uint)EdsMirrorUpSetting.Off, ct);
+
+    public async Task<(EdsError Error, EdsMirrorLockupState State)> GetMirrorLockupStateAsync(CancellationToken ct = default)
+    {
+        var (err, val) = await GetPropertyAsync(EdsPropertyId.MirrorLockUpState, ct);
+        return (err, (EdsMirrorLockupState)val);
+    }
+
     public Task<EdsError> DownloadAsync(uint objectHandle, Stream destination, CancellationToken ct = default) =>
         _canon.GetObjectAsync(objectHandle, destination, ct);
 

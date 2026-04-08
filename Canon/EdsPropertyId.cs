@@ -105,6 +105,19 @@ public enum EdsPropertyId : uint
     Evf_VisibleRect = 0x01000546,
 }
 
+public enum EdsMirrorLockupState : uint
+{
+    Disable = 0,
+    Enable = 1,
+    DuringShooting = 2,
+}
+
+public enum EdsMirrorUpSetting : uint
+{
+    Off = 0,
+    On = 1,
+}
+
 [Flags]
 public enum EdsEvfOutputDevice : uint
 {

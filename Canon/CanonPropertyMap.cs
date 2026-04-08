@@ -26,6 +26,7 @@ internal static class CanonPropertyMap
             [EdsPropertyId.Evf_OutputDevice] = (0xD1B0, 4),
             [EdsPropertyId.Evf_Mode] = (0xD1B1, 4),
             [EdsPropertyId.MirrorLockUpState] = (0xD1BF, 4),
+            [EdsPropertyId.MirrorUpSetting] = (0xD1C1, 4),
             [EdsPropertyId.Artist] = (0xD1D0, 4),
             [EdsPropertyId.Copyright] = (0xD1D1, 4),
         }.ToFrozenDictionary();
