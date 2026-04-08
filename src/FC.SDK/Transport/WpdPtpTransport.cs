@@ -192,6 +192,46 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         return results!;
     }
 
+    /// <summary>Sends a raw WPD MTP EXT command and dumps the result properties.</summary>
+    internal string TestMtpExtCommand(uint commandPid)
+    {
+        var cmd = CreateValues();
+        cmd.SetGuidValue(WpdInterop.CommonKey(WpdInterop.PID_COMMAND_CATEGORY), WpdInterop.WPD_COMMAND_MTP_EXT);
+        cmd.SetUnsignedIntegerValue(WpdInterop.CommonKey(WpdInterop.PID_COMMAND_ID), commandPid);
+
+        var results = SendWpdCommand(cmd);
+        results.GetCount(out uint propCount);
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"props={propCount}");
+
+        results.GetErrorValue(WpdInterop.CommonKey(WpdInterop.PID_HRESULT), out int hresult);
+        sb.AppendLine($"  HRESULT=0x{hresult:X8}");
+
+        // Try to read vendor opcodes (returned as IPortableDevicePropVariantCollection)
+        int hr = results.GetIPortableDevicePropVariantCollectionValue(
+            WpdInterop.MtpExtKey(1001), out var opcodes);
+        if (hr >= 0 && opcodes is not null)
+        {
+            opcodes.GetCount(out uint opCount);
+            sb.AppendLine($"  Vendor opcodes: {opCount}");
+            for (uint i = 0; i < Math.Min(opCount, 50); i++)
+            {
+                opcodes.GetAt(i, out PropVariant pv);
+                sb.AppendLine($"    0x{pv.AsUInt32:X4}");
+            }
+        }
+
+        // Try to read string (vendor extension description)
+        hr = results.GetStringValue(WpdInterop.MtpExtKey(1001), out var desc);
+        if (hr >= 0 && desc is not null)
+        {
+            sb.AppendLine($"  Description: {desc}");
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
     private const int E_ELEMENT_NOT_FOUND = unchecked((int)0x80070490);
 
     private static void CheckHResult(IWpdValues results)

@@ -1,7 +1,7 @@
 using FC.SDK;
 using FC.SDK.Canon;
 
-Console.WriteLine("FC.SDK — TakePicture → GetEvent → Download test");
+Console.WriteLine("FC.SDK — WPD_COMMAND_MTP_EXT_GET_SUPPORTED_VENDOR_OPCODES test");
 
 CanonCamera? camera = null;
 if (OperatingSystem.IsWindows())
@@ -15,46 +15,33 @@ if (OperatingSystem.IsWindows())
 }
 if (camera is null) { Console.WriteLine("No camera."); return 1; }
 
-var result = await camera.OpenSessionAsync();
-if (result is not EdsError.OK) { Console.WriteLine($"OpenSession: {result}"); return 1; }
-Console.WriteLine("Connected with remote mode!");
+await camera.ConnectTransportAsync();
+Console.WriteLine("Connected (no PTP session)");
 
-// Drain initial events
-Console.WriteLine("\nGetEvent (initial drain):");
-var evt1 = await camera.TestVendorDataReadAsync(0x9116);
-Console.WriteLine($"  {evt1}");
+// Query supported vendor opcodes — PID 11
+Console.WriteLine("\nGET_SUPPORTED_VENDOR_OPCODES (pid=11):");
+Console.WriteLine(camera.TestWpdMtpExtCommand(11));
 
-// Take picture
-Console.WriteLine("\nTaking picture...");
-var takeResult = await camera.TakePictureAsync();
-Console.WriteLine($"TakePicture: {takeResult}");
+// Query vendor extension description — PID 18
+Console.WriteLine("\nGET_VENDOR_EXTENSION_DESCRIPTION (pid=18):");
+Console.WriteLine(camera.TestWpdMtpExtCommand(18));
 
-if (takeResult is EdsError.OK)
+// Also test: standard PTP GetDevicePropValue for various props
+Console.WriteLine("\n--- Standard PTP properties ---");
+(ushort code, string name)[] props = [
+    (0x5001, "BatteryLevel"),
+    (0x5003, "ImageSize"),
+    (0xD101, "Canon Aperture"),
+    (0xD102, "Canon ShutterSpeed"),
+    (0xD103, "Canon ISO"),
+    (0xD104, "Canon ExpComp"),
+];
+foreach (var (code, name) in props)
 {
-    // Wait for camera to process
-    Console.WriteLine("Waiting 3s for camera...");
-    await Task.Delay(3000);
-
-    // Try GetEvent — should now have ObjectAdded
-    Console.WriteLine("\nGetEvent (after TakePicture):");
-    var evt2 = await camera.TestVendorDataReadAsync(0x9116);
-    Console.WriteLine($"  {evt2}");
-
-    // Try multiple times
-    for (int i = 0; i < 5; i++)
-    {
-        await Task.Delay(1000);
-        var evt = await camera.TestVendorDataReadAsync(0x9116);
-        Console.WriteLine($"  Poll {i+1}: {evt}");
-        if (evt.Contains("dataLen=") && !evt.Contains("dataLen=0"))
-        {
-            Console.WriteLine("  *** GOT EVENT DATA! ***");
-            break;
-        }
-    }
+    var r = await camera.TestStandardDataReadAsync(0x1015, code);
+    Console.WriteLine($"  {name} (0x{code:X4}): {r}");
 }
 
-await camera.CloseSessionAsync();
 await camera.DisposeAsync();
 Console.WriteLine("Done.");
 return 0;

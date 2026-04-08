@@ -344,6 +344,15 @@ public sealed class CanonCamera : IAsyncDisposable
         }
     }
 
+    /// <summary>Queries WPD MTP EXT supported vendor opcodes or extension description.</summary>
+    [SupportedOSPlatform("windows")]
+    public string TestWpdMtpExtCommand(uint commandPid)
+    {
+        if (_transport is not WpdPtpTransport wpd)
+            return "Not WPD transport";
+        return wpd.TestMtpExtCommand(commandPid);
+    }
+
     /// <summary>Sends a raw PTP no-data command with optional parameters.</summary>
     public async Task<EdsError> SendRawCommandAsync(ushort opCode, params uint[] @params)
     {
