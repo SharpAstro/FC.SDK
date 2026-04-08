@@ -1,6 +1,7 @@
 using FC.SDK.Canon;
 using FC.SDK.Protocol;
 using FC.SDK.Transport;
+using PtpOperationCode = FC.SDK.Protocol.PtpOperationCode;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Runtime.Versioning;
@@ -305,6 +306,13 @@ public sealed class CanonCamera : IAsyncDisposable
                 StateChanged?.Invoke(this, new CanonStateChangedEventArgs(evt.Type, evt.Param1));
                 break;
         }
+    }
+
+    /// <summary>Sends a raw PTP no-data command with optional parameters.</summary>
+    public async Task<EdsError> SendRawCommandAsync(ushort opCode, params uint[] @params)
+    {
+        var resp = await _ptp.SendCommandAsync((PtpOperationCode)opCode, default, @params);
+        return resp.ToEdsError();
     }
 
     // --- WPD Content API (hybrid: WPD events + downloads when MTP EXT data-phase fails) ---

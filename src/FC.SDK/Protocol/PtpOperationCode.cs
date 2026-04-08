@@ -43,6 +43,7 @@ internal enum PtpOperationCode : ushort
     CanonTerminateViewfinder = 0x9152,
     CanonGetViewfinderData = 0x9153,
     CanonDriveLens = 0x9155,
+    CanonChangeUSBProtocol = 0x901F,
     CanonZoom = 0x9158,
     CanonGetObjectInfo64 = 0x9170,
     CanonGetObject64 = 0x9171,
