@@ -105,6 +105,12 @@ public sealed class CanonCamera : IAsyncDisposable
         return (err, (EdsMirrorLockupState)val);
     }
 
+    /// <summary>
+    /// Drives the lens focus motor by the specified step. Requires live view to be active.
+    /// </summary>
+    public Task<EdsError> DriveLensAsync(EdsDriveLensStep step, CancellationToken ct = default) =>
+        _canon.DriveLensAsync(step, ct);
+
     public Task<EdsError> DownloadAsync(uint objectHandle, Stream destination, CancellationToken ct = default) =>
         _canon.GetObjectAsync(objectHandle, destination, ct);
 

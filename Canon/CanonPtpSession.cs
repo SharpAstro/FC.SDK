@@ -95,6 +95,12 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         return err;
     }
 
+    internal async Task<EdsError> DriveLensAsync(EdsDriveLensStep step, CancellationToken ct = default)
+    {
+        var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonDriveLens, ct, (uint)step);
+        return resp.ToEdsError();
+    }
+
     internal async Task<EdsError> InitiateViewfinderAsync(CancellationToken ct = default)
     {
         var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonInitiateViewfinder, ct);

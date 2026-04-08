@@ -105,6 +105,16 @@ public enum EdsPropertyId : uint
     Evf_VisibleRect = 0x01000546,
 }
 
+public enum EdsDriveLensStep : uint
+{
+    NearSmall = 0x0001,
+    NearMedium = 0x0002,
+    NearLarge = 0x0003,
+    FarSmall = 0x8001,
+    FarMedium = 0x8002,
+    FarLarge = 0x8003,
+}
+
 public enum EdsMirrorLockupState : uint
 {
     Disable = 0,
