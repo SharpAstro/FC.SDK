@@ -5,5 +5,6 @@ public readonly record struct UsbDeviceInfo(
     ushort ProductId,
     string Manufacturer,
     string Product,
-    string SerialNumber
+    string SerialNumber,
+    string DevicePath
 );

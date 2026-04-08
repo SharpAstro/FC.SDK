@@ -117,7 +117,8 @@ internal sealed class UsbPtpTransport : IPtpTransport
                 (ushort)reg.Pid,
                 mfg?.ToString() ?? "Canon",
                 desc?.ToString() ?? $"Canon Camera (PID={reg.Pid:X4})",
-                serial
+                serial,
+                reg.DevicePath
             );
         }
     }
