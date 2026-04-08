@@ -105,6 +105,12 @@ public sealed class CanonCamera : IAsyncDisposable
         return (err, (EdsMirrorLockupState)val);
     }
 
+    public async Task<(EdsError Error, EdsMirrorUpSetting Setting)> GetMirrorUpSettingAsync(CancellationToken ct = default)
+    {
+        var (err, val) = await GetPropertyAsync(EdsPropertyId.MirrorUpSetting, ct);
+        return (err, (EdsMirrorUpSetting)val);
+    }
+
     /// <summary>
     /// Drives the lens focus motor by the specified step. Requires live view to be active.
     /// </summary>
