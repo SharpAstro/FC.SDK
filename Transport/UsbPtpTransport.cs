@@ -9,6 +9,7 @@ internal sealed class UsbPtpTransport : IPtpTransport
     private const byte PtpInterfaceClass = 0x06;
 
     private readonly UsbDeviceFinder _finder;
+    private readonly string _deviceId;
     private UsbDevice? _device;
     private UsbEndpointReader? _bulkIn;
     private UsbEndpointWriter? _bulkOut;
@@ -16,14 +17,21 @@ internal sealed class UsbPtpTransport : IPtpTransport
 
     public bool IsConnected => _device?.IsOpen is true;
 
+    public string DeviceId => _deviceId;
+
     internal UsbPtpTransport(ushort vendorId, ushort productId)
     {
         _finder = new UsbDeviceFinder(vendorId, productId);
+        _deviceId = $"{vendorId:X4}:{productId:X4}";
     }
 
     internal UsbPtpTransport(UsbDeviceInfo info)
         : this(info.VendorId, info.ProductId)
     {
+        // Prefer serial number, fall back to device path, then VID:PID
+        _deviceId = !string.IsNullOrEmpty(info.SerialNumber) ? info.SerialNumber
+            : !string.IsNullOrEmpty(info.DevicePath) ? info.DevicePath
+            : $"{info.VendorId:X4}:{info.ProductId:X4}";
     }
 
     public Task ConnectAsync(CancellationToken ct = default)

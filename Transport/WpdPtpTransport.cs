@@ -12,6 +12,8 @@ internal sealed class WpdPtpTransport : IPtpTransport
 
     public bool IsConnected => _device is not null;
 
+    public string DeviceId => _deviceId;
+
     internal WpdPtpTransport(string deviceId)
     {
         _deviceId = deviceId;

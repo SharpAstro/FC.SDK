@@ -24,6 +24,15 @@ internal sealed class PtpIpTransport : IPtpTransport
 
     public bool IsConnected => _commandClient?.Connected is true;
 
+    /// <summary>
+    /// The responder GUID from the PTP/IP InitCommandAck handshake.
+    /// Typically derived from the camera's MAC address — stable across reboots.
+    /// Available after <see cref="ConnectAsync"/>.
+    /// </summary>
+    public Guid ResponderGuid { get; private set; }
+
+    public string DeviceId => ResponderGuid != Guid.Empty ? ResponderGuid.ToString("N") : _host;
+
     internal PtpIpTransport(string host, int port = PtpIpPort, string? clientName = null)
     {
         _host = host;
@@ -52,6 +61,12 @@ internal sealed class PtpIpTransport : IPtpTransport
             throw new IOException($"Expected InitCommandAck, got {ackType}");
 
         uint connectionNumber = BinaryPrimitives.ReadUInt32LittleEndian(ackBuf.AsSpan(8));
+
+        // Parse responder GUID (bytes 12–27) — typically MAC-derived, stable across reboots
+        if (ackLen >= 28)
+        {
+            ResponderGuid = new Guid(ackBuf.AsSpan(12, 16));
+        }
 
         // Step 3: Event connection
         _eventClient = new TcpClient();

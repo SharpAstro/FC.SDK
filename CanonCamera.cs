@@ -17,6 +17,12 @@ public sealed class CanonCamera : IAsyncDisposable
     public event EventHandler<CanonObjectAddedEventArgs>? ObjectAdded;
     public event EventHandler<CanonStateChangedEventArgs>? StateChanged;
 
+    /// <summary>
+    /// A stable device identifier. USB: serial number or device path. WiFi: responder GUID from PTP/IP handshake.
+    /// Available after <see cref="OpenSessionAsync"/>.
+    /// </summary>
+    public string DeviceId => _transport.DeviceId;
+
     private CanonCamera(IPtpTransport transport)
     {
         _transport = transport;
