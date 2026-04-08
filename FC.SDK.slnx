@@ -1,3 +1,4 @@
 <Solution>
-  <Project Path="FC.SDK.csproj" />
+  <Project Path="src/FC.SDK/FC.SDK.csproj" />
+  <Project Path="src/FC.SDK.Sample/FC.SDK.Sample.csproj" />
 </Solution>
