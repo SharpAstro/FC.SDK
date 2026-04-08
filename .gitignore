@@ -3,3 +3,6 @@ obj/
 *.user
 *.suo
 .vs/
+*.CR2
+*.cr2
+MISC
