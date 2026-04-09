@@ -18,6 +18,7 @@
 	<PublishRepositoryUrl>true</PublishRepositoryUrl>
 	<EmbedUntrackedSources>true</EmbedUntrackedSources>
 	<Description>Canon EOS camera control via PTP over USB and WiFi — pure managed C#, no EDSDK binary required</Description>
+	<PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
@@ -30,6 +31,7 @@
 
   <ItemGroup>
 	<None Include="license.txt" PackagePath="" Pack="True" />
+	<None Include="..\..\README.md" PackagePath="" Pack="True" />
   </ItemGroup>
 
   <ItemGroup>

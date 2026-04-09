@@ -30,11 +30,12 @@ await camera.SetISOAsync(EdsISOSpeed.ISO_800);
 await camera.SetShutterSpeedAsync(EdsTv.Tv_1_125);
 await camera.SetApertureAsync(EdsAv.Av_2_8);
 
-// Snap and download
+// Snap and download (auto-detects CR2, CR3, JPG)
 await camera.SetSaveToAsync(EdsSaveTo.Host);
 camera.ObjectAdded += async (s, e) =>
 {
-    await using var fs = File.Create("capture.cr2");
+    var (_, fileName) = await camera.GetObjectFileNameAsync(e.ObjectHandle);
+    await using var fs = File.Create(fileName ?? "capture.cr2");
     await camera.DownloadAsync(e.ObjectHandle, fs);
     await camera.TransferCompleteAsync(e.ObjectHandle);
 };
@@ -69,7 +70,7 @@ CanonCamera              (public async API)
 |---------|--------|-------------------|--------------------------|
 | Take picture | yes | yes | yes |
 | Bulb exposure | yes | yes | yes |
-| Download CR2/JPEG | yes | yes | yes |
+| Download CR2/CR3/JPEG | yes | yes | yes |
 | Live view (MJPEG) | yes | yes | yes |
 | Manual focus (DriveLens) | yes | yes | yes |
 | Read/write ISO, Tv, Av | yes | yes | yes |
@@ -79,7 +80,7 @@ CanonCamera              (public async API)
 | USB (LibUsbDotNet, cross-plat) | yes | no | Windows only |
 | WiFi (PTP/IP) | yes | no | yes |
 | Linux / macOS | yes (USB, WiFi) | no | no |
-| NativeAOT compatible | yes | no | n/a |
+| NativeAOT compatible | yes | yes | n/a |
 | Redistributable | MIT | LGPL | no (Canon license) |
 | Requires vendor binary | no | yes (EDSDK.dll) | yes (EDSDK.dll) |
 | Requires driver swap (Zadig) | WPD: no, USB: yes | n/a | no |

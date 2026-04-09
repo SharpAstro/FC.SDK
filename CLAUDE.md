@@ -64,16 +64,24 @@ Four layers, bottom-up:
 
 ## Canon PTP property codes
 
+All PTP property codes MUST be verified against [libgphoto2 ptp.h](https://github.com/gphoto/libgphoto2/blob/master/camlibs/ptp2/ptp.h) (`PTP_DPC_CANON_EOS_*` defines) before adding to `CanonPropertyMap`. Do not guess codes from EDSDK property IDs — the mapping is not sequential and many codes are unintuitive (e.g. 0xD14B is GPSLogCtrl, not NoiseReduction; 0xD1C1 is AloMode, not MirrorUpSetting).
+
 | PTP code | EdsPropertyId | Description |
 |----------|--------------|-------------|
 | 0xD101 | Av | Aperture |
 | 0xD102 | Tv | Shutter speed |
 | 0xD103 | ISOSpeed | ISO |
 | 0xD105 | AEMode | Shooting mode |
+| 0xD114 | AutoPowerOffSetting | Auto power-off timeout |
 | 0xD11C | SaveTo | Capture destination |
+| 0xD13A | MirrorUpSetting | MLU on/off |
+| 0xD178 | NoiseReduction | High ISO NR |
+| 0xD1AB | TempStatus | Sensor/body temperature |
 | 0xD1B0 | Evf_OutputDevice | Live view output |
+| 0xD1B2 | Evf_DepthOfFieldPreview | DoF preview in LV |
 | 0xD1BF | MirrorLockUpState | MLU state |
-| 0xD1C1 | MirrorUpSetting | MLU on/off |
+
+Long exposure noise reduction has NO direct PTP property on Canon — it is always a Custom Function. Use the `CanonCustomFunctionBlock` API.
 
 ## WPD transport internals
 

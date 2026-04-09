@@ -4,6 +4,7 @@ namespace FC.SDK.Canon;
 
 internal static class CanonPropertyMap
 {
+    // PTP codes verified against libgphoto2 ptp.h (PTP_DPC_CANON_EOS_*)
     private static readonly FrozenDictionary<EdsPropertyId, (ushort PtpCode, int Size)> _map =
         new Dictionary<EdsPropertyId, (ushort, int)>
         {
@@ -16,17 +17,25 @@ internal static class CanonPropertyMap
             [EdsPropertyId.MeteringMode] = (0xD107, 4),
             [EdsPropertyId.AFMode] = (0xD108, 4),
             [EdsPropertyId.WhiteBalance] = (0xD109, 4),
+            [EdsPropertyId.ColorTemperature] = (0xD10A, 4),
             [EdsPropertyId.ColorSpace] = (0xD10F, 4),
             [EdsPropertyId.PictureStyle] = (0xD110, 4),
             [EdsPropertyId.BatteryLevel] = (0xD111, 4),
             [EdsPropertyId.DateTime] = (0xD113, 4),
+            [EdsPropertyId.AutoPowerOffSetting] = (0xD114, 4),
             [EdsPropertyId.OwnerName] = (0xD115, 4),
+            [EdsPropertyId.AvailableShots] = (0xD11B, 4),
             [EdsPropertyId.SaveTo] = (0xD11C, 4),
+            [EdsPropertyId.AEBracket] = (0xD11D, 4),       // BracketMode in libgphoto2
             [EdsPropertyId.ImageQuality] = (0xD120, 4),
+            [EdsPropertyId.MirrorUpSetting] = (0xD13A, 4),
+            [EdsPropertyId.NoiseReduction] = (0xD178, 4),   // HighISONoiseReduction
+            [EdsPropertyId.TempStatus] = (0xD1AB, 4),
+            [EdsPropertyId.LensName] = (0xD1D8, 4),
             [EdsPropertyId.Evf_OutputDevice] = (0xD1B0, 4),
             [EdsPropertyId.Evf_Mode] = (0xD1B1, 4),
+            [EdsPropertyId.Evf_DepthOfFieldPreview] = (0xD1B2, 4),
             [EdsPropertyId.MirrorLockUpState] = (0xD1BF, 4),
-            [EdsPropertyId.MirrorUpSetting] = (0xD1C1, 4),
             [EdsPropertyId.Artist] = (0xD1D0, 4),
             [EdsPropertyId.Copyright] = (0xD1D1, 4),
         }.ToFrozenDictionary();

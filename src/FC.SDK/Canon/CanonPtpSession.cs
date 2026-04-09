@@ -230,6 +230,45 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         return resp.ToEdsError();
     }
 
+    /// <summary>
+    /// Queries Canon GetObjectInfo (0x9103) and returns the original filename (e.g. "IMG_1234.CR2" or "IMG_1234.CR3").
+    /// </summary>
+    internal async Task<(EdsError Error, string? FileName)> GetObjectInfoAsync(uint objectHandle, CancellationToken ct = default)
+    {
+        var (resp, data) = await ptp.SendCommandReceiveDataAsync(PtpOperationCode.CanonGetObjectInfo, ct, objectHandle);
+        if (!resp.IsSuccess)
+            return (resp.ToEdsError(), null);
+
+        // Canon ObjectInfo dataset (same layout as standard PTP ObjectInfo):
+        //   StorageID:u32, ObjectFormat:u16, ProtectionStatus:u16,
+        //   ObjectCompressedSize:u32, ThumbFormat:u16, ThumbCompressedSize:u32,
+        //   ThumbPixWidth:u32, ThumbPixHeight:u32, ImagePixWidth:u32, ImagePixHeight:u32,
+        //   ImageBitDepth:u32, ParentObject:u32, AssociationType:u16, AssociationDesc:u32,
+        //   SequenceNumber:u32, Filename (PTP string), ...
+        try
+        {
+            // Fixed portion = 4+2+2+4+2+4+4+4+4+4+4+4+2+4+4 = 52 bytes
+            const int filenameOffset = 52;
+            if (data.Length > filenameOffset)
+            {
+                var (fileName, _) = ReadPtpString(data, filenameOffset);
+                return (EdsError.OK, fileName);
+            }
+        }
+        catch { /* malformed — fall through */ }
+        return (EdsError.OK, null);
+    }
+
+    /// <summary>
+    /// Downloads the JPEG thumbnail for an object. Much faster than full CR2/CR3 download.
+    /// Uses standard PTP GetThumb (0x100A).
+    /// </summary>
+    internal async Task<(EdsError Error, byte[] JpegData)> GetThumbAsync(uint objectHandle, CancellationToken ct = default)
+    {
+        var (resp, data) = await ptp.SendCommandReceiveDataAsync(PtpOperationCode.GetThumb, ct, objectHandle);
+        return (resp.ToEdsError(), data);
+    }
+
     internal async Task<EdsError> GetObjectAsync(uint objectHandle, Stream destination, CancellationToken ct = default)
     {
         var (resp, data) = await ptp.SendCommandReceiveDataAsync(PtpOperationCode.CanonGetObject, ct, objectHandle);
@@ -243,6 +282,58 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
     internal async Task<EdsError> TransferCompleteAsync(uint objectHandle, CancellationToken ct = default)
     {
         var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonTransferComplete, ct, objectHandle);
+        return resp.ToEdsError();
+    }
+
+    /// <summary>Cancels an in-progress transfer. Use when a download is stuck or unwanted.</summary>
+    internal async Task<EdsError> CancelTransferAsync(uint objectHandle, CancellationToken ct = default)
+    {
+        var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonCancelTransfer, ct, objectHandle);
+        return resp.ToEdsError();
+    }
+
+    /// <summary>Resets a failed transfer so it can be retried.</summary>
+    internal async Task<EdsError> ResetTransferAsync(uint objectHandle, CancellationToken ct = default)
+    {
+        var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonResetTransfer, ct, objectHandle);
+        return resp.ToEdsError();
+    }
+
+    /// <summary>
+    /// Reads the packed Custom Function data block from the camera.
+    /// Canon stores C.Fn data as a device property in the 0xD1A0..0xD1AF range.
+    /// Tries 0xD1A0 first (common on most EOS bodies).
+    /// </summary>
+    internal async Task<(EdsError Error, CanonCustomFunctionBlock? Block)> GetCustomFunctionBlockAsync(CancellationToken ct = default)
+    {
+        // Canon C.Fn property codes vary by generation; 0xD1A0 is the most common
+        ushort[] cfnPropertyCodes = [0xD1A0, 0xD1A1, 0xD1A2];
+
+        foreach (var propCode in cfnPropertyCodes)
+        {
+            var (resp, data) = await ptp.SendCommandReceiveDataAsync(PtpOperationCode.GetDevicePropValue, ct, propCode);
+            if (resp.IsSuccess && data.Length >= 16)
+                return (EdsError.OK, CanonCustomFunctionBlock.Parse(data));
+        }
+
+        return (EdsError.DevicePropNotSupported, null);
+    }
+
+    /// <summary>
+    /// Writes a modified Custom Function data block back to the camera.
+    /// </summary>
+    internal async Task<EdsError> SetCustomFunctionBlockAsync(CanonCustomFunctionBlock block, CancellationToken ct = default)
+    {
+        // Write via Canon SetPropValue (0x9110) with the C.Fn property code.
+        // The data phase = [propcode:u32][cfn_block_bytes...]
+        // Try 0xD1A0 first.
+        ushort cfnPropCode = 0xD1A0;
+        var rawData = block.RawData;
+        var data = new byte[4 + rawData.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(data, cfnPropCode);
+        rawData.CopyTo(data, 4);
+
+        var resp = await ptp.SendCommandWithDataAsync(PtpOperationCode.CanonSetPropValue, data, ct);
         return resp.ToEdsError();
     }
 

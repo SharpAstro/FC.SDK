@@ -220,6 +220,19 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<EdsError> SetAFModeAsync(EdsAFMode mode, CancellationToken ct = default) =>
         SetPropertyAsync(EdsPropertyId.AFMode, (uint)mode, ct);
 
+    public Task<EdsError> SetHighIsoNRAsync(EdsHighIsoNR nr, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.NoiseReduction, (uint)nr, ct);
+
+    public Task<EdsError> SetColorTemperatureAsync(uint kelvin, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.ColorTemperature, kelvin, ct);
+
+    /// <summary>Sets the auto power-off timeout. Set to 0 to disable (keep camera awake for long sessions).</summary>
+    public Task<EdsError> SetAutoPowerOffAsync(uint seconds, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.AutoPowerOffSetting, seconds, ct);
+
+    public Task<EdsError> SetEvfDepthOfFieldPreviewAsync(EdsEvfDepthOfFieldPreview preview, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.Evf_DepthOfFieldPreview, (uint)preview, ct);
+
     // --- Typed property getters ---
 
     public async Task<(EdsError Error, EdsISOSpeed Value)> GetISOAsync(CancellationToken ct = default)
@@ -233,6 +246,28 @@ public sealed class CanonCamera : IAsyncDisposable
 
     public async Task<(EdsError Error, EdsAEMode Value)> GetAEModeAsync(CancellationToken ct = default)
     { var (e, v) = await GetPropertyAsync(EdsPropertyId.AEMode, ct); return (e, (EdsAEMode)v); }
+
+    public async Task<(EdsError Error, EdsHighIsoNR Value)> GetHighIsoNRAsync(CancellationToken ct = default)
+    { var (e, v) = await GetPropertyAsync(EdsPropertyId.NoiseReduction, ct); return (e, (EdsHighIsoNR)v); }
+
+    public async Task<(EdsError Error, uint Kelvin)> GetColorTemperatureAsync(CancellationToken ct = default) =>
+        await GetPropertyAsync(EdsPropertyId.ColorTemperature, ct);
+
+    /// <summary>Number of shots remaining at current quality/card capacity. Read-only.</summary>
+    public async Task<(EdsError Error, uint Shots)> GetAvailableShotsAsync(CancellationToken ct = default) =>
+        await GetPropertyAsync(EdsPropertyId.AvailableShots, ct);
+
+    /// <summary>Current auto power-off timeout in seconds. 0 = disabled.</summary>
+    public async Task<(EdsError Error, uint Seconds)> GetAutoPowerOffAsync(CancellationToken ct = default) =>
+        await GetPropertyAsync(EdsPropertyId.AutoPowerOffSetting, ct);
+
+    /// <summary>Sensor/body temperature status. Value encoding is camera-specific.</summary>
+    public async Task<(EdsError Error, uint Value)> GetTempStatusAsync(CancellationToken ct = default) =>
+        await GetPropertyAsync(EdsPropertyId.TempStatus, ct);
+
+    /// <summary>Current lens name string. Read-only. Returns raw uint — use GetDeviceInfo for string.</summary>
+    public async Task<(EdsError Error, uint Value)> GetLensNameRawAsync(CancellationToken ct = default) =>
+        await GetPropertyAsync(EdsPropertyId.LensName, ct);
 
     public async Task<EdsError> TakePictureAsync(CancellationToken ct = default)
     {
@@ -295,17 +330,54 @@ public sealed class CanonCamera : IAsyncDisposable
         return (err, (EdsMirrorUpSetting)val);
     }
 
+    // --- Custom Function block (older cameras) ---
+
+    /// <summary>
+    /// Reads the packed Custom Function data block from the camera.
+    /// On older bodies, settings like LENR and mirror lockup live here instead of as direct properties.
+    /// Use <see cref="CanonCustomFunctionId"/> for well-known function IDs.
+    /// </summary>
+    public async Task<(EdsError Error, CanonCustomFunctionBlock? Block)> GetCustomFunctionBlockAsync(CancellationToken ct = default) =>
+        await _canon.GetCustomFunctionBlockAsync(ct);
+
+    /// <summary>
+    /// Writes a modified Custom Function data block back to the camera.
+    /// Read the block first with <see cref="GetCustomFunctionBlockAsync"/>, modify via
+    /// <see cref="CanonCustomFunctionBlock.SetValue"/>, then write back.
+    /// </summary>
+    public Task<EdsError> SetCustomFunctionBlockAsync(CanonCustomFunctionBlock block, CancellationToken ct = default) =>
+        _canon.SetCustomFunctionBlockAsync(block, ct);
+
     /// <summary>
     /// Drives the lens focus motor by the specified step. Requires live view to be active.
     /// </summary>
     public Task<EdsError> DriveLensAsync(EdsDriveLensStep step, CancellationToken ct = default) =>
         _canon.DriveLensAsync(step, ct);
 
+    /// <summary>
+    /// Queries the camera for the original filename of a captured object (e.g. "IMG_1234.CR2", "IMG_1234.CR3").
+    /// Uses Canon GetObjectInfo (0x9103). Call after receiving an ObjectAdded event.
+    /// </summary>
+    public async Task<(EdsError Error, string? FileName)> GetObjectFileNameAsync(uint objectHandle, CancellationToken ct = default) =>
+        await _canon.GetObjectInfoAsync(objectHandle, ct);
+
+    /// <summary>Downloads the JPEG thumbnail for an object. Much faster than full CR2/CR3 download.</summary>
+    public async Task<(EdsError Error, byte[] JpegData)> GetThumbAsync(uint objectHandle, CancellationToken ct = default) =>
+        await _canon.GetThumbAsync(objectHandle, ct);
+
     public Task<EdsError> DownloadAsync(uint objectHandle, Stream destination, CancellationToken ct = default) =>
         _canon.GetObjectAsync(objectHandle, destination, ct);
 
     public async Task<EdsError> TransferCompleteAsync(uint objectHandle, CancellationToken ct = default) =>
         await _canon.TransferCompleteAsync(objectHandle, ct);
+
+    /// <summary>Cancels an in-progress transfer. Use when a download is stuck or unwanted.</summary>
+    public Task<EdsError> CancelTransferAsync(uint objectHandle, CancellationToken ct = default) =>
+        _canon.CancelTransferAsync(objectHandle, ct);
+
+    /// <summary>Resets a failed transfer so it can be retried.</summary>
+    public Task<EdsError> ResetTransferAsync(uint objectHandle, CancellationToken ct = default) =>
+        _canon.ResetTransferAsync(objectHandle, ct);
 
     public async Task<EdsError> StartLiveViewAsync(CancellationToken ct = default)
     {

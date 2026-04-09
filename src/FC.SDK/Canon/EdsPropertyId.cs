@@ -42,6 +42,7 @@ public enum EdsPropertyId : uint
     AEBracket = 0x0000040E,
     FEBracket = 0x0000040F,
     ISOBracket = 0x00000410,
+    /// <summary>High ISO speed noise reduction. PTP 0xD178.</summary>
     NoiseReduction = 0x00000411,
     FlashOn = 0x00000412,
     RedEye = 0x00000413,

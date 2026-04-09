@@ -201,6 +201,7 @@ public enum EdsAFMode : uint
 }
 
 /// <summary>Canon white balance. Set via <see cref="EdsPropertyId.WhiteBalance"/>.</summary>
+/// <summary>Canon white balance. Set via <see cref="EdsPropertyId.WhiteBalance"/>.</summary>
 public enum EdsWhiteBalance : uint
 {
     Auto = 0,
@@ -212,4 +213,32 @@ public enum EdsWhiteBalance : uint
     Manual = 6,
     Shade = 8,
     ColorTemperature = 9,
+}
+
+/// <summary>Depth of field preview during live view. Set via <see cref="EdsPropertyId.Evf_DepthOfFieldPreview"/>.</summary>
+public enum EdsEvfDepthOfFieldPreview : uint
+{
+    Off = 0,
+    On = 1,
+}
+
+/// <summary>
+/// Long exposure noise reduction. Canon has no direct PTP property for this —
+/// it is always a Custom Function. Use <see cref="CanonCustomFunctionBlock"/> to read/write.
+/// Values: 0=Off, 1=Auto, 2=On.
+/// </summary>
+public enum EdsLongExposureNR : uint
+{
+    Off = 0,
+    Auto = 1,
+    On = 2,
+}
+
+/// <summary>High ISO speed noise reduction. PTP 0xD178.</summary>
+public enum EdsHighIsoNR : uint
+{
+    Standard = 0,
+    Low = 1,
+    Strong = 2,
+    Disable = 3,
 }
