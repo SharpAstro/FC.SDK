@@ -20,32 +20,38 @@ Canon's EDSDK is closed-source, non-redistributable, and Windows-only. FC.SDK im
 using FC.SDK;
 using FC.SDK.Canon;
 
-// Connect via WiFi
-await using var camera = CanonCamera.ConnectWifi("192.168.0.1");
+// Connect via WPD (Windows, zero-install)
+await using var camera = CanonCamera.ConnectWpd(deviceId);
 await camera.OpenSessionAsync();
+Console.WriteLine($"{camera.Model} — serial {camera.SerialNumber}, battery {camera.BatteryLevelPercent}%");
 
-// Set ISO and take a picture
-await camera.SetPropertyAsync(EdsPropertyId.ISOSpeed, 0x00000068); // ISO 800
+// Typed settings — no magic uint32s
+await camera.SetISOAsync(EdsISOSpeed.ISO_800);
+await camera.SetShutterSpeedAsync(EdsTv.Tv_1_125);
+await camera.SetApertureAsync(EdsAv.Av_2_8);
+
+// Snap and download
+await camera.SetSaveToAsync(EdsSaveTo.Host);
+camera.ObjectAdded += async (s, e) =>
+{
+    await using var fs = File.Create("capture.cr2");
+    await camera.DownloadAsync(e.ObjectHandle, fs);
+    await camera.TransferCompleteAsync(e.ObjectHandle);
+};
+camera.StartEventPolling();
 await camera.TakePictureAsync();
 
-// Live view
-await camera.StartLiveViewAsync();
-var (error, jpeg) = await camera.GetLiveViewFrameAsync();
-await camera.StopLiveViewAsync();
-
-// Bulb exposure
+// Bulb exposure (mode dial must be on B)
+await camera.SetMirrorLockupAsync(EdsMirrorUpSetting.On);
 await camera.BulbStartAsync();
-await Task.Delay(TimeSpan.FromSeconds(30));
+await Task.Delay(TimeSpan.FromSeconds(120));
 await camera.BulbEndAsync();
 
-// Mirror lockup (reduces vibration for long exposures)
-await camera.EnableMirrorLockupAsync();
-// ... shoot ...
-await camera.DisableMirrorLockupAsync();
-
-// Events
-camera.ObjectAdded += (s, e) => Console.WriteLine($"New image: {e.ObjectHandle}");
-camera.StartEventPolling();
+// Live view + manual focus
+await camera.StartLiveViewAsync();
+var (error, jpeg) = await camera.GetLiveViewFrameAsync();
+await camera.DriveLensAsync(EdsDriveLensStep.NearSmall);
+await camera.StopLiveViewAsync();
 ```
 
 ## Architecture
@@ -56,6 +62,29 @@ CanonCamera              (public async API)
     PtpSession           (transaction management, half-duplex lock)
       IPtpTransport      (WPD / USB / PTP-IP)
 ```
+
+## Feature Matrix
+
+| Feature | FC.SDK | Canon.EDSDK (.NET) | Canon EDSDK.dll (native) |
+|---------|--------|-------------------|--------------------------|
+| Take picture | yes | yes | yes |
+| Bulb exposure | yes | yes | yes |
+| Download CR2/JPEG | yes | yes | yes |
+| Live view (MJPEG) | yes | yes | yes |
+| Manual focus (DriveLens) | yes | yes | yes |
+| Read/write ISO, Tv, Av | yes | yes | yes |
+| Event polling (GetEvent) | yes | yes | yes |
+| Mirror lockup control | yes | yes | yes |
+| WPD (zero-install, Windows) | yes | no | no (uses mailslot IPC) |
+| USB (LibUsbDotNet, cross-plat) | yes | no | Windows only |
+| WiFi (PTP/IP) | yes | no | yes |
+| Linux / macOS | yes (USB, WiFi) | no | no |
+| NativeAOT compatible | yes | no | n/a |
+| Redistributable | MIT | LGPL | no (Canon license) |
+| Requires vendor binary | no | yes (EDSDK.dll) | yes (EDSDK.dll) |
+| Requires driver swap (Zadig) | WPD: no, USB: yes | n/a | no |
+
+**Canon.EDSDK** ([SharpAstro/Canon.EDSDK](https://github.com/SharpAstro/Canon.EDSDK)) is a .NET binding around Canon's native `EDSDK.dll`. It requires the vendor binary and only runs on Windows. FC.SDK reimplements the PTP protocol directly and needs no vendor DLLs.
 
 ## Supported Cameras
 
