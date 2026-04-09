@@ -114,20 +114,28 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
             return (endResp.ResponseCode, endResp.ResponseParams, []);
         }
 
-        // Step 2: Read data
-        var readCmd = CreateValues();
-        SetCommandKey(readCmd, WpdInterop.PID_READ_DATA);
-        readCmd.SetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), context);
-        readCmd.SetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_NUM_BYTES_TO_READ), totalSize);
-        readCmd.SetBufferValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_DATA), new byte[totalSize], totalSize);
+        // Step 2: Read data — always end transfer even on failure to avoid jamming the pipe
+        try
+        {
+            var readCmd = CreateValues();
+            SetCommandKey(readCmd, WpdInterop.PID_READ_DATA);
+            readCmd.SetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), context);
+            readCmd.SetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_NUM_BYTES_TO_READ), totalSize);
+            readCmd.SetBufferValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_DATA), new byte[totalSize], totalSize);
 
-        var readResults = SendWpdCommand(readCmd);
-        CheckHResult(readResults);
-        byte[] data = ExtractBuffer(readResults, totalSize);
+            var readResults = SendWpdCommand(readCmd);
+            CheckHResult(readResults);
+            byte[] data = ExtractBuffer(readResults, totalSize);
 
-        // Step 3: End transfer
-        var endResponse = EndTransfer(context);
-        return (endResponse.ResponseCode, endResponse.ResponseParams, data);
+            // Step 3: End transfer
+            var endResponse = EndTransfer(context);
+            return (endResponse.ResponseCode, endResponse.ResponseParams, data);
+        }
+        catch
+        {
+            try { EndTransfer(context); } catch { /* best effort */ }
+            throw;
+        }
     }
 
     private (ushort, uint[]) ExecuteWriteData(ushort opCode, uint[] @params, byte[] data)
@@ -143,18 +151,26 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         CheckHResult(results);
         results.GetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), out string context);
 
-        // Step 2: Write data
-        var writeCmd = CreateValues();
-        SetCommandKey(writeCmd, WpdInterop.PID_WRITE_DATA);
-        writeCmd.SetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), context);
-        writeCmd.SetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_NUM_BYTES_TO_WRITE), (uint)data.Length);
-        writeCmd.SetBufferValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_DATA), data, (uint)data.Length);
+        // Step 2: Write data — always end transfer even on failure
+        try
+        {
+            var writeCmd = CreateValues();
+            SetCommandKey(writeCmd, WpdInterop.PID_WRITE_DATA);
+            writeCmd.SetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), context);
+            writeCmd.SetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_NUM_BYTES_TO_WRITE), (uint)data.Length);
+            writeCmd.SetBufferValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_DATA), data, (uint)data.Length);
 
-        var writeResults = SendWpdCommand(writeCmd);
-        CheckHResult(writeResults);
+            var writeResults = SendWpdCommand(writeCmd);
+            CheckHResult(writeResults);
 
-        // Step 3: End transfer
-        return EndTransfer(context);
+            // Step 3: End transfer
+            return EndTransfer(context);
+        }
+        catch
+        {
+            try { EndTransfer(context); } catch { /* best effort */ }
+            throw;
+        }
     }
 
     private (ushort ResponseCode, uint[] ResponseParams) EndTransfer(string context)

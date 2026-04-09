@@ -75,7 +75,7 @@ CanonCamera              (public async API)
 | Read/write ISO, Tv, Av | yes | yes | yes |
 | Event polling (GetEvent) | yes | yes | yes |
 | Mirror lockup control | yes | yes | yes |
-| WPD (zero-install, Windows) | yes | no | no (uses mailslot IPC) |
+| WPD (zero-install, Windows) | yes | no (wraps EDSDK.dll) | internally, not exposed |
 | USB (LibUsbDotNet, cross-plat) | yes | no | Windows only |
 | WiFi (PTP/IP) | yes | no | yes |
 | Linux / macOS | yes (USB, WiFi) | no | no |
