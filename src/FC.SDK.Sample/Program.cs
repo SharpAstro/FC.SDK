@@ -1,7 +1,7 @@
 using FC.SDK;
 using FC.SDK.Canon;
 
-Console.WriteLine("FC.SDK — WPD_COMMAND_MTP_EXT_GET_SUPPORTED_VENDOR_OPCODES test");
+Console.WriteLine("FC.SDK — WPD Canon Camera Sample");
 
 CanonCamera? camera = null;
 if (OperatingSystem.IsWindows())
@@ -15,33 +15,66 @@ if (OperatingSystem.IsWindows())
 }
 if (camera is null) { Console.WriteLine("No camera."); return 1; }
 
-await camera.ConnectTransportAsync();
-Console.WriteLine("Connected (no PTP session)");
+Console.WriteLine("Opening session...");
+var err = await camera.OpenSessionAsync();
+Console.WriteLine($"OpenSession: {err}");
 
-// Query supported vendor opcodes — PID 11
-Console.WriteLine("\nGET_SUPPORTED_VENDOR_OPCODES (pid=11):");
-Console.WriteLine(camera.TestWpdMtpExtCommand(11));
+if (err is not EdsError.OK) { await camera.DisposeAsync(); return 1; }
+Console.WriteLine($"Battery: {camera.BatteryLevelPercent}%");
+Console.WriteLine($"Model: {camera.Model}  Serial: {camera.SerialNumber}");
 
-// Query vendor extension description — PID 18
-Console.WriteLine("\nGET_VENDOR_EXTENSION_DESCRIPTION (pid=18):");
-Console.WriteLine(camera.TestWpdMtpExtCommand(18));
+var (_, aeMode) = await camera.GetAEModeAsync();
+var (_, iso) = await camera.GetISOAsync();
+var (_, tv) = await camera.GetShutterSpeedAsync();
+var (_, av) = await camera.GetApertureAsync();
+Console.WriteLine($"Mode: {aeMode}  ISO: {iso}  Tv: {tv}  Av: {av}");
 
-// Also test: standard PTP GetDevicePropValue for various props
-Console.WriteLine("\n--- Standard PTP properties ---");
-(ushort code, string name)[] props = [
-    (0x5001, "BatteryLevel"),
-    (0x5003, "ImageSize"),
-    (0xD101, "Canon Aperture"),
-    (0xD102, "Canon ShutterSpeed"),
-    (0xD103, "Canon ISO"),
-    (0xD104, "Canon ExpComp"),
-];
-foreach (var (code, name) in props)
+err = await camera.SetSaveToAsync(EdsSaveTo.Host);
+Console.WriteLine($"SaveTo=Host: {err}");
+
+// Wait for ObjectAdded event after capture
+var objectTcs = new TaskCompletionSource<uint>();
+camera.ObjectAdded += (_, e) =>
 {
-    var r = await camera.TestStandardDataReadAsync(0x1015, code);
-    Console.WriteLine($"  {name} (0x{code:X4}): {r}");
+    Console.WriteLine($"  ObjectAdded: handle=0x{e.ObjectHandle:X8}");
+    objectTcs.TrySetResult(e.ObjectHandle);
+};
+
+// Start event polling (GetEvent 0x9116 — now works!)
+camera.StartEventPolling(TimeSpan.FromMilliseconds(200));
+
+// Take picture
+Console.WriteLine("\nTaking picture...");
+err = await camera.TakePictureAsync();
+Console.WriteLine($"TakePicture: {err}");
+if (err is not EdsError.OK) { await camera.StopEventPollingAsync(); await camera.CloseSessionAsync(); await camera.DisposeAsync(); return 1; }
+
+// Wait for the ObjectAdded event (timeout 10s)
+Console.WriteLine("Waiting for image...");
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+try
+{
+    var handle = await objectTcs.Task.WaitAsync(cts.Token);
+
+    // Download the image
+    var outPath = Path.Combine(Environment.CurrentDirectory, $"capture_{DateTime.Now:yyyyMMdd_HHmmss}.cr2");
+    Console.WriteLine($"Downloading to {outPath}...");
+    await using var fs = File.Create(outPath);
+    err = await camera.DownloadAsync(handle, fs);
+    Console.WriteLine($"Download: {err} ({fs.Length:N0} bytes)");
+
+    // Tell camera we're done
+    err = await camera.TransferCompleteAsync(handle);
+    Console.WriteLine($"TransferComplete: {err}");
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Timeout waiting for image event.");
 }
 
+await camera.StopEventPollingAsync();
+Console.WriteLine("\nClosing session...");
+await camera.CloseSessionAsync();
 await camera.DisposeAsync();
 Console.WriteLine("Done.");
 return 0;

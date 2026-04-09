@@ -5,4 +5,6 @@ obj/
 .vs/
 *.CR2
 *.cr2
+*.yml
 MISC
+rev/

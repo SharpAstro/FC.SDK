@@ -44,6 +44,18 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </summary>
     public string DeviceId => _transport.DeviceId;
 
+    /// <summary>
+    /// Standard PTP battery level (0–100%). Read on session open via standard PTP 0x1015/0x5001.
+    /// Works on all transports including WPD (no VendorExtID needed).
+    /// </summary>
+    public byte? BatteryLevelPercent => _canon.BatteryLevelPercent;
+
+    /// <summary>Camera serial number from PTP GetDeviceInfo. Available after session open.</summary>
+    public string? SerialNumber => _canon.SerialNumber;
+
+    /// <summary>Camera model name from PTP GetDeviceInfo. Available after session open.</summary>
+    public string? Model => _canon.Model;
+
     internal CanonCamera(IPtpTransport transport, ILogger<CanonCamera> logger)
     {
         _transport = transport;
@@ -182,6 +194,46 @@ public sealed class CanonCamera : IAsyncDisposable
         return result;
     }
 
+    // --- Typed property setters ---
+
+    public Task<EdsError> SetISOAsync(EdsISOSpeed iso, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.ISOSpeed, (uint)iso, ct);
+
+    public Task<EdsError> SetShutterSpeedAsync(EdsTv tv, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.Tv, (uint)tv, ct);
+
+    public Task<EdsError> SetApertureAsync(EdsAv av, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.Av, (uint)av, ct);
+
+    public Task<EdsError> SetSaveToAsync(EdsSaveTo target, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.SaveTo, (uint)target, ct);
+
+    public Task<EdsError> SetWhiteBalanceAsync(EdsWhiteBalance wb, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.WhiteBalance, (uint)wb, ct);
+
+    public Task<EdsError> SetDriveModeAsync(EdsDriveMode mode, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.DriveMode, (uint)mode, ct);
+
+    public Task<EdsError> SetMirrorLockupAsync(EdsMirrorUpSetting setting, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.MirrorUpSetting, (uint)setting, ct);
+
+    public Task<EdsError> SetAFModeAsync(EdsAFMode mode, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.AFMode, (uint)mode, ct);
+
+    // --- Typed property getters ---
+
+    public async Task<(EdsError Error, EdsISOSpeed Value)> GetISOAsync(CancellationToken ct = default)
+    { var (e, v) = await GetPropertyAsync(EdsPropertyId.ISOSpeed, ct); return (e, (EdsISOSpeed)v); }
+
+    public async Task<(EdsError Error, EdsTv Value)> GetShutterSpeedAsync(CancellationToken ct = default)
+    { var (e, v) = await GetPropertyAsync(EdsPropertyId.Tv, ct); return (e, (EdsTv)v); }
+
+    public async Task<(EdsError Error, EdsAv Value)> GetApertureAsync(CancellationToken ct = default)
+    { var (e, v) = await GetPropertyAsync(EdsPropertyId.Av, ct); return (e, (EdsAv)v); }
+
+    public async Task<(EdsError Error, EdsAEMode Value)> GetAEModeAsync(CancellationToken ct = default)
+    { var (e, v) = await GetPropertyAsync(EdsPropertyId.AEMode, ct); return (e, (EdsAEMode)v); }
+
     public async Task<EdsError> TakePictureAsync(CancellationToken ct = default)
     {
         _logger.LogDebug("Taking picture");
@@ -208,6 +260,11 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<EdsError> ReleaseShutterAsync(CancellationToken ct = default) =>
         _canon.RemoteReleaseOffAsync(0x01, ct);
 
+    /// <summary>
+    /// Starts a bulb exposure. Requires the physical mode dial set to B (Bulb).
+    /// Returns <see cref="EdsError.OperationRefused"/> if not in Bulb mode.
+    /// Call <see cref="BulbEndAsync"/> to finish the exposure.
+    /// </summary>
     public Task<EdsError> BulbStartAsync(CancellationToken ct = default)
     {
         _logger.LogDebug("Bulb start");

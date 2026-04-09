@@ -9,6 +9,16 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
     private const uint RemoteModeStandard = 1;
     private const uint EventModeStandard = 1;
 
+    /// <summary>
+    /// Standard PTP battery level (0x5001), readable via WPD MTP EXT.
+    /// </summary>
+    internal const ushort StandardPtpBatteryLevel = 0x5001;
+
+    /// <summary>
+    /// Properties read on session open. Updated by <see cref="RefreshPropertiesAsync"/>.
+    /// </summary>
+    internal byte? BatteryLevelPercent { get; private set; }
+
     internal async Task<EdsError> OpenAsync(CancellationToken ct = default)
     {
         // 1. Standard PTP OpenSession
@@ -26,7 +36,81 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         // 4. Drain initial events
         _ = await PollEventsAsync(ct);
 
+        // 5. Read standard PTP properties
+        await RefreshPropertiesAsync(ct);
+
         return EdsError.OK;
+    }
+
+    internal string? SerialNumber { get; private set; }
+    internal string? Model { get; private set; }
+
+    /// <summary>
+    /// Reads standard PTP device info and properties.
+    /// </summary>
+    internal async Task RefreshPropertiesAsync(CancellationToken ct = default)
+    {
+        // GetDeviceInfo (0x1001) — serial number, model, manufacturer
+        var (diResp, diData) = await ptp.SendCommandReceiveDataAsync(PtpOperationCode.GetDeviceInfo, ct);
+        if (diResp.IsSuccess && diData.Length > 0)
+            ParseDeviceInfo(diData);
+
+        // Battery level — standard PTP property 0x5001
+        var (resp, data) = await ptp.SendCommandReceiveDataAsync(PtpOperationCode.GetDevicePropValue, ct, StandardPtpBatteryLevel);
+        if (resp.IsSuccess && data.Length >= 1)
+        {
+            BatteryLevelPercent = data[0];
+        }
+    }
+
+    private void ParseDeviceInfo(byte[] data)
+    {
+        // PTP DeviceInfo dataset: skip fixed fields, read PTP strings
+        // Offset 8: VendorExtensionDesc (PTP string), then skip several fields to reach:
+        // Model, DeviceVersion, SerialNumber as the last three PTP strings.
+        // PTP string format: uint8 length (in chars), then UTF-16LE chars
+        try
+        {
+            int offset = 8; // skip StandardVersion(u16), VendorExtId(u32), VendorExtVersion(u16)
+            offset = SkipPtpString(data, offset); // VendorExtensionDesc
+            offset += 2; // FunctionalMode (u16)
+            offset = SkipPtpArray(data, offset); // OperationsSupported (u16 array)
+            offset = SkipPtpArray(data, offset); // EventsSupported (u16 array)
+            offset = SkipPtpArray(data, offset); // DevicePropertiesSupported (u16 array)
+            offset = SkipPtpArray(data, offset); // CaptureFormats (u16 array)
+            offset = SkipPtpArray(data, offset); // ImageFormats (u16 array)
+            var (manufacturer, o1) = ReadPtpString(data, offset);
+            var (model, o2) = ReadPtpString(data, o1);
+            var (deviceVersion, o3) = ReadPtpString(data, o2);
+            var (serialNumber, _) = ReadPtpString(data, o3);
+            Model = model;
+            SerialNumber = serialNumber;
+        }
+        catch { /* malformed device info — not fatal */ }
+    }
+
+    private static (string Value, int NewOffset) ReadPtpString(byte[] data, int offset)
+    {
+        if (offset >= data.Length) return ("", offset);
+        int charCount = data[offset];
+        offset++;
+        if (charCount == 0) return ("", offset);
+        var str = System.Text.Encoding.Unicode.GetString(data, offset, (charCount - 1) * 2); // exclude null terminator
+        return (str, offset + charCount * 2);
+    }
+
+    private static int SkipPtpString(byte[] data, int offset)
+    {
+        if (offset >= data.Length) return offset;
+        int charCount = data[offset];
+        return offset + 1 + charCount * 2;
+    }
+
+    private static int SkipPtpArray(byte[] data, int offset)
+    {
+        if (offset + 4 > data.Length) return offset;
+        uint count = BitConverter.ToUInt32(data, offset);
+        return offset + 4 + (int)count * 2; // u16 elements
     }
 
     /// <summary>

@@ -84,6 +84,14 @@ The `WpdPtpTransport` uses three WPD MTP extension commands (by PID in the `{4d5
 
 COM objects created via `CoCreateInstance` P/Invoke + `StrategyBasedComWrappers`. All interfaces use `[GeneratedComInterface]` for AOT compatibility. No `dynamic`, no reflection.
 
+### Critical WPD requirement: always include operation params
+
+The WPD MTP driver **requires** `WPD_PROPERTY_MTP_EXT_OPERATION_PARAMS` (an `IPortableDevicePropVariantCollection`) to be present in the command property bag for ALL MTP extension commands, **even when there are no PTP parameters**. Without the empty collection, vendor data-READ commands (GetEvent 0x9116, GetObject 0x9104, etc.) fail with `ELEMENT_NOT_FOUND (0x80070490)`. Vendor no-data and data-WRITE are unaffected.
+
+This was discovered by Frida-hooking `PortableDeviceApi.dll!SendCommand` and comparing EDSDK's property bags to ours. EDSDK always includes an empty `IPortableDevicePropVariantCollection` for the params property. No registry changes, no special drivers, no special client info needed — just the empty collection.
+
+In `SetOperationParams`, the collection is always created and attached regardless of whether `params` is empty.
+
 ## Testing
 
 No automated tests yet — the library requires a physical Canon camera. Manual test sequence:

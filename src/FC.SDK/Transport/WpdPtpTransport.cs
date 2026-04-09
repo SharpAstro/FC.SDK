@@ -30,14 +30,14 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     private static IWpdValues CreateClientInfo()
     {
         var clientInfo = WpdInterop.CreateInstance<IWpdValues>(WpdInterop.CLSID_PortableDeviceValues);
-        var clientKey = new PropertyKey { fmtid = WpdInterop.WPD_CLIENT_INFO, pid = 2 }; // WPD_CLIENT_NAME
-        clientInfo.SetStringValue(in clientKey, "TianWen");
-        clientKey.pid = 3; // WPD_CLIENT_MAJOR_VERSION
-        clientInfo.SetUnsignedIntegerValue(in clientKey, 1);
-        clientKey.pid = 4; // WPD_CLIENT_MINOR_VERSION
-        clientInfo.SetUnsignedIntegerValue(in clientKey, 0);
-        clientKey.pid = 5; // WPD_CLIENT_REVISION
-        clientInfo.SetUnsignedIntegerValue(in clientKey, 0);
+        var key = new PropertyKey { fmtid = WpdInterop.WPD_CLIENT_INFO, pid = 2 }; // WPD_CLIENT_NAME
+        clientInfo.SetStringValue(in key, "FC.SDK");
+        key.pid = 3; // WPD_CLIENT_MAJOR_VERSION
+        clientInfo.SetUnsignedIntegerValue(in key, 1);
+        key.pid = 4; // WPD_CLIENT_MINOR_VERSION
+        clientInfo.SetUnsignedIntegerValue(in key, 1);
+        key.pid = 5; // WPD_CLIENT_REVISION
+        clientInfo.SetUnsignedIntegerValue(in key, 0);
         return clientInfo;
     }
 
@@ -94,19 +94,25 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         SetOperationParams(cmd, @params);
 
         var results = SendWpdCommand(cmd);
+        CheckHResult(results);
 
-        // Debug: dump all properties from results
-        results.GetCount(out uint propCount);
-        Console.Error.WriteLine($"[WPD] ExecuteDataRead opCode=0x{opCode:X4} — result has {propCount} properties:");
-        for (uint i = 0; i < propCount; i++)
+        // Get transfer context — if absent, WPD handled the command internally with no data
+        int ctxHr = results.GetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), out string context);
+        results.GetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_TOTAL_SIZE), out uint totalSize);
+
+        if (ctxHr < 0 || string.IsNullOrEmpty(context))
         {
-            results.GetAt(i, out PropertyKey key, out PropVariant val);
-            Console.Error.WriteLine($"  [{i}] fmtid={key.fmtid} pid={key.pid} vt={val.vt} data=0x{val.data:X}");
+            // No transfer context — WPD rejected or handled internally
+            results.GetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_RESPONSE_CODE), out uint respCode);
+            return (respCode == 0 ? (ushort)0x2002 : (ushort)respCode, [], []);
         }
 
-        CheckHResult(results);
-        results.GetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), out string context);
-        results.GetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_TOTAL_SIZE), out uint totalSize);
+        if (totalSize == 0)
+        {
+            // Transfer context allocated but zero data — must end transfer to avoid jamming the pipe
+            var endResp = EndTransfer(context);
+            return (endResp.ResponseCode, endResp.ResponseParams, []);
+        }
 
         // Step 2: Read data
         var readCmd = CreateValues();
@@ -172,8 +178,8 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
 
     private static void SetOperationParams(IWpdValues cmd, uint[] @params)
     {
-        if (@params.Length == 0) return;
-
+        // The WPD MTP driver requires the params collection to ALWAYS be present,
+        // even when empty. Without it, vendor data-READ commands fail with 0x80070490.
         var col = WpdInterop.CreateInstance<IWpdPropVariantCollection>(WpdInterop.CLSID_PortableDevicePropVariantCollection);
         foreach (uint p in @params)
         {
@@ -187,7 +193,7 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     {
         if (_device is null) throw new InvalidOperationException("Transport not connected.");
         int hr = _device.SendCommand(0, cmd, out var results);
-        Console.Error.WriteLine($"[WPD] SendCommand hr=0x{hr:X8}");
+
         Marshal.ThrowExceptionForHR(hr);
         return results!;
     }
@@ -232,17 +238,10 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         return sb.ToString().TrimEnd();
     }
 
-    private const int E_ELEMENT_NOT_FOUND = unchecked((int)0x80070490);
-
     private static void CheckHResult(IWpdValues results)
     {
         int hr = results.GetErrorValue(WpdInterop.CommonKey(WpdInterop.PID_HRESULT), out int errorValue);
-        Console.Error.WriteLine($"[WPD] CheckHResult: GetErrorValue hr=0x{hr:X8} errorValue=0x{errorValue:X8}");
-        // 0x80070490 (ELEMENT_NOT_FOUND) is returned when:
-        // - GetEvent has no events (normal)
-        // - A property code is not recognized by the WPD driver
-        // Treat as "no data" rather than a hard error
-        if (hr >= 0 && errorValue != 0 && errorValue != E_ELEMENT_NOT_FOUND)
+        if (hr >= 0 && errorValue < 0)
             throw new COMException($"WPD command failed with HRESULT 0x{errorValue:X8}", errorValue);
     }
 
@@ -356,7 +355,7 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
 
         var handler = new WpdEventHandler(this);
         int hr = _device.Advise(0, handler.Ptr, 0, out _adviseCookie);
-        Console.Error.WriteLine($"[WPD] Advise hr=0x{hr:X8} cookie={_adviseCookie}");
+
         Marshal.ThrowExceptionForHR(hr);
     }
 
@@ -412,27 +411,7 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         Marshal.ThrowExceptionForHR(_content.Transfer(out var resourcesPtr));
         if (resourcesPtr == 0) throw new InvalidOperationException("Failed to get IPortableDeviceResources");
 
-        // Call IPortableDeviceResources::GetStream via raw vtable (index 2 after IUnknown)
-        // GetStream(LPCWSTR objectId, REFPROPERTYKEY key, DWORD mode, DWORD* optimalSize, IStream** ppStream)
-        var streamPtr = nint.Zero;
-        uint optimalSize = 0;
-        unsafe
-        {
-            var vtable = Marshal.ReadIntPtr(resourcesPtr);
-            var getStreamFn = Marshal.ReadIntPtr(vtable, 5 * nint.Size); // IUnknown(3) + GetSupportedResources(0) + GetResourceAttributes(1) + GetStream(2) = slot 5
-            var key = WpdInterop.WPD_RESOURCE_DEFAULT;
-            var pObjectId = Marshal.StringToCoTaskMemUni(objectId);
-            try
-            {
-                var fn = (delegate* unmanaged<nint, nint, PropertyKey*, uint, uint*, nint*, int>)getStreamFn;
-                int hr2 = fn(resourcesPtr, pObjectId, &key, WpdInterop.STGM_READ, &optimalSize, &streamPtr);
-                Marshal.ThrowExceptionForHR(hr2);
-            }
-            finally
-            {
-                Marshal.FreeCoTaskMem(pObjectId);
-            }
-        }
+        var (streamPtr, optimalSize) = GetResourceStream(resourcesPtr, objectId);
 
         if (streamPtr == 0) throw new InvalidOperationException("Failed to get object stream");
 
@@ -450,6 +429,27 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         finally
         {
             Marshal.Release(streamPtr);
+        }
+    }
+
+    private static unsafe (nint streamPtr, uint optimalSize) GetResourceStream(nint resourcesPtr, string objectId)
+    {
+        var vtable = Marshal.ReadIntPtr(resourcesPtr);
+        var getStreamFn = Marshal.ReadIntPtr(vtable, 5 * nint.Size);
+        var key = WpdInterop.WPD_RESOURCE_DEFAULT;
+        var pObjectId = Marshal.StringToCoTaskMemUni(objectId);
+        try
+        {
+            nint streamPtr = 0;
+            uint optimalSize = 0;
+            var fn = (delegate* unmanaged<nint, nint, PropertyKey*, uint, uint*, nint*, int>)getStreamFn;
+            int hr = fn(resourcesPtr, pObjectId, &key, WpdInterop.STGM_READ, &optimalSize, &streamPtr);
+            Marshal.ThrowExceptionForHR(hr);
+            return (streamPtr, optimalSize);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(pObjectId);
         }
     }
 
@@ -602,8 +602,15 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     public ValueTask DisposeAsync()
     {
         UnregisterObjectAddedCallback();
-        _device?.Close();
-        _device = null;
+
+        _content = null;
+
+        if (_device is not null)
+        {
+            _device.Close();
+            _device = null;
+        }
+
         _lock.Dispose();
         return ValueTask.CompletedTask;
     }
