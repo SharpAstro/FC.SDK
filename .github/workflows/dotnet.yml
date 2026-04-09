@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 env:
-  VERSION_PREFIX: 1.0.${{ github.run_number }}
+  VERSION_PREFIX: 1.2.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_SUFFIX: +${{ github.sha }}
   BUILD_CONF: Release

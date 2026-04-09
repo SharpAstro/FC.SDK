@@ -17,7 +17,6 @@
 	<PackageProjectUrl>https://github.com/SharpAstro/FC.SDK</PackageProjectUrl>
 	<PublishRepositoryUrl>true</PublishRepositoryUrl>
 	<EmbedUntrackedSources>true</EmbedUntrackedSources>
-	<Version>1.1.0</Version>
 	<Description>Canon EOS camera control via PTP over USB and WiFi — pure managed C#, no EDSDK binary required</Description>
   </PropertyGroup>
 
