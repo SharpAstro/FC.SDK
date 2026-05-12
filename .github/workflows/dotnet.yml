@@ -19,6 +19,25 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        # LFS-backed CR2 fixtures (.gitattributes pattern *.cr2) are only needed by
+        # FC.SDK.Raw.Tests. Skip the default lfs pull and do a narrow, cached pull
+        # below so we only spend LFS bandwidth when fixtures actually change.
+        lfs: false
+    - name: Compute LFS cache key
+      id: lfs-key
+      run: |
+        # Pointer-file content (OID + size) changes only when the underlying LFS
+        # object changes, so hashing the pointers reliably identifies which set
+        # of LFS objects we'd be pulling. Cache hit -> no LFS bandwidth.
+        HASH=$(git ls-files '*.cr2' '*.cr3' '*.cr2.gz' | xargs cat 2>/dev/null | sha256sum | cut -c1-16)
+        echo "key=lfs-test-${HASH}" >> $GITHUB_OUTPUT
+    - uses: actions/cache@v4
+      with:
+        path: .git/lfs
+        key: ${{ steps.lfs-key.outputs.key }}
+    - name: Fetch test-fixture LFS objects
+      run: git lfs pull --include="*.cr2,*.cr3,*.cr2.gz"
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
@@ -27,6 +46,8 @@ jobs:
       run: dotnet restore
     - name: Build
       run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
+    - name: Test
+      run: dotnet test -c $BUILD_CONF --no-build --verbosity normal
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
