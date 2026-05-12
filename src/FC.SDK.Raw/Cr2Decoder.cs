@@ -1,5 +1,5 @@
-using DIR.Lib.Exif;
-using DIR.Lib.Tiff;
+using SharpAstro.Exif;
+using SharpAstro.Tiff;
 using StbImageSharp;
 using System;
 using System.Collections.Generic;
@@ -99,7 +99,7 @@ internal static class Cr2Decoder
 
         // ---- EXIF + MakerNote + CFA pattern ----
         var exif = ExifReader.FromTiff(bytes);
-        var makerNote = TryParseMakerNote(ifd0, bytes, fileIsLE);
+        var makerNote = TryParseMakerNote(exif, bytes, fileIsLE);
         var cfa = ResolveCfaPattern(ifd0, ifds, bytes, fileIsLE);
 
         return new CanonRawFile(
@@ -174,10 +174,17 @@ internal static class Cr2Decoder
     /// <see cref="CanonMakerNote.RawSubtags"/>. Strongly-typed fields
     /// (<c>ModelId</c>, <c>SensorWidth</c>, <c>ColorMatrix</c>) are decoded from
     /// well-known sub-tags when present; null otherwise.</summary>
+    /// <summary>Best-effort MakerNote parse. The MakerNote (tag 0x927C) lives in
+    /// the Exif sub-IFD, not IFD0 — <see cref="ExifReader"/> follows the 0x8769
+    /// pointer for us and exposes it via <c>ExifMetadata.RawTags</c>. The bytes
+    /// are the Canon MakerNote IFD payload starting with a u16 entry count
+    /// (no header / magic prefix — Canon's MakerNote on CR2 is a plain IFD,
+    /// unlike Nikon's which has a nested mini-TIFF).</summary>
     private static CanonMakerNote? TryParseMakerNote(
-        Dictionary<ushort, Cr2IfdReader.Entry> ifd0, ReadOnlySpan<byte> tiff, bool fileIsLE)
+        ExifMetadata? exif, ReadOnlySpan<byte> tiff, bool fileIsLE)
     {
-        if (!ifd0.TryGetValue(TagMakerNote, out var mn)) return null;
+        if (exif?.RawTags is null) return null;
+        if (!exif.RawTags.TryGetValue(0x927C, out var mn)) return null;
         // Canon MakerNote on a CR2 is a plain TIFF IFD starting at the entry's data
         // offset (no header / signature in front of it — unlike Nikon, where the
         // MakerNote has its own embedded mini-TIFF).
@@ -200,6 +207,7 @@ internal static class Cr2Decoder
         int? sensorWidth = null;
         int? sensorHeight = null;
         float[]? colorMatrix = null;
+        CanonWhiteBalance? asShotWb = null;
 
         for (var i = 0; i < subEntryCount; i++)
         {
@@ -239,20 +247,65 @@ internal static class Cr2Decoder
             }
             else if (tag == 0x4001 && type == TiffFieldType.Short && count >= 9)
             {
-                // ColorData — vendor-specific layout that varies by model. The first 9
-                // SHORTs of newer-model ColorData blocks contain the colour-matrix
-                // entries (sRGB-from-sensor, 1/1024 fixed-point). Decoded as a
-                // best-effort — null when the model doesn't match this layout.
+                // ColorData — vendor-specific layout that varies by model. Layout
+                // versions 5..9 (mid-2010s 14-bit DSLRs: 5D Mk III, 6D, 7D, 70D, …)
+                // share a common section: WB_RGGB_LEVELS_AS_SHOT at int16 offset 63
+                // (4 shorts: R, G1, G2, B). Earlier ColorData revisions (1..4) and
+                // newer ones (10+) put these at different offsets and aren't decoded
+                // here — the raw bytes are still available via RawSubtags[0x4001]
+                // for callers who want to parse them.
                 colorMatrix = new float[9];
                 for (var k = 0; k < 9; k++)
                 {
                     var raw = (short)Cr2IfdReader.ReadShort(data.Slice(k * 2, 2), fileIsLE);
                     colorMatrix[k] = raw / 1024f;
                 }
+                asShotWb = TryParseColorDataWhiteBalance(data, fileIsLE);
             }
         }
 
-        return new CanonMakerNote(modelId, sensorWidth, sensorHeight, colorMatrix, subtags);
+        return new CanonMakerNote(modelId, sensorWidth, sensorHeight, colorMatrix, asShotWb, subtags);
+    }
+
+    /// <summary>Extract WB_RGGB_LEVELS_AS_SHOT from a Canon ColorData payload,
+    /// covering every Canon DSLR shipped to date. The dispatch on ColorData
+    /// byte-count mirrors dcraw's <c>parse_makernote</c>:
+    /// <list type="bullet">
+    /// <item>582 bytes → WB at byte 50 (ColorData1: 1D Mark II)</item>
+    /// <item>653 bytes → WB at byte 68 (ColorData2: 1Ds Mark II)</item>
+    /// <item>5120 bytes → WB at byte 142 (ColorData4-era 1DX / 5DMkIII video)</item>
+    /// <item>anything else &gt; 500 bytes → WB at byte 126 (ColorData5..12: the
+    ///   2010s+ 14-bit DSLR line — 5D Mk III/IV, 6D / Mk II, 7D / Mk II, 70D,
+    ///   77D, 80D, 90D, R-series, M-series, ...)</item>
+    /// </list>
+    /// Each WB block is 4 successive int16s: R, G1, G2, B. Normalised so
+    /// G1 = 1.0 — callers multiply demosaiced channels by these multipliers
+    /// to neutralise white.</summary>
+    private static CanonWhiteBalance? TryParseColorDataWhiteBalance(
+        ReadOnlySpan<byte> colorData, bool fileIsLE)
+    {
+        if (colorData.Length <= 500) return null;
+        var byteOffset = colorData.Length switch
+        {
+            582 => 50,
+            653 => 68,
+            5120 => 142,
+            _ => 126,
+        };
+        if (colorData.Length < byteOffset + 8) return null;
+        var rRaw = Cr2IfdReader.ReadShort(colorData.Slice(byteOffset + 0, 2), fileIsLE);
+        var g1Raw = Cr2IfdReader.ReadShort(colorData.Slice(byteOffset + 2, 2), fileIsLE);
+        var g2Raw = Cr2IfdReader.ReadShort(colorData.Slice(byteOffset + 4, 2), fileIsLE);
+        var bRaw = Cr2IfdReader.ReadShort(colorData.Slice(byteOffset + 6, 2), fileIsLE);
+        // G1 == 0 is Canon's sentinel for "this slot isn't a populated as-shot WB"
+        // (some uninitialised template slots in the ColorData table).
+        if (g1Raw == 0) return null;
+        // Sanity bounds — real-world WB raw values land in the 200..8000 range
+        // across tungsten/daylight/shade. Anything wildly outside means we're
+        // reading at the wrong offset for this ColorData revision.
+        if (rRaw < 100 || rRaw > 20000 || bRaw < 100 || bRaw > 20000) return null;
+        var g = (float)g1Raw;
+        return new CanonWhiteBalance(rRaw / g, 1.0f, g2Raw / g, bRaw / g);
     }
 
     /// <summary>Resolve the CFA pattern. CR2 carries it explicitly via EXIF tag

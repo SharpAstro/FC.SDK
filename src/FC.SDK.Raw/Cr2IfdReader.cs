@@ -1,4 +1,4 @@
-using DIR.Lib.Tiff;
+using SharpAstro.Tiff;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -6,13 +6,13 @@ using System.Collections.Generic;
 namespace FC.SDK.Raw;
 
 /// <summary>
-/// Minimal TIFF IFD walker for CR2 parsing. Unlike <see cref="DIR.Lib.Tiff.TiffReader"/>
+/// Minimal TIFF IFD walker for CR2 parsing. Unlike <see cref="SharpAstro.Tiff.TiffReader"/>
 /// (which decodes pixel data and rejects unsupported compression), this walker just
 /// returns the raw tag → value map per IFD so the CR2 decoder can locate strip offsets,
 /// the Canon CR2Slice tag, the MakerNote IFD, etc. Pixel decode happens via the
 /// SharpAstro.StbImage lossless-JPEG path, not through DIR.Lib's TiffReader.
 ///
-/// Intentionally duplicates ~50 lines from DIR.Lib.Exif.ExifReader's private IFD walker
+/// Intentionally duplicates ~50 lines from SharpAstro.Exif.ExifReader's private IFD walker
 /// — the same comment there ("this is the boundary where EXIF parsing becomes a
 /// standalone concern") applies here. Lifting it into a shared low-level IFD helper
 /// in DIR.Lib would couple three concerns (TIFF pixel decode, EXIF, CR2 parsing) that

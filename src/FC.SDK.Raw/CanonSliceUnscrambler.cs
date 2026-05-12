@@ -3,23 +3,23 @@ using System;
 namespace FC.SDK.Raw;
 
 /// <summary>
-/// Reorders a flat lossless-JPEG sample stream into the Canon CR2 sensor layout.
-///
-/// Canon stores the raw image as N vertical slices, each <c>sliceWidth</c> output
-/// columns wide (the last slice may be narrower — <c>lastSliceWidth</c>). The
-/// slices are then concatenated into a single lossless-JPEG payload — but
-/// <em>not</em> as side-by-side strips of one big image; rather as a flat
-/// concatenation in scan order: slice 0's pixels (row-major, slice_w columns ×
-/// image_h rows), then slice 1's pixels, and so on.
-///
-/// The total sample count after JPEG decode equals
-/// <c>output_w * output_h</c> regardless of how the JPEG encoder chose to lay
-/// out its (width × height × components) raster, so the unscramble is purely a
-/// sample-index → (row, col) mapping that doesn't need the JPEG dimensions.
+/// Reorders the flat sample stream from a Canon CR2 lossless JPEG into the
+/// sensor's row-major Bayer layout. Mirrors dcraw's <c>lossless_jpeg_load_raw</c>
+/// (CR2 branch): treats the JPEG as a flat 1D stream of samples and indexes
+/// each into <c>(row, col)</c> via the CR2Slice descriptor. The fact that the
+/// JPEG carries 2 (or 4) components per pixel is just an encoding detail for
+/// predictive coding — adjacent samples in the flat stream represent adjacent
+/// sensor columns regardless of how the encoder split them into components.
 ///
 /// Tag 0xC640 (CR2Slice) is 3 SHORT values: <c>[slice_count - 1, sliceWidth,
-/// lastSliceWidth]</c>. <c>[0, w, w]</c> means a single slice (the entire image,
-/// no unscramble required) and is handled as a fast-path memcpy.
+/// lastSliceWidth]</c>. <c>[0, w, w]</c> means a single slice (the entire
+/// image, no unscramble required) and is handled as a fast-path memcpy.
+///
+/// Per dcraw: each slice owns <c>sliceWidth * sensorHeight</c> samples in the
+/// flat stream, laid out row-major (full slice rows in order). The first slice
+/// fills sensor columns <c>[0, sliceWidth)</c>, the second
+/// <c>[sliceWidth, 2*sliceWidth)</c>, and so on. The last slice may be
+/// narrower (<c>lastSliceWidth</c>).
 /// </summary>
 internal static class CanonSliceUnscrambler
 {

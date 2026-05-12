@@ -31,23 +31,26 @@
     <InternalsVisibleTo Include="FC.SDK.Raw.Tests" />
   </ItemGroup>
 
-  <!-- DIR.Lib (TiffReader + ExifReader) and SharpAstro.StbImage (SOF3 lossless JPEG)
-       are the two sibling SharpAstro packages this decoder is built on. When a local
-       working copy of both is present, switch to ProjectReference for fast iteration
-       across all three repos; otherwise fall through to the published NuGet packages
-       (CI / consumer builds). Override: dotnet build -p:UseLocalSiblings=false -->
+  <!-- SharpAstro codec packages (sibling repo: StbImageSharp). When the working
+       copy is present locally, switch to ProjectReference for fast iteration;
+       otherwise fall through to the published NuGet packages.
+       Override: dotnet build -p:UseLocalSiblings=false -->
   <PropertyGroup>
     <UseLocalSiblings Condition="'$(UseLocalSiblings)' == ''
-      AND Exists('$(MSBuildThisFileDirectory)..\..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj')
-      AND Exists('$(MSBuildThisFileDirectory)..\..\..\StbImageSharp\src\StbImageSharp.csproj')">true</UseLocalSiblings>
+      AND Exists('$(MSBuildThisFileDirectory)..\..\..\StbImageSharp\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj')">true</UseLocalSiblings>
   </PropertyGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' == 'true'">
-    <ProjectReference Include="..\..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj" />
-    <ProjectReference Include="..\..\..\StbImageSharp\src\StbImageSharp.csproj" />
+    <!-- StbImage: SOF3 lossless JPEG decode for the CR2 raw IFD payload. -->
+    <ProjectReference Include="..\..\..\StbImageSharp\src\StbImageSharp\StbImageSharp.csproj" />
+    <!-- Exif: standard EXIF parse for IFD0 metadata + access to Canon MakerNote bytes. -->
+    <ProjectReference Include="..\..\..\StbImageSharp\src\SharpAstro.Exif\SharpAstro.Exif.csproj" />
+    <!-- Tiff: walk CR2's IFD chain to locate the raw IFD (transitively via Exif). -->
+    <ProjectReference Include="..\..\..\StbImageSharp\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
-    <PackageReference Include="DIR.Lib" Version="2.15.0" />
-    <PackageReference Include="SharpAstro.StbImage" Version="2.30.0" />
+    <PackageReference Include="SharpAstro.StbImage" Version="2.30.*" />
+    <PackageReference Include="SharpAstro.Exif" Version="2.30.*" />
+    <PackageReference Include="SharpAstro.Tiff" Version="2.30.*" />
   </ItemGroup>
 
   <ItemGroup>

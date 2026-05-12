@@ -1,4 +1,4 @@
-using DIR.Lib.Exif;
+using SharpAstro.Exif;
 
 namespace FC.SDK.Raw;
 
@@ -17,7 +17,7 @@ namespace FC.SDK.Raw;
 /// DSLRs, 12 for some older bodies).</param>
 /// <param name="CfaPattern">Bayer pattern starting at pixel (0, 0).</param>
 /// <param name="Exif">Standard EXIF metadata (model, exposure, ISO, etc.) as
-/// parsed by DIR.Lib.Exif. Null only on malformed files.</param>
+/// parsed by SharpAstro.Exif. Null only on malformed files.</param>
 /// <param name="MakerNote">Canon-specific MakerNote subtags. Null when the
 /// MakerNote IFD is missing or unparseable. Contains sensor model code,
 /// colour matrix, white-balance presets, lens info, etc.</param>
@@ -57,6 +57,12 @@ public enum CanonCfaPattern
 /// <param name="SensorHeight">Sensor active-area height.</param>
 /// <param name="ColorMatrix">Per-model 3×3 colour-conversion matrix from
 /// sensor RGB to sRGB (linear, no gamma). Row-major, 9 floats.</param>
+/// <param name="AsShotWhiteBalance">As-shot white-balance multipliers parsed
+/// from MakerNote ColorData's WB_RGGB_LEVELS_AS_SHOT block (4 values: R, G1,
+/// G2, B at offset 63 in newer ColorData versions). Values are normalised so
+/// G1 = 1.0; callers multiply the demosaiced R/G/B channels by these to
+/// neutralise white. Null when ColorData layout doesn't match a known
+/// version (callers fall back to daylight constants).</param>
 /// <param name="RawSubtags">All MakerNote subtags as raw bytes for callers
 /// that want the long tail (lens info, image stabiliser state, custom
 /// functions, etc.).</param>
@@ -65,4 +71,14 @@ public sealed record CanonMakerNote(
     int? SensorWidth,
     int? SensorHeight,
     float[]? ColorMatrix,
+    CanonWhiteBalance? AsShotWhiteBalance,
     System.Collections.Generic.IReadOnlyDictionary<ushort, byte[]> RawSubtags);
+
+/// <summary>
+/// Per-channel white-balance multipliers as stored in Canon's MakerNote
+/// ColorData. The raw values from the file are normalised so that
+/// <see cref="G1"/> = 1.0; multiplying R / G1 / G2 / B sensor counts by the
+/// corresponding multiplier produces a neutral-white render. Typical daylight
+/// values are R ≈ 2.0, G ≈ 1.0, B ≈ 1.5.
+/// </summary>
+public sealed record CanonWhiteBalance(float R, float G1, float G2, float B);
