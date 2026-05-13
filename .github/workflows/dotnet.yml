@@ -30,14 +30,16 @@ jobs:
         # Pointer-file content (OID + size) changes only when the underlying LFS
         # object changes, so hashing the pointers reliably identifies which set
         # of LFS objects we'd be pulling. Cache hit -> no LFS bandwidth.
-        HASH=$(git ls-files '*.cr2' '*.cr3' '*.cr2.gz' | xargs cat 2>/dev/null | sha256sum | cut -c1-16)
+        HASH=$(git ls-files '*.cr2' '*.cr3' '*.CR2' '*.CR3' '*.cr2.gz' | xargs cat 2>/dev/null | sha256sum | cut -c1-16)
         echo "key=lfs-test-${HASH}" >> $GITHUB_OUTPUT
     - uses: actions/cache@v4
       with:
         path: .git/lfs
         key: ${{ steps.lfs-key.outputs.key }}
     - name: Fetch test-fixture LFS objects
-      run: git lfs pull --include="*.cr2,*.cr3,*.cr2.gz"
+      # Uppercase variants matter on case-sensitive filesystems (Linux CI):
+      # *.CR3 fixture (Canon_EOS_M50_CRAW.CR3) is distinct from *.cr3 glob there.
+      run: git lfs pull --include="*.cr2,*.cr3,*.CR2,*.CR3,*.cr2.gz"
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:

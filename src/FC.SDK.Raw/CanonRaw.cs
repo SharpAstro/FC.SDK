@@ -50,7 +50,13 @@ public static class CanonRaw
         {
             return Cr2Decoder.ExtractThumbnail(bytes);
         }
-        // CR3 thumbnail extraction = walk to PRVW / THMB BMFF boxes — wire up when CR3 lands.
+        // CR3: walk the BMFF box tree to PRVW (preferred, larger preview at
+        // ~1620x1080) or THMB (fallback, 160x120). Cr3Decoder handles both
+        // and returns null on any structural failure.
+        if (bytes.Length >= 12 && bytes[4] == 'f' && bytes[5] == 't' && bytes[6] == 'y' && bytes[7] == 'p')
+        {
+            return Cr3Decoder.ExtractThumbnail(bytes);
+        }
         return null;
     }
 
@@ -157,10 +163,14 @@ public static class CanonRaw
         }
 
         // CR3: ISO BMFF "ftyp" box at offset 4 (after the 32-bit box size).
+        // Phase A: Cr3Decoder walks the container and extracts EXIF + MakerNote +
+        // dimensions + thumbnail, then throws NotImplementedException for the
+        // CRX-compressed sensor frame (Phase B work). The throw moves into
+        // Cr3Decoder so container-level errors (truncated file, missing CMP1)
+        // surface with a clearer message before the CRX one.
         if (bytes.Length >= 12 && bytes[4] == 'f' && bytes[5] == 't' && bytes[6] == 'y' && bytes[7] == 'p')
         {
-            throw new NotImplementedException(
-                "CR3 (ISO BMFF + CRX) decoder not yet implemented. CR2 (TIFF + lossless JPEG) works; CR3 is a separate follow-up.");
+            return Cr3Decoder.Decode(bytes, decodeMosaic: true);
         }
 
         throw new InvalidDataException(
