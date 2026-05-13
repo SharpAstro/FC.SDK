@@ -226,6 +226,57 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void EosR5_CrawFixture_HasExpectedShapeAndThrowsOnFf13()
+    {
+        // Pre-B.6 baseline for the EOS R5 lossy cRAW path. Empirically the
+        // file reports encType=0 levels=3 (same as the M50 CRAW.CR3) but
+        // every subband marker is FF13 (per-position qStep table) rather
+        // than FF03 (scalar qParam). So Canon's "lossy cRAW" on R5/R6
+        // re-uses the existing lossless wavelet pyramid + Rice path and
+        // adds quantization on top via FF13. encType=3 itself may never
+        // appear in current consumer CR3 files.
+        //
+        // This test pins three things:
+        //  - the fixture parses cleanly to encType=0 levels=3
+        //  - the structural mdat header zone starts at the CMP1-reported
+        //    offset (the 64-bit largesize mdat-box encoding works)
+        //  - a full Decode currently throws on the first FF13 marker with
+        //    a recognisable message, so the gap is loud
+        //
+        // When B.6 lands (FF13 parsing + qStep-driven inverse-quant) this
+        // test flips to assert a successful decode like the M50 CRAW one.
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Canon_EOS_R5_CRAW.CR3");
+        if (!File.Exists(path))
+        {
+            Assert.Skip($"EOS R5 cRAW fixture not present at {path}.");
+            return;
+        }
+        var bytes = File.ReadAllBytes(path);
+        var header = Cr3Decoder.TryResolveHeader(bytes);
+        header.ShouldNotBeNull();
+        output.WriteLine(
+            $"EOS R5 cRAW header: {header!.Width}x{header.Height} bit={header.BitDepth} " +
+            $"cfa={header.Cfa} planes={header.PlaneCount} encType={header.EncType} " +
+            $"levels={header.Levels} tile={header.TileWidth}x{header.TileHeight} " +
+            $"mdat=[0x{header.MdatOffset:X}+{header.MdatSize}] hdr={header.MdatHdrSize}");
+        header.Width.ShouldBe(5248);
+        header.Height.ShouldBe(3510);
+        header.BitDepth.ShouldBe(14);
+        header.Cfa.ShouldBe(CanonCfaPattern.Rggb);
+        header.PlaneCount.ShouldBe(4);
+        header.EncType.ShouldBe(0);
+        header.Levels.ShouldBe(3);
+        header.TileWidth.ShouldBe(5248);
+        header.TileHeight.ShouldBe(3510);
+        // Decode should throw with the FF13 "fixture needed" message until
+        // B.6 lands. (Specifically NotImplementedException from
+        // CrxMdatHeader.Parse — we don't check the exact text since the
+        // message will go away when this stops throwing.)
+        Should.Throw<NotImplementedException>(
+            () => Cr3Decoder.Decode(bytes, decodeMosaic: true));
+    }
+
+    [Fact]
     public void Cr3_DecodesM50RawToMosaic_ProducesPlausibleSignal()
     {
         // Phase B.4 end-to-end gate. Uses the simpler RAW.CR3 fixture
