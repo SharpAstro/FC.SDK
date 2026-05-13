@@ -53,8 +53,31 @@ internal static class CrxMdatHeader
     // We don't decode it yet — the M50 fixtures use 0xFF03.
     private const ushort BandMarkerNew = 0xFF13;
 
+    /// <summary>Per-tile descriptor. <see cref="HasQpData"/> is set only
+    /// when the file uses the 16-byte FF11 tile header (lossy cRAW); in
+    /// that case <see cref="QpDataOffset"/>/<see cref="QpDataSize"/> point
+    /// at the Golomb-coded per-position QP bitstream that lives between
+    /// the mdat header zone and the first plane's band data, and the
+    /// per-tile QStep table is derived from it via <c>CrxQStep.Build</c>.
+    /// <see cref="QpExtraSize"/> is reserved padding between the QP
+    /// stream and the band data (usually 0).</summary>
+    public readonly record struct Tile(
+        int Index,
+        int TileSize,
+        bool HasQpData,
+        long QpDataOffset,
+        int QpDataSize,
+        int QpExtraSize);
+
     /// <summary>One entry per (tile, plane, band) leaf — the unit at which
-    /// <see cref="CrxLineDecoder"/> operates.</summary>
+    /// <see cref="CrxLineDecoder"/> operates.
+    /// <para>FF03 (lossless) bands populate <see cref="QParam"/> and leave
+    /// <see cref="QStepBase"/>/<see cref="QStepMult"/> at 0. FF13 (per-position
+    /// quantization) bands do the inverse — <see cref="QParam"/> is 0
+    /// and the qStep params plus the per-tile <c>CrxQStep</c> table drive
+    /// the inverse-quantization step in the wavelet decoder. The
+    /// <see cref="IsLossy"/> bit lets the wavelet decoder pick its path
+    /// without re-checking which marker the band came from.</para></summary>
     public readonly record struct Subband(
         int TileIndex,
         int PlaneIndex,
@@ -62,15 +85,27 @@ internal static class CrxMdatHeader
         long DataOffset,
         int DataSize,
         int QParam,
-        uint Flags);
+        int QStepBase,
+        int QStepMult,
+        bool IsLossy,
+        bool SupportsPartial,
+        int RoundedBitsMask);
 
-    /// <summary>Parse the mdat header zone into a flat list of subband
+    /// <summary>Aggregate result of <see cref="Parse"/>: per-tile QP-data
+    /// pointers (only populated for lossy cRAW) and the flat subband list.</summary>
+    public readonly record struct ParseResult(
+        IReadOnlyList<Tile> Tiles,
+        IReadOnlyList<Subband> Subbands);
+
+    /// <summary>Parse the mdat header zone into the per-tile + per-subband
     /// descriptors. The header zone spans
     /// <c>[mdatStart, mdatStart + mdatHdrSize)</c> and is consumed
-    /// linearly; data offsets are accumulated past the header end.</summary>
-    public static IReadOnlyList<Subband> Parse(
+    /// linearly. Band data offsets accumulate past the header end and
+    /// — for lossy tiles — past the QP-data + extra zones too.</summary>
+    public static ParseResult Parse(
         ReadOnlySpan<byte> bytes, long mdatStart, int mdatHdrSize)
     {
+        var tiles = new List<Tile>();
         var subbands = new List<Subband>();
         var pos = (int)mdatStart;
         var hdrEnd = pos + mdatHdrSize;
@@ -90,15 +125,20 @@ internal static class CrxMdatHeader
         long bandOffsetWithinPlane = 0;
         long lastTileSize = 0;
         long lastPlaneSize = 0;
+        // Per-plane bits extracted from FF02/FF12 byte +4 low nibble (FF12
+        // adds non-zero values for lossy cRAW). Cleared at each FF02/FF12;
+        // applied to every Subband emitted before the next plane boundary.
+        var planeSupportsPartial = false;
+        var planeRoundedBitsMask = 0;
 
         var tileIdx = -1;
         var planeIdx = -1;
         var bandIdx = -1;
         while (pos + 4 <= hdrEnd)
         {
-            // Marker is a big-endian uint16 + 2 bytes of (size length? or pad?).
-            // Per LibRaw the layout is: 2 bytes marker + 2 bytes size-of-tag
-            // (always 8 for the markers we care about) + payload.
+            // Marker is a big-endian uint16 + 2 bytes of tag length. Tag length
+            // is 8 for FF01/FF02/FF03/FF12, 16 for the extended FF11 (QP-data
+            // flavour) and FF13 (per-position qStep table).
             var marker = BinaryPrimitives.ReadUInt16BigEndian(bytes.Slice(pos, 2));
             var tagLen = BinaryPrimitives.ReadUInt16BigEndian(bytes.Slice(pos + 2, 2));
             pos += 4;
@@ -108,67 +148,154 @@ internal static class CrxMdatHeader
             {
                 case TileMarker:
                 case TileMarkerAlt:
-                    // FF01/FF11: tile header. Payload[+0..+4] = tile size.
-                    // Advance the tile base by the previous tile's size (0
-                    // for the first tile, since planeOffsetWithinTile was 0).
+                    // FF01 (8-byte payload) / FF11 (8 or 16 bytes). Layout:
+                    //   +0..+3 tileSize
+                    //   +4..+5 tile index (must equal curTile)
+                    //   +6..+7 tail sign (0 for 8-byte FF01; 0x4000 for FF11/16)
+                    // FF11/16 extension (lossy cRAW only):
+                    //   +8..+11 mdatQPDataSize
+                    //   +12..+13 mdatExtraSize
+                    //   +14..+15 terminator (must be 0)
                     if (tileIdx >= 0)
                         tileBase += lastTileSize;
                     tileIdx++;
                     lastTileSize = (long)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos, 4));
+                    var hasQpData = marker == TileMarkerAlt && tagLen == 16;
+                    long qpOffset = 0;
+                    var qpSize = 0;
+                    var qpExtra = 0;
+                    var bandDataBase = tileBase;
+                    if (hasQpData)
+                    {
+                        qpSize = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos + 8, 4));
+                        qpExtra = BinaryPrimitives.ReadUInt16BigEndian(bytes.Slice(pos + 12, 2));
+                        qpOffset = tileBase;
+                        // Band data starts AFTER the QP stream + extra zone.
+                        bandDataBase = tileBase + qpSize + qpExtra;
+                    }
+                    tiles.Add(new Tile(
+                        Index: tileIdx,
+                        TileSize: (int)lastTileSize,
+                        HasQpData: hasQpData,
+                        QpDataOffset: qpOffset,
+                        QpDataSize: qpSize,
+                        QpExtraSize: qpExtra));
                     planeOffsetWithinTile = 0;
                     bandOffsetWithinPlane = 0;
-                    planeBase = tileBase;
+                    planeBase = bandDataBase;
                     planeIdx = -1;
                     break;
                 case PlaneMarker:
                 case PlaneMarkerAlt:
-                    // FF02/FF12: plane header. Payload[+0..+4] = plane's
-                    // total compressed size. Plane base advances by the
-                    // PREVIOUS plane's compSize (0 for the first plane).
+                    // FF02 (8-byte) / FF12 (8-byte). Layout:
+                    //   +0..+3 compSize (this plane's total compressed bytes)
+                    //   +4 packed: high nibble = plane index;
+                    //              low nibble = roundedBitsMask exponent (bits 1..2 shifted)
+                    //                         + supportsPartial flag (bit 3)
+                    //   +5..+7 reserved (must be 0)
                     if (planeIdx >= 0)
                     {
                         planeOffsetWithinTile += lastPlaneSize;
                         planeBase = tileBase + planeOffsetWithinTile;
+                        // tileBase here means "start of band data" — for lossy
+                        // tiles we adjusted planeBase at FF11 to skip QP+extra;
+                        // re-apply the same adjustment for each subsequent plane.
+                        if (tileIdx >= 0 && tiles[tileIdx].HasQpData)
+                        {
+                            planeBase += tiles[tileIdx].QpDataSize + tiles[tileIdx].QpExtraSize;
+                        }
                     }
                     lastPlaneSize = (long)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos, 4));
+                    var planeFlagsByte = bytes[pos + 4];
+                    planeSupportsPartial = (planeFlagsByte & 0x08) != 0;
+                    var roundedBits = (planeFlagsByte >> 1) & 0x3;
+                    planeRoundedBitsMask = roundedBits == 0 ? 0 : 1 << (roundedBits - 1);
                     bandOffsetWithinPlane = 0;
                     planeIdx++;
                     bandIdx = -1;
                     break;
                 case BandMarker:
-                    bandIdx++;
-                    var subbandSize = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos, 4));
-                    var flags = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos + 4, 4));
-                    // bitstream-allowed length = raw size minus tail padding;
-                    // qParam exponent for the inverse-quantize step.
-                    var padding = (int)(flags & 0x7FFFF);
-                    var qParam = (int)((flags >> 19) & 0xFF);
-                    subbands.Add(new Subband(
-                        TileIndex: tileIdx,
-                        PlaneIndex: planeIdx,
-                        BandIndex: bandIdx,
-                        DataOffset: planeBase + bandOffsetWithinPlane,
-                        DataSize: subbandSize - padding,
-                        QParam: qParam,
-                        Flags: flags));
-                    // Band offset advances by RAW subbandSize so consecutive
-                    // bands within a plane stay byte-aligned even when one
-                    // carries tail padding.
-                    bandOffsetWithinPlane += subbandSize;
+                    // FF03 (8-byte). Layout:
+                    //   +0..+3 subbandSize (bytes the band claims, INCLUDING padding)
+                    //   +4..+7 flags packed as bitData:
+                    //     bits  0..18 (mask 0x7FFFF) = tail padding
+                    //     bits 19..26 = qParam
+                    //     bit  27 (0x08000000) = supportsPartial
+                    {
+                        bandIdx++;
+                        var subbandSize = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos, 4));
+                        var flags = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos + 4, 4));
+                        var padding = (int)(flags & 0x7FFFF);
+                        var qParam = (int)((flags >> 19) & 0xFF);
+                        var bandPartial = (flags & 0x08000000) != 0;
+                        subbands.Add(new Subband(
+                            TileIndex: tileIdx,
+                            PlaneIndex: planeIdx,
+                            BandIndex: bandIdx,
+                            DataOffset: planeBase + bandOffsetWithinPlane,
+                            DataSize: subbandSize - padding,
+                            QParam: qParam,
+                            QStepBase: 0,
+                            QStepMult: 0,
+                            IsLossy: false,
+                            SupportsPartial: planeSupportsPartial || bandPartial,
+                            RoundedBitsMask: planeRoundedBitsMask));
+                        bandOffsetWithinPlane += subbandSize;
+                    }
                     break;
                 case BandMarkerNew:
-                    // 0xFF13 = qStepBase/qStepMult per-position table. The
-                    // levels>0 path can in principle handle it, but our M50
-                    // fixtures don't exercise it — we throw with a clear
-                    // pointer so any future fixture surfaces the gap immediately
-                    // instead of silently mis-parsing.
-                    throw new NotImplementedException(
-                        $"CRX subband marker 0xFF13 (new qStep table) at byte 0x{pos - 4:X8} not yet supported. " +
-                        "Firmware variant outside the M50 (lossless HQ, levels<=3) test set — add a fixture to wire this in.");
+                    // FF13 (16-byte). Layout:
+                    //   +0..+3  subbandSize
+                    //   +4..+5  word A: high nibble of byte+4 = subband index,
+                    //           low 12 bits must be 0 (partial/qParam unsupported)
+                    //   +6..+7  qStepMult (u16)
+                    //   +8..+11 qStepBase (i32)
+                    //   +12..+13 padding (u16) — dataSize = subbandSize - padding
+                    //   +14..+15 terminator (must be 0)
+                    {
+                        if (tagLen != 16)
+                        {
+                            throw new InvalidDataException(
+                                $"CRX FF13 subband marker at byte 0x{pos - 4:X8} has tagLen={tagLen}, expected 16.");
+                        }
+                        bandIdx++;
+                        var subbandSize = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos, 4));
+                        var wordA = BinaryPrimitives.ReadUInt16BigEndian(bytes.Slice(pos + 4, 2));
+                        // High nibble of byte+4 should match band index; low 12
+                        // bits are reserved. LibRaw bails on either being wrong.
+                        if ((wordA & 0xFFF) != 0)
+                        {
+                            throw new InvalidDataException(
+                                $"CRX FF13 at byte 0x{pos - 4:X8} has non-zero low 12 bits 0x{wordA:X4} — partial/qParam path not supported.");
+                        }
+                        var qStepMult = BinaryPrimitives.ReadUInt16BigEndian(bytes.Slice(pos + 6, 2));
+                        var qStepBase = BinaryPrimitives.ReadInt32BigEndian(bytes.Slice(pos + 8, 4));
+                        var padding = BinaryPrimitives.ReadUInt16BigEndian(bytes.Slice(pos + 12, 2));
+                        var terminator = BinaryPrimitives.ReadUInt16BigEndian(bytes.Slice(pos + 14, 2));
+                        if (terminator != 0)
+                        {
+                            throw new InvalidDataException(
+                                $"CRX FF13 at byte 0x{pos - 4:X8} terminator is 0x{terminator:X4}, expected 0.");
+                        }
+                        subbands.Add(new Subband(
+                            TileIndex: tileIdx,
+                            PlaneIndex: planeIdx,
+                            BandIndex: bandIdx,
+                            DataOffset: planeBase + bandOffsetWithinPlane,
+                            DataSize: subbandSize - padding,
+                            QParam: 0,
+                            QStepBase: qStepBase,
+                            QStepMult: qStepMult,
+                            IsLossy: true,
+                            SupportsPartial: planeSupportsPartial,
+                            RoundedBitsMask: planeRoundedBitsMask));
+                        bandOffsetWithinPlane += subbandSize;
+                    }
+                    break;
                 // Unknown markers: skip the payload.
             }
             pos += tagLen;
         }
-        return subbands;
+        return new ParseResult(tiles, subbands);
     }
 }

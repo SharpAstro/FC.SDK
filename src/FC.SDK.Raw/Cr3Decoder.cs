@@ -340,10 +340,17 @@ internal static class Cr3Decoder
         var stsz = IsoBmffReader.FindChild(bytes, stbl, "stsz");
         if (stsz is { } sz)
         {
-            // FullBox: 4 bytes version+flags + 4 bytes sample_size + 4 bytes sample_count.
-            // When sample_size != 0, all samples share that size (which is what CR3 emits).
+            // FullBox: 4 bytes version+flags + 4 bytes sample_size + 4 bytes
+            // sample_count + (if sample_size==0) sample_count × 4-byte entry sizes.
+            // The M50 emits sample_size as the actual byte size (uniform across
+            // its single sample); the R5 emits sample_size==0 and stashes the
+            // real size in the first entry of the size table. Handle both —
+            // CR3 always has exactly one sample per raw track.
             var p = sz.PayloadOffset;
-            size = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(p + 4, 4));
+            var sampleSize = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(p + 4, 4));
+            size = sampleSize != 0
+                ? sampleSize
+                : (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(p + 12, 4));
         }
         return (offset, size);
     }

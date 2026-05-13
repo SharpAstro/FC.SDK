@@ -75,12 +75,40 @@ internal static class CrxDecoder
         // mdat payload) carries the structural 0xFF01/0xFF02/0xFF03 markers;
         // we walk it once to materialise the per-(tile, plane, band) byte
         // ranges and then decode each subband independently.
-        var subbands = CrxMdatHeader.Parse(bytes, header.MdatOffset, header.MdatHdrSize);
+        var mdat = CrxMdatHeader.Parse(bytes, header.MdatOffset, header.MdatHdrSize);
+        var subbands = mdat.Subbands;
         if (subbands.Count == 0)
         {
             throw new InvalidDataException(
                 "CRX mdat header parse produced no subbands — header zone is malformed or " +
                 "MdatHdrSize is wrong (check CMP1[+28..+32] parse).");
+        }
+
+        // Lossy cRAW (FF13 bands + per-tile QP-data stream). Decode each
+        // tile's QP stream up front so the per-plane wavelet decoders below
+        // can read the resulting qStep tables. Tiles WITHOUT QP data (the
+        // lossless case, FF03 bands) get a null entry — the wavelet decoder
+        // then takes its scalar QScale path per band.
+        //
+        // qpWidth/qpHeight are computed from the PER-PLANE dimensions,
+        // not the full CMP1 tile dimensions: LibRaw's `tile->width` is
+        // assigned `img->planeWidth` (= image_width / 2), so qpWidth =
+        // ceil(planeWidth / 8). For our R5 fixture this is 328 × 878 =
+        // 287,984 samples, which actually fits in the 41,553-byte QP
+        // stream (vs. 1.15M for the full-tile sizing — a 4× mismatch
+        // that manifested as a bitstream underrun).
+        var planeWidthForQp = header.TileWidth / 2;
+        var planeHeightForQp = header.TileHeight / 2;
+        var perTileQStep = new CrxQStep.QStepTable[]?[mdat.Tiles.Count];
+        for (var t = 0; t < mdat.Tiles.Count; t++)
+        {
+            var tile = mdat.Tiles[t];
+            if (!tile.HasQpData) continue;
+            var qpWidth = CeilDiv(planeWidthForQp, 8);
+            var qpHeight = CeilDiv(planeHeightForQp, 2);
+            var qpBytes = bytes.Slice((int)tile.QpDataOffset, tile.QpDataSize);
+            var qpTable = CrxQpDecoder.DecodeTile(qpBytes, qpWidth, qpHeight);
+            perTileQStep[t] = CrxQStep.BuildLevels(qpTable, planeWidthForQp, planeHeightForQp, header.Levels);
         }
 
         var output = new ushort[(long)header.Width * header.Height];
@@ -105,10 +133,15 @@ internal static class CrxDecoder
         else
         {
             DecodeLevelsWavelet(bytes, header, subbands, output, planeWidth, planeHeight,
-                tilesPerRow, tileRows, median, maxValue);
+                tilesPerRow, tileRows, median, maxValue, perTileQStep);
         }
         return output;
     }
+
+    /// <summary>Integer ceiling division for positive arguments. Used by the
+    /// FF13 path to size the qpTable to LibRaw's <c>ceil(tileDim / N)</c>
+    /// convention.</summary>
+    private static int CeilDiv(int a, int b) => (a + b - 1) / b;
 
     /// <summary>levels=0 path — single LL band per plane, no wavelet. Each
     /// subband holds the full plane data row-by-row with LOCO-I + run-length
@@ -184,7 +217,8 @@ internal static class CrxDecoder
         ReadOnlySpan<byte> bytes, CrxImageHeader header,
         IReadOnlyList<CrxMdatHeader.Subband> subbands,
         ushort[] output, int planeWidth, int planeHeight,
-        int tilesPerRow, int tileRows, int median, int maxValue)
+        int tilesPerRow, int tileRows, int median, int maxValue,
+        CrxQStep.QStepTable[]?[] perTileQStep)
     {
         var bandsPerPlane = 3 * header.Levels + 1;
         // Group the flat subband list by (tile, plane) so we can hand each
@@ -224,7 +258,8 @@ internal static class CrxDecoder
             }
 
             var plane = new CrxWaveletPlaneDecoder(
-                bytes, planeWidth, planeHeight, header.Levels, tileFlag, planeBands);
+                bytes, planeWidth, planeHeight, header.Levels, tileFlag, planeBands,
+                perTileQStep[tileIdx]);
 
             var planeYOff = planeIdx >> 1;
             var planeXOff = planeIdx & 1;

@@ -226,25 +226,16 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void EosR5_CrawFixture_HasExpectedShapeAndThrowsOnFf13()
+    public void Cr3_DecodesR5CrawToMosaic_ProducesPlausibleSignal()
     {
-        // Pre-B.6 baseline for the EOS R5 lossy cRAW path. Empirically the
-        // file reports encType=0 levels=3 (same as the M50 CRAW.CR3) but
-        // every subband marker is FF13 (per-position qStep table) rather
-        // than FF03 (scalar qParam). So Canon's "lossy cRAW" on R5/R6
-        // re-uses the existing lossless wavelet pyramid + Rice path and
-        // adds quantization on top via FF13. encType=3 itself may never
-        // appear in current consumer CR3 files.
-        //
-        // This test pins three things:
-        //  - the fixture parses cleanly to encType=0 levels=3
-        //  - the structural mdat header zone starts at the CMP1-reported
-        //    offset (the 64-bit largesize mdat-box encoding works)
-        //  - a full Decode currently throws on the first FF13 marker with
-        //    a recognisable message, so the gap is loud
-        //
-        // When B.6 lands (FF13 parsing + qStep-driven inverse-quant) this
-        // test flips to assert a successful decode like the M50 CRAW one.
+        // Phase B.6 end-to-end gate. The R5 cRAW fixture is lossy cRAW —
+        // encType=0 levels=3 (same wavelet pyramid we ship for M50 CRAW)
+        // BUT with every band using FF13 markers carrying per-position
+        // quantization tables. The decoder reads the per-tile Golomb QP
+        // stream, folds it through q_step_tbl[6] into per-level qStep
+        // grids, and scales each decoded coefficient by qStepBase +
+        // ((qStepTbl[row,col] * qStepMult) >> 3) before the inverse 5/3
+        // lift. R5/R6 ship every consumer cRAW shot through this path.
         var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Canon_EOS_R5_CRAW.CR3");
         if (!File.Exists(path))
         {
@@ -266,14 +257,52 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
         header.PlaneCount.ShouldBe(4);
         header.EncType.ShouldBe(0);
         header.Levels.ShouldBe(3);
-        header.TileWidth.ShouldBe(5248);
-        header.TileHeight.ShouldBe(3510);
-        // Decode should throw with the FF13 "fixture needed" message until
-        // B.6 lands. (Specifically NotImplementedException from
-        // CrxMdatHeader.Parse — we don't check the exact text since the
-        // message will go away when this stops throwing.)
-        Should.Throw<NotImplementedException>(
-            () => Cr3Decoder.Decode(bytes, decodeMosaic: true));
+
+        var file = Cr3Decoder.Decode(bytes, decodeMosaic: true);
+        file.Width.ShouldBe(5248);
+        file.Height.ShouldBe(3510);
+        file.BitDepth.ShouldBe(14);
+        file.CfaPattern.ShouldBe(CanonCfaPattern.Rggb);
+        file.BayerMosaic.ShouldNotBeNull();
+        file.BayerMosaic.Length.ShouldBe(file.Width * file.Height);
+
+        var max14 = (1 << 14) - 1;
+        ushort min = ushort.MaxValue, max = 0;
+        var distinct = new HashSet<ushort>();
+        foreach (var v in file.BayerMosaic)
+        {
+            if (v < min) min = v;
+            if (v > max) max = v;
+            if (distinct.Count < 4096) distinct.Add(v);
+        }
+        output.WriteLine($"R5 cRAW mosaic: min={min}, max={max}, distinct(cap 4096)={distinct.Count}");
+        (max - min).ShouldBeGreaterThan(max14 / 10,
+            $"R5 cRAW mosaic dynamic range only {max - min} < {max14 / 10} — wavelet+iquant decode looks broken.");
+        distinct.Count.ShouldBeGreaterThan(256,
+            $"R5 cRAW mosaic only has {distinct.Count} distinct values — wavelet+iquant decode is producing degenerate output.");
+        max.ShouldBeLessThanOrEqualTo((ushort)max14, "mosaic value exceeds 14-bit range — clamp regression.");
+
+        var outDir = CreateTestOutputDir(nameof(Cr3_DecodesR5CrawToMosaic_ProducesPlausibleSignal));
+        var img = CanonDemosaic.Render(file, new CanonRenderOptions { Algorithm = CanonDemosaicAlgorithm.Bilinear });
+        var rgba = new byte[file.Width * file.Height * 4];
+        for (var p = 0; p < file.Width * file.Height; p++)
+        {
+            rgba[p * 4]     = (byte)(img.InterleavedRgb[p * 3]     >> 8);
+            rgba[p * 4 + 1] = (byte)(img.InterleavedRgb[p * 3 + 1] >> 8);
+            rgba[p * 4 + 2] = (byte)(img.InterleavedRgb[p * 3 + 2] >> 8);
+            rgba[p * 4 + 3] = 0xFF;
+        }
+        var pngPath = Path.Combine(outDir, "cr3_r5_craw_bilinear.png");
+        File.WriteAllBytes(pngPath, PngWriter.Encode(rgba, file.Width, file.Height));
+        output.WriteLine($"R5 cRAW bilinear render: {pngPath} ({file.Width}x{file.Height})");
+
+        // Dump raw mosaic as ushort[] .bin so the LibRaw oracle compare
+        // (unprocessed_raw + tifffile) can do byte-exact validation.
+        var binPath = Path.Combine(outDir, "cr3_r5_craw_mosaic.bin");
+        var rawBytes = new byte[file.BayerMosaic.Length * 2];
+        Buffer.BlockCopy(file.BayerMosaic, 0, rawBytes, 0, rawBytes.Length);
+        File.WriteAllBytes(binPath, rawBytes);
+        output.WriteLine($"R5 cRAW raw-mosaic bin: {binPath} ({rawBytes.Length} bytes)");
     }
 
     [Fact]

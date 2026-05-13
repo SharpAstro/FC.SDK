@@ -30,19 +30,17 @@ spectrum between "consumer raw viewer" and "astro decode."
 
 ## CRX decoder coverage
 
-- [ ] **FF13 subband markers + per-band qStep** (B.6). Empirically the
+- [x] **FF13 subband markers + per-band qStep** (B.6). Empirically the
       "lossy cRAW" output from R5/R6 is `encType=0 levels=3` with every
-      band using FF13 instead of FF03. The wavelet pyramid + Rice path
-      is reused as-is; we add (a) FF13 parsing in `CrxMdatHeader` and
-      (b) inverse-quantization (multiply each decoded coefficient by its
-      band's qStep before the lift) in `CrxWaveletPlaneDecoder.Subband`.
-      Fixture `Canon_EOS_R5_CRAW.CR3` committed and pinned by
-      `EosR5_CrawFixture_HasExpectedShapeAndThrowsOnFf13` — flip that
-      test's `Throw<NotImplementedException>` to a successful-decode
-      assertion once the path lands. Bonus prerequisite: the R5 file
-      uses 64-bit `largesize` mdat-box encoding (size field == 1) which
-      `IsoBmffReader` currently parses as size=0; ~10 LOC fix needed
-      before the decoder reaches the bands.
+      band using FF13 instead of FF03; the wavelet pyramid + Rice path
+      is reused, with `CrxQpDecoder` producing the per-tile qpTable,
+      `CrxQStep` folding it through `q_step_tbl[6]` into per-level
+      quantization grids, and `CrxWaveletPlaneDecoder.Subband` scaling
+      each decoded coefficient by `qStepBase + (qStepTbl[r,c] * qStepMult >> 3)`
+      before the inverse lift. Fixture `Canon_EOS_R5_CRAW.CR3` and test
+      `Cr3_DecodesR5CrawToMosaic_ProducesPlausibleSignal` pin the path.
+      Byte-exact verified against LibRaw `unprocessed_raw` oracle
+      (0 / 18,420,480 pixel mismatches).
 - [ ] **encType=3.** May genuinely not exist in current consumer CR3
       files — every R-series sample we've inspected is `encType=0`
       with FF13 quantization. Keep the throw with a clearer message

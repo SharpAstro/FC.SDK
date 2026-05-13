@@ -76,11 +76,16 @@ internal sealed class CrxWaveletPlaneDecoder
         int planeHeight,
         int levels,
         byte tileFlag,
-        IReadOnlyList<CrxMdatHeader.Subband> planeSubbands)
+        IReadOnlyList<CrxMdatHeader.Subband> planeSubbands,
+        CrxQStep.QStepTable[]? qStepTables = null)
     {
         if (levels < 1 || levels > 3)
             throw new ArgumentOutOfRangeException(nameof(levels),
                 "CRX wavelet decoder supports levels=1..3 (per LibRaw's exCoefNumTbl coverage).");
+        if (qStepTables is not null && qStepTables.Length != levels)
+            throw new ArgumentException(
+                $"qStepTables length {qStepTables.Length} must match levels {levels}.",
+                nameof(qStepTables));
         OutputWidth = planeWidth;
         OutputHeight = planeHeight;
         _nLevels = levels;
@@ -111,7 +116,30 @@ internal sealed class CrxWaveletPlaneDecoder
             // line variant with zero-centred coefficients.
             var supportsPartial = i == 0;
             var bandSlice = bytes.Slice((int)src.DataOffset, src.DataSize);
-            _subbands[i] = new Subband(width, height, src.QParam, supportsPartial, bandSlice);
+
+            // FF13 mapping: each band attaches to one of `levels` qStep tables
+            // (qStepTables[0]=coarsest, qStepTables[levels-1]=finest). Band 0
+            // (LL) shares the coarsest table with the other coarsest-level
+            // bands. Per-band levelShift mirrors LibRaw's `3 - (level+1)` from
+            // crxSetupSubbandIdx after collapsing the off-by-one: for our
+            // band index `i`, the wavelet level is (i==0 ? 0 : (i-1)/3) and
+            // levelShift equals that level. Single-tile fixtures (R5/M50)
+            // have all rowStart/EndAddOn and colStart/EndAddOn = 0.
+            CrxQStep.QStepTable qStepTable = default;
+            var levelShift = 0;
+            if (qStepTables is not null && src.IsLossy)
+            {
+                var bandLevel = i == 0 ? 0 : (i - 1) / 3;
+                qStepTable = qStepTables[bandLevel];
+                levelShift = bandLevel;
+            }
+
+            _subbands[i] = new Subband(
+                width, height, src.QParam, supportsPartial, bandSlice,
+                src.IsLossy, src.QStepBase, src.QStepMult,
+                qStepTable, levelShift,
+                colStartAddOn: 0, colEndAddOn: 0,
+                rowStartAddOn: 0, rowEndAddOn: 0);
         }
 
         // Wavelet level wiring. wavelet[L].width / height come from a one-
@@ -190,7 +218,30 @@ internal sealed class CrxWaveletPlaneDecoder
         /// </summary>
         public int QScale { get; }
 
-        public Subband(int width, int height, int qParam, bool supportsPartial, ReadOnlySpan<byte> bandBytes)
+        // FF13 / lossy-cRAW inverse-quantization state. Inactive when
+        // <see cref="IsLossy"/> is false (the QScale scalar path is taken).
+        private readonly bool _isLossy;
+        private readonly int _qStepBase;
+        private readonly uint _qStepMult;
+        private readonly CrxQStep.QStepTable _qStepTable;
+        private readonly int _levelShift;
+        private readonly int _colStartAddOn;
+        private readonly int _colEndAddOn;
+        private readonly int _rowStartAddOn;
+        private readonly int _rowEndAddOn;
+        /// <summary>Current row index within this band. Incremented on every
+        /// <see cref="DecodeNextRow"/>; folded into <see cref="GetSubbandRow"/>
+        /// to index the per-tile <see cref="_qStepTable"/>.</summary>
+        private int _row;
+
+        public Subband(
+            int width, int height, int qParam, bool supportsPartial,
+            ReadOnlySpan<byte> bandBytes,
+            bool isLossy, int qStepBase, int qStepMult,
+            CrxQStep.QStepTable qStepTable,
+            int levelShift,
+            int colStartAddOn, int colEndAddOn,
+            int rowStartAddOn, int rowEndAddOn)
         {
             Width = width;
             Height = height;
@@ -202,6 +253,15 @@ internal sealed class CrxWaveletPlaneDecoder
             else
                 HighDecoder = new CrxHighBandLineDecoder(stream, width);
             QScale = ComputeQScale(qParam);
+            _isLossy = isLossy;
+            _qStepBase = qStepBase;
+            _qStepMult = (uint)qStepMult;
+            _qStepTable = qStepTable;
+            _levelShift = levelShift;
+            _colStartAddOn = colStartAddOn;
+            _colEndAddOn = colEndAddOn;
+            _rowStartAddOn = rowStartAddOn;
+            _rowEndAddOn = rowEndAddOn;
         }
 
         /// <summary>Decode one row into <see cref="BandBuf"/> and apply
@@ -212,15 +272,91 @@ internal sealed class CrxWaveletPlaneDecoder
             if (LowDecoder is not null) LowDecoder.DecodeNextRow(BandBuf);
             else HighDecoder!.DecodeNextRow(BandBuf);
 
-            // Inverse-quantize. For the lossless path qScale is normally 1
-            // (qParam=4), so this loop is skipped entirely on the hot path.
-            var s = QScale;
-            if (s != 1 && s != 0)
+            if (_isLossy)
             {
-                var b = BandBuf;
-                for (var i = 0; i < b.Length; i++) b[i] *= s;
+                ApplyPositionalQuantization();
+            }
+            else
+            {
+                // Lossless FF03 path: single scalar qScale (= 1 for qParam=4,
+                // which is the lossless identity case — multiplication skipped).
+                var s = QScale;
+                if (s != 1 && s != 0)
+                {
+                    var b = BandBuf;
+                    for (var i = 0; i < b.Length; i++) b[i] *= s;
+                }
+            }
+            _row++;
+        }
+
+        /// <summary>Per-coefficient inverse-quantization for FF13 bands.
+        /// Three column-range segments (start padding / interior / end
+        /// padding) mirror LibRaw's <c>crxDecodeLineWithIQuantization</c>
+        /// loop structure exactly — the start/end use the first/last qStep
+        /// entry for the row, the interior steps through the qStep row at
+        /// <c>1 &lt;&lt; LevelShift</c> band columns per qStep column.</summary>
+        private void ApplyPositionalQuantization()
+        {
+            var tbl = _qStepTable.Values;
+            var tblWidth = _qStepTable.Width;
+            // Map current band row → qStep table row. For single-tile
+            // fixtures (rowStartAddOn = rowEndAddOn = 0) this is just
+            // _row clamped to qStepTable.Height-1.
+            var rowIdx = GetSubbandRow(_row);
+            if (rowIdx >= _qStepTable.Height) rowIdx = _qStepTable.Height - 1;
+            var rowBase = tblWidth * rowIdx;
+            var b = BandBuf;
+
+            // Start-padding columns (only non-empty when colStartAddOn > 0,
+            // i.e. tile has a neighbour to the left).
+            for (var i = 0; i < _colStartAddOn && i < Width; i++)
+            {
+                var qsv = _qStepBase + (int)((tbl[rowBase] * _qStepMult) >> 3);
+                b[i] *= Clamp(qsv, 1, 0x168000);
+            }
+            // Interior — each qStep column covers (1 << LevelShift) band
+            // columns. For levels=3 finest band: levelShift=2, so 4 band
+            // columns share one qStep entry.
+            var end = Width - _colEndAddOn;
+            for (var i = _colStartAddOn; i < end; i++)
+            {
+                var qsIdx = (i - _colStartAddOn) >> _levelShift;
+                if (qsIdx >= tblWidth) qsIdx = tblWidth - 1;
+                var qsv = _qStepBase + (int)((tbl[rowBase + qsIdx] * _qStepMult) >> 3);
+                b[i] *= Clamp(qsv, 1, 0x168000);
+            }
+            // End-padding columns (only non-empty when colEndAddOn > 0,
+            // i.e. tile has a neighbour to the right). These all share the
+            // last interior qStep entry.
+            if (_colEndAddOn > 0 && end < Width)
+            {
+                var lastIdx = (Width - _colEndAddOn - _colStartAddOn - 1) >> _levelShift;
+                if (lastIdx < 0) lastIdx = 0;
+                if (lastIdx >= tblWidth) lastIdx = tblWidth - 1;
+                for (var i = end; i < Width; i++)
+                {
+                    var qsv = _qStepBase + (int)((tbl[rowBase + lastIdx] * _qStepMult) >> 3);
+                    b[i] *= Clamp(qsv, 1, 0x168000);
+                }
             }
         }
+
+        /// <summary>Maps the current band row to the qStep table row,
+        /// clamping at tile boundaries. Mirrors LibRaw's
+        /// <c>getSubbandRow</c>: rows in the top extension (<c>row &lt; rowStartAddOn</c>)
+        /// all map to qStep row 0; rows in the bottom extension all map to
+        /// the last interior row; interior rows pass through with the
+        /// rowEndAddOn offset subtracted.</summary>
+        private int GetSubbandRow(int row)
+        {
+            if (row < _rowStartAddOn) return 0;
+            var interiorEnd = Height - _rowEndAddOn;
+            if (row < interiorEnd) return row - _rowEndAddOn;
+            return Height - _rowEndAddOn - _rowStartAddOn - 1;
+        }
+
+        private static int Clamp(int v, int lo, int hi) => v < lo ? lo : v > hi ? hi : v;
 
         /// <summary>Port of LibRaw's qScale derivation in
         /// <c>crxDecodeLineWithIQuantization</c>'s "prev. version" branch
