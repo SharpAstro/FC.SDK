@@ -1,3 +1,4 @@
+using FC.SDK.Raw.Crx;
 using SharpAstro.Exif;
 using SharpAstro.Tiff;
 using System;
@@ -35,6 +36,22 @@ internal static class Cr3Decoder
     private static readonly Guid PreviewContainerUuid = new("eaf42b5e-1c98-4b88-b9fb-b7dc406e4d16");
     // private static readonly Guid XPacketUuid = new("be7acfcb-97a9-42e8-9c71-999491e3afac"); // XMP, not consumed today
 
+    /// <summary>Resolve the CR3 sensor-track header without decoding any
+    /// payload. Returns null if the file isn't a CR3 or has no raw track.
+    /// Internal — Phase B tests use this to verify the BMFF descent extracts
+    /// the expected geometry + codec params before the full mosaic decode
+    /// lands. Production callers use <see cref="Decode"/>.</summary>
+    internal static CrxImageHeader? TryResolveHeader(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length < 16) return null;
+        if (!(bytes[4] == 'f' && bytes[5] == 't' && bytes[6] == 'y' && bytes[7] == 'p')) return null;
+        var ftyp = IsoBmffReader.FindTopLevel(bytes, "ftyp");
+        if (ftyp is null) return null;
+        var moov = IsoBmffReader.FindTopLevel(bytes, "moov");
+        if (moov is not { } m) return null;
+        return ResolveRawTrack(bytes, m);
+    }
+
     /// <summary>Decode a CR3 byte stream. <paramref name="decodeMosaic"/> is
     /// the Phase A vs Phase B switch: with <c>false</c>, the BMFF tree is
     /// parsed, EXIF / MakerNote / dimensions / thumbnail are all extracted,
@@ -66,23 +83,28 @@ internal static class Cr3Decoder
         var exif = canonMeta is { } cm ? ParseExifFromCanonMetadata(bytes, cm) : null;
         var makerNote = canonMeta is { } cm2 ? ParseMakerNoteFromCanonMetadata(bytes, cm2) : null;
 
-        // CMP1 carries width / height / bit depth / CFA layout. CR3 ships
-        // multiple CMP1 boxes (one per track — preview, sRAW, full sensor);
-        // the sensor-native one is always the largest by pixel count.
-        var (width, height, bitDepth, cfa) = FindLargestCmp1(bytes, moov)
-            ?? throw new InvalidDataException("CR3 has no CMP1 box — sensor dimensions unavailable");
+        // CMP1 + co64 + stsz from the largest trak give us everything the CRX
+        // decoder needs: image + tile geometry, codec params, per-track mdat
+        // byte range. The proper descent (moov/trak[i]/mdia/minf/stbl/stsd/CRAW/CMP1)
+        // is in ResolveRawTrack; it correctly handles the FullBox preamble on
+        // stsd and the VisualSampleEntry preamble on CRAW.
+        var crxHeader = ResolveRawTrack(bytes, moov)
+            ?? throw new InvalidDataException("CR3 has no raw track with CMP1 — sensor dimensions unavailable");
 
         if (decodeMosaic)
             throw new NotImplementedException(
-                "CR3 CRX wavelet+Golomb-Rice decoder pending (Phase B). " +
-                "Metadata + thumbnail extraction work via `decodeMosaic=false`.");
+                $"CR3 CRX wavelet+Golomb-Rice decoder pending (Phase B). " +
+                $"Track header parsed: {crxHeader.Width}x{crxHeader.Height} {crxHeader.BitDepth}-bit, " +
+                $"encType={crxHeader.EncType} levels={crxHeader.Levels} tile={crxHeader.TileWidth}x{crxHeader.TileHeight} " +
+                $"mdat=[{crxHeader.MdatOffset}, {crxHeader.MdatOffset + crxHeader.MdatSize}). " +
+                $"Metadata + thumbnail extraction work via `decodeMosaic=false`.");
 
         return new CanonRawFile(
-            Width: width,
-            Height: height,
+            Width: crxHeader.Width,
+            Height: crxHeader.Height,
             BayerMosaic: Array.Empty<ushort>(),
-            BitDepth: bitDepth,
-            CfaPattern: cfa,
+            BitDepth: crxHeader.BitDepth,
+            CfaPattern: crxHeader.Cfa,
             Exif: exif,
             MakerNote: makerNote);
     }
@@ -231,20 +253,148 @@ internal static class Cr3Decoder
         return new CanonWhiteBalance(r / g, 1.0f, g2 / g, b / g);
     }
 
-    /// <summary>Walk the entire byte span for all CMP1 boxes and return the
-    /// largest by pixel count. CR3 carries one CMP1 per track (preview,
-    /// sRAW, full sensor); the sensor-native frame is always the largest.
-    /// CMP1 payload layout per Laurent's docs:
-    /// <list type="bullet">
-    /// <item>+2 from payload start: header size (short)</item>
-    /// <item>+4: version (short)</item>
-    /// <item>+8: image width (uint32 BE)</item>
-    /// <item>+12: image height (uint32 BE)</item>
-    /// <item>+24: bits per sample (byte)</item>
-    /// <item>+25: high nibble = plane count, low nibble = CFA layout
-    ///   (0=RGGB, 1=GRBG, 2=GBRG, 3=BGGR)</item>
-    /// </list>
-    /// </summary>
+    /// <summary>Walk all <c>trak</c> boxes inside <c>moov</c> and return the
+    /// fully-resolved <see cref="CrxImageHeader"/> for the sensor-native
+    /// raw track (the largest CMP1 by pixel count). Per-track mdat byte
+    /// range comes from the track's <c>co64</c> chunk-offset and <c>stsz</c>
+    /// sample-size boxes. The path
+    /// <c>moov/trak[i]/mdia/minf/stbl/stsd/CRAW/CMP1</c> is the spec-correct
+    /// descent — properly handling the 8-byte FullBox preamble on <c>stsd</c>
+    /// and the 78-byte VisualSampleEntry preamble on <c>CRAW</c>.</summary>
+    private static CrxImageHeader? ResolveRawTrack(ReadOnlySpan<byte> bytes, IsoBmffReader.Box moov)
+    {
+        CrxImageHeader? best = null;
+        long bestPixels = 0;
+
+        foreach (var trak in IsoBmffReader.ParseChildren(bytes, moov))
+        {
+            if (trak.Type != "trak") continue;
+            var header = ParseTrak(bytes, trak);
+            if (header is null) continue;
+            long pixels = (long)header.Width * header.Height;
+            if (pixels > bestPixels)
+            {
+                bestPixels = pixels;
+                best = header;
+            }
+        }
+        return best;
+    }
+
+    /// <summary>Parse a single <c>trak</c> box to extract its CRX header.
+    /// Returns null when the track doesn't carry a CRAW SampleEntry with
+    /// CMP1 (e.g. the metadata track <c>CTMD</c>, or the thumbnail JPEG
+    /// track whose SampleEntry is <c>JPEG</c> not <c>CRAW</c>).</summary>
+    private static CrxImageHeader? ParseTrak(ReadOnlySpan<byte> bytes, IsoBmffReader.Box trak)
+    {
+        var mdia = IsoBmffReader.FindChild(bytes, trak, "mdia");
+        if (mdia is not { } m) return null;
+        var minf = IsoBmffReader.FindChild(bytes, m, "minf");
+        if (minf is not { } mf) return null;
+        var stbl = IsoBmffReader.FindChild(bytes, mf, "stbl");
+        if (stbl is not { } sb) return null;
+        var stsd = IsoBmffReader.FindChild(bytes, sb, "stsd");
+        if (stsd is not { } sd) return null;
+
+        // stsd is a FullBox carrying an entry count before its child sample
+        // entries — descend with the 8-byte preamble skip.
+        IsoBmffReader.Box? craw = null;
+        foreach (var entry in IsoBmffReader.ParseFullBoxChildren(bytes, sd))
+        {
+            if (entry.Type == "CRAW") { craw = entry; break; }
+        }
+        if (craw is not { } cr) return null;
+
+        // CRAW is a VisualSampleEntry; its 78-byte preamble is followed by
+        // codec-specific child boxes (CMP1, CDI1, JPEG sometimes).
+        var cmp1 = (IsoBmffReader.Box?)null;
+        foreach (var entry in IsoBmffReader.ParseVisualSampleEntryChildren(bytes, cr))
+        {
+            if (entry.Type == "CMP1") { cmp1 = entry; break; }
+        }
+        if (cmp1 is not { } c) return null;
+
+        var (mdatOffset, mdatSize) = ReadChunkOffsetAndSize(bytes, sb);
+        return ParseCmp1(bytes, c, mdatOffset, mdatSize);
+    }
+
+    /// <summary>Read the (offset, size) of this track's single sample
+    /// (the compressed CRX payload) from <c>co64</c> + <c>stsz</c>.
+    /// CR3 tracks emit exactly one sample, so this is a degenerate but
+    /// well-defined read: one 64-bit chunk offset + one 32-bit sample size.</summary>
+    private static (long Offset, int Size) ReadChunkOffsetAndSize(
+        ReadOnlySpan<byte> bytes, IsoBmffReader.Box stbl)
+    {
+        long offset = 0;
+        var size = 0;
+        var co64 = IsoBmffReader.FindChild(bytes, stbl, "co64");
+        if (co64 is { } co)
+        {
+            // FullBox: 4 bytes version+flags + 4 bytes entry_count + 8*N offsets.
+            // We take the first offset (entry_count is always 1 in CR3).
+            var p = co.PayloadOffset;
+            offset = (long)BinaryPrimitives.ReadUInt64BigEndian(bytes.Slice(p + 8, 8));
+        }
+        var stsz = IsoBmffReader.FindChild(bytes, stbl, "stsz");
+        if (stsz is { } sz)
+        {
+            // FullBox: 4 bytes version+flags + 4 bytes sample_size + 4 bytes sample_count.
+            // When sample_size != 0, all samples share that size (which is what CR3 emits).
+            var p = sz.PayloadOffset;
+            size = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(p + 4, 4));
+        }
+        return (offset, size);
+    }
+
+    /// <summary>Parse the CMP1 codec-params box into a <see cref="CrxImageHeader"/>.
+    /// Field layout per Laurent's docs (offsets relative to box payload start):
+    /// +2 header size (short), +4 version (short), +8 image width (uint32),
+    /// +12 image height (uint32), +16 tile width (uint32), +20 tile height
+    /// (uint32), +24 bits per sample (byte), +25 plane count (high nibble) +
+    /// CFA layout (low nibble), +26 encType (high nibble) + image levels
+    /// (low nibble), +27 flags, +28 something (subband-related).</summary>
+    private static CrxImageHeader ParseCmp1(
+        ReadOnlySpan<byte> bytes, IsoBmffReader.Box cmp1, long mdatOffset, int mdatSize)
+    {
+        var p = cmp1.PayloadOffset;
+        var width = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(p + 8, 4));
+        var height = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(p + 12, 4));
+        var tileWidth = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(p + 16, 4));
+        var tileHeight = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(p + 20, 4));
+        var bitDepth = bytes[p + 24];
+        var planeCount = bytes[p + 25] >> 4;
+        var cfaByte = bytes[p + 25] & 0xF;
+        var encType = bytes[p + 26] >> 4;
+        var levels = bytes[p + 26] & 0xF;
+        var cfa = cfaByte switch
+        {
+            0 => CanonCfaPattern.Rggb,
+            1 => CanonCfaPattern.Grbg,
+            2 => CanonCfaPattern.Gbrg,
+            3 => CanonCfaPattern.Bggr,
+            _ => CanonCfaPattern.Rggb,
+        };
+        return new CrxImageHeader(
+            Width: width,
+            Height: height,
+            TileWidth: tileWidth,
+            TileHeight: tileHeight,
+            BitDepth: bitDepth,
+            PlaneCount: planeCount,
+            Cfa: cfa,
+            EncType: encType,
+            Levels: levels,
+            MdatOffset: mdatOffset,
+            MdatSize: mdatSize);
+    }
+
+    /// <summary>Legacy brute-force scan retained for the metadata-only
+    /// Phase A code path. Phase B's <see cref="ResolveRawTrack"/> produces
+    /// the same width/height/bit-depth/CFA via the proper trak descent
+    /// but additionally surfaces tile dimensions and the per-track mdat
+    /// byte range. Both produce identical (width, height, bitDepth, cfa)
+    /// triples — we'd remove the brute-force scan now but keeping it
+    /// as the fallback for malformed files isn't a bad idea.</summary>
     private static (int Width, int Height, int BitDepth, CanonCfaPattern Cfa)? FindLargestCmp1(
         ReadOnlySpan<byte> bytes, IsoBmffReader.Box moov)
     {

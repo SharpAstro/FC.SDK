@@ -78,6 +78,34 @@ internal static class IsoBmffReader
         return null;
     }
 
+    /// <summary>Number of bytes to skip when descending into a "FullBox"
+    /// container (4-byte version+flags + 4-byte entry_count before the
+    /// first child box). ISO/IEC 14496-12 §4.2: <c>stsd</c>, <c>dref</c>,
+    /// <c>iref</c>, etc. — boxes that carry both a version stamp and an
+    /// entry count before their child entries.</summary>
+    public const int FullBoxEntryListHeader = 8;
+
+    /// <summary>Number of bytes to skip when descending into Canon's
+    /// <c>CRAW</c> sample-entry box before the first child codec-config box
+    /// (<c>CMP1</c>, <c>CDI1</c>, etc.). Value is 0x52 = 82 — that's the
+    /// standard VisualSampleEntry preamble (ISO/IEC 14496-12 §8.5.2.2: 6
+    /// bytes reserved + 2 data_reference_index + 16 bytes pre_defined/reserved
+    /// + 2 width + 2 height + 4 horizres + 4 vertres + 4 reserved + 2
+    /// frame_count + 32 compressorname + 2 depth + 2 pre_defined = 78 bytes)
+    /// PLUS 4 bytes of Canon-specific extension (matches Laurent Clévy's
+    /// <c>parse_cr3.py</c> reference: <c>innerOffsets = { b'CRAW': 0x52, ... }</c>).</summary>
+    public const int VisualSampleEntryHeader = 82;
+
+    /// <summary>Descend into a FullBox container (<c>stsd</c> and friends),
+    /// stepping past the version + entry-count header.</summary>
+    public static ImmutableArray<Box> ParseFullBoxChildren(ReadOnlySpan<byte> bytes, Box parent)
+        => ParseChildren(bytes, parent, FullBoxEntryListHeader);
+
+    /// <summary>Descend into a VisualSampleEntry container (<c>CRAW</c> in
+    /// CR3), stepping past the 78-byte sample-entry preamble.</summary>
+    public static ImmutableArray<Box> ParseVisualSampleEntryChildren(ReadOnlySpan<byte> bytes, Box parent)
+        => ParseChildren(bytes, parent, VisualSampleEntryHeader);
+
     /// <summary>Find the first top-level box of the given type. Returns null
     /// when the file is missing that box (which for required CR3 top-level
     /// boxes like <c>ftyp</c> / <c>moov</c> / <c>mdat</c> means the file is

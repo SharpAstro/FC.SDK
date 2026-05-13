@@ -1,3 +1,4 @@
+using FC.SDK.Raw.Crx;
 using SharpAstro.Png;
 using Shouldly;
 using StbImageSharp;
@@ -134,6 +135,44 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
         // message before users hit the Phase B "CRX wavelet pending" one.
         var ex = Should.Throw<NotImplementedException>(() => CanonRaw.Open(path));
         ex.Message.ShouldContain("CRX");
+    }
+
+    [Theory]
+    [InlineData("Canon_EOS_M50_CRAW.CR3", 6288, 4056, 3, 3144, 4056)]
+    [InlineData("Canon_EOS_M50_RAW.CR3",  6288, 4056, 0, 3144, 4056)]
+    public void HeaderParse_ResolvesPerTrackGeometry(
+        string fixtureName, int expectedWidth, int expectedHeight,
+        int expectedLevels, int expectedTileWidth, int expectedTileHeight)
+    {
+        // Phase B.3: the BMFF descent picks the largest CMP1 (= sensor-native
+        // raw track) and produces a CrxImageHeader with full geometry +
+        // codec params + per-track mdat byte range. Validate against both
+        // M50 fixtures — they differ in wavelet levels (0 vs 3) so we
+        // cover both decode-path classes.
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", fixtureName);
+        if (!File.Exists(path))
+        {
+            Assert.Skip($"CR3 fixture not present at {path}. Run `git lfs pull` to fetch.");
+            return;
+        }
+        var bytes = File.ReadAllBytes(path);
+        var header = Cr3Decoder.TryResolveHeader(bytes);
+        header.ShouldNotBeNull();
+        header!.Width.ShouldBe(expectedWidth);
+        header.Height.ShouldBe(expectedHeight);
+        header.BitDepth.ShouldBe(14);
+        header.PlaneCount.ShouldBe(4);
+        header.Cfa.ShouldBe(CanonCfaPattern.Rggb);
+        // encType=0 (lossless HQ) for both M50 fixtures. cRAW lossy
+        // (encType=3) would need a fixture from a body that emits that mode.
+        header.EncType.ShouldBe(0);
+        header.Levels.ShouldBe(expectedLevels);
+        header.TileWidth.ShouldBe(expectedTileWidth);
+        header.TileHeight.ShouldBe(expectedTileHeight);
+        // mdat range: offset must be inside the file, size must fit.
+        header.MdatOffset.ShouldBeGreaterThan(0);
+        header.MdatSize.ShouldBeGreaterThan(0);
+        (header.MdatOffset + header.MdatSize).ShouldBeLessThanOrEqualTo(bytes.LongLength);
     }
 
     private static string CreateTestOutputDir(string testName)
