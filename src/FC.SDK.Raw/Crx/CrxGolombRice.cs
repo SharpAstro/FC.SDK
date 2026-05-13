@@ -103,12 +103,23 @@ internal sealed class CrxGolombRice
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void AdaptK(uint bitCode)
     {
-        var oldK = KParam;
-        var newK = oldK
-            - (bitCode < (1u << oldK >> 1) ? 1 : 0)
-            + ((bitCode >> oldK) > 2 ? 1 : 0)
-            + ((bitCode >> oldK) > 5 ? 1 : 0);
-        KParam = newK >= MaxK ? MaxK : newK;
+        KParam = PredictK(KParam, bitCode, MaxK);
+    }
+
+    /// <summary>Stateless <c>crxPredictKParameter</c> — the H-band decoder
+    /// (<see cref="CrxHighBandLineDecoder"/>) drives its own K state per
+    /// position via <c>lineBuf2</c> overrides, so it can't use the
+    /// instance-bound <see cref="AdaptK"/>. <paramref name="maxK"/> of 0 means
+    /// "no cap" (LibRaw's default — used in the run-flat path where K is
+    /// adjusted again by the per-position lineBuf2 logic).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int PredictK(int prevK, uint bitCode, int maxK = 0)
+    {
+        var newK = prevK
+            - (bitCode < (1u << prevK >> 1) ? 1 : 0)
+            + ((bitCode >> prevK) > 2 ? 1 : 0)
+            + ((bitCode >> prevK) > 5 ? 1 : 0);
+        return maxK == 0 || newK < maxK ? newK : maxK;
     }
 
     /// <summary>Read one Rice-coded symbol AND update <see cref="KParam"/>

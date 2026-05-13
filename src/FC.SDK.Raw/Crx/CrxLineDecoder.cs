@@ -59,6 +59,23 @@ internal sealed class CrxLineDecoder
         _currLine = new int[width + 2];
     }
 
+    /// <summary>0-based count of rows produced. Drives the top-line /
+    /// non-top-line dispatch when callers use the unified
+    /// <see cref="DecodeNextRow"/> entry point (wavelet pump path).</summary>
+    public int CurLine { get; private set; }
+
+    /// <summary>Decode one row into <paramref name="destination"/>. Top-line
+    /// vs subsequent-line dispatch is internal — the wavelet pump just
+    /// pulls one row per band per pump step without tracking phase.</summary>
+    public void DecodeNextRow(Span<int> destination)
+    {
+        if (CurLine == 0)
+            DecodeTopLine(destination);
+        else
+            DecodeLine(destination);
+        CurLine++;
+    }
+
     /// <summary>K parameter (Rice quotient bit-count). Exposed for test
     /// inspection; the decoder updates it after each symbol.</summary>
     public int KParam

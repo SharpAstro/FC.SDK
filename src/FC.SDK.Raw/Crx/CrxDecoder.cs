@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace FC.SDK.Raw.Crx;
@@ -50,15 +51,15 @@ internal static class CrxDecoder
                 "encType=1 (monochrome) needs separate fixture validation.");
         }
 
-        if (header.Levels != 0)
+        if (header.Levels < 0 || header.Levels > 3)
         {
-            // levels > 0 means N-level CDF 5/3 wavelet decomposition; the
-            // math is in Cdf53Wavelet.Inverse2D but the multi-subband
-            // orchestration (3*N+1 bands/plane, level-by-level recombination
-            // via the boundary-extension table) is the missing piece for B.5.
+            // exCoefNumTbl in the wavelet path covers up to 3 levels of CDF 5/3
+            // decomposition. Canon's encoders haven't been observed using more,
+            // but if a future fixture does, fail loudly rather than walk past
+            // the table.
             throw new NotImplementedException(
-                $"CRX levels={header.Levels} wavelet integration pending (Phase B.5). " +
-                "Cdf53Wavelet primitives are ready; the per-level subband recombination layer is the gap.");
+                $"CRX levels={header.Levels} outside the supported 0..3 range. " +
+                "Add a fixture and extend exCoefNumTbl if a body emits more.");
         }
 
         if (header.PlaneCount != 4)
@@ -67,7 +68,7 @@ internal static class CrxDecoder
             // monochrome or RGB-packed CRX use a different plane count — we'd
             // need to verify the interleave for those before claiming support.
             throw new NotImplementedException(
-                $"CRX planeCount={header.PlaneCount} not supported (Phase B.4 expects 4 planes for Bayer CFA).");
+                $"CRX planeCount={header.PlaneCount} not supported (4 planes for Bayer CFA required).");
         }
 
         // The mdat header zone (the first MdatHdrSize bytes of the track's
@@ -89,12 +90,35 @@ internal static class CrxDecoder
         // the bit-depth range. For 14-bit raw data: median = 8192.
         var median = 1 << (header.BitDepth - 1);
         var tilesPerRow = header.TileColumns;
+        var tileRows = header.TileRows;
         // Per-plane geometry: each plane carries one quadrant of the Bayer
         // CFA at half resolution, so the plane buffer is tileWidth/2 cols ×
         // tileHeight/2 rows. For M50 RAW.CR3 (tile=3144×4056): 1572×2028.
         var planeWidth = header.TileWidth / 2;
         var planeHeight = header.TileHeight / 2;
 
+        if (header.Levels == 0)
+        {
+            DecodeLevelsZero(bytes, header, subbands, output, planeWidth, planeHeight,
+                tilesPerRow, median, maxValue);
+        }
+        else
+        {
+            DecodeLevelsWavelet(bytes, header, subbands, output, planeWidth, planeHeight,
+                tilesPerRow, tileRows, median, maxValue);
+        }
+        return output;
+    }
+
+    /// <summary>levels=0 path — single LL band per plane, no wavelet. Each
+    /// subband holds the full plane data row-by-row with LOCO-I + run-length
+    /// entropy coding. The byte-exact validation against LibRaw lives here.</summary>
+    private static void DecodeLevelsZero(
+        ReadOnlySpan<byte> bytes, CrxImageHeader header,
+        IReadOnlyList<CrxMdatHeader.Subband> subbands,
+        ushort[] output, int planeWidth, int planeHeight,
+        int tilesPerRow, int median, int maxValue)
+    {
         // Scratch line buffer — same shape for every band when levels=0, so
         // we allocate once and reuse across all (tile × plane) pairs.
         var planeLine = new int[planeWidth];
@@ -119,15 +143,8 @@ internal static class CrxDecoder
             var stream = new CrxBitstream(bytes.Slice((int)sub.DataOffset, sub.DataSize));
             var decoder = new CrxLineDecoder(stream, planeWidth);
 
-            // CFA position offset of this plane inside the 2x2 Bayer cell.
-            // Plane index maps directly: bit 1 -> row offset, bit 0 -> col
-            // offset, giving plane 0 -> (0,0), 1 -> (0,1), 2 -> (1,0),
-            // 3 -> (1,1). For RGGB that's R/G1/G2/B respectively.
             var planeYOff = sub.PlaneIndex >> 1;
             var planeXOff = sub.PlaneIndex & 1;
-            // Origin of this tile in image-pixel coordinates. CR3 lays tiles
-            // out left-to-right then top-to-bottom; M50 fixtures use 2
-            // horizontal tiles, 1 vertical (tilesPerRow=2, single row).
             var tileRow = sub.TileIndex / tilesPerRow;
             var tileCol = sub.TileIndex % tilesPerRow;
             var tileY0 = tileRow * header.TileHeight;
@@ -135,9 +152,6 @@ internal static class CrxDecoder
 
             for (var py = 0; py < planeHeight; py++)
             {
-                // First line of every band uses the left-only predictor;
-                // subsequent lines use the full LOCO-I 4-neighbour median
-                // predictor with the previous line as context.
                 if (py == 0) decoder.DecodeTopLine(planeLine);
                 else decoder.DecodeLine(planeLine);
 
@@ -149,10 +163,6 @@ internal static class CrxDecoder
                 {
                     var dstCol = tileX0 + px * 2 + planeXOff;
                     if (dstCol >= header.Width) continue;
-                    // Median-recenter + clamp to bit-depth range. Signed
-                    // decoder output + median should land in [0, maxValue]
-                    // for a clean encode, but a corrupt stream can produce
-                    // out-of-range values — clamp defends downstream consumers.
                     var v = planeLine[px] + median;
                     if (v < 0) v = 0;
                     else if (v > maxValue) v = maxValue;
@@ -160,6 +170,85 @@ internal static class CrxDecoder
                 }
             }
         }
-        return output;
+    }
+
+    /// <summary>levels&gt;0 path — N-level CDF 5/3 wavelet pyramid with
+    /// 3*N+1 subbands per plane. Instantiates one
+    /// <see cref="CrxWaveletPlaneDecoder"/> per (tile, plane) and pumps
+    /// rows out into the Bayer mosaic. Tile edges that share a seam with
+    /// another tile carry boundary-extension overlap coefficients so the
+    /// inverse lift reconstructs the join cleanly — the per-tile tileFlag
+    /// (HasLeft/HasRight/HasTop/HasBottom) is derived here and passed into
+    /// the wavelet decoder for its geometry and lift-edge handling.</summary>
+    private static void DecodeLevelsWavelet(
+        ReadOnlySpan<byte> bytes, CrxImageHeader header,
+        IReadOnlyList<CrxMdatHeader.Subband> subbands,
+        ushort[] output, int planeWidth, int planeHeight,
+        int tilesPerRow, int tileRows, int median, int maxValue)
+    {
+        var bandsPerPlane = 3 * header.Levels + 1;
+        // Group the flat subband list by (tile, plane) so we can hand each
+        // plane decoder a sequential 3*N+1 slice. The mdat header walk
+        // already emits in tile-major / plane-minor / band-minor order.
+        var grouped = new Dictionary<(int Tile, int Plane), List<CrxMdatHeader.Subband>>();
+        foreach (var sub in subbands)
+        {
+            var key = (sub.TileIndex, sub.PlaneIndex);
+            if (!grouped.TryGetValue(key, out var list))
+            {
+                list = new List<CrxMdatHeader.Subband>(bandsPerPlane);
+                grouped[key] = list;
+            }
+            list.Add(sub);
+        }
+
+        var planeLine = new int[planeWidth];
+        foreach (var ((tileIdx, planeIdx), planeBands) in grouped)
+        {
+            if (planeBands.Count != bandsPerPlane)
+                throw new InvalidDataException(
+                    $"CRX tile={tileIdx} plane={planeIdx} has {planeBands.Count} subbands; expected {bandsPerPlane}.");
+
+            var tileRow = tileIdx / tilesPerRow;
+            var tileCol = tileIdx % tilesPerRow;
+            byte tileFlag = 0;
+            if (tilesPerRow > 1)
+            {
+                if (tileCol < tilesPerRow - 1) tileFlag |= 0x01; // HasRight
+                if (tileCol > 0) tileFlag |= 0x02; // HasLeft
+            }
+            if (tileRows > 1)
+            {
+                if (tileRow < tileRows - 1) tileFlag |= 0x04; // HasBottom
+                if (tileRow > 0) tileFlag |= 0x08; // HasTop
+            }
+
+            var plane = new CrxWaveletPlaneDecoder(
+                bytes, planeWidth, planeHeight, header.Levels, tileFlag, planeBands);
+
+            var planeYOff = planeIdx >> 1;
+            var planeXOff = planeIdx & 1;
+            var tileY0 = tileRow * header.TileHeight;
+            var tileX0 = tileCol * header.TileWidth;
+
+            for (var py = 0; py < planeHeight; py++)
+            {
+                plane.DecodeNextRow(planeLine);
+
+                var dstRow = tileY0 + py * 2 + planeYOff;
+                if (dstRow >= header.Height) continue;
+
+                var rowBase = (long)dstRow * header.Width;
+                for (var px = 0; px < planeWidth; px++)
+                {
+                    var dstCol = tileX0 + px * 2 + planeXOff;
+                    if (dstCol >= header.Width) continue;
+                    var v = planeLine[px] + median;
+                    if (v < 0) v = 0;
+                    else if (v > maxValue) v = maxValue;
+                    output[rowBase + dstCol] = (ushort)v;
+                }
+            }
+        }
     }
 }

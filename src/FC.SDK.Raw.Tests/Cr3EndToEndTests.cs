@@ -120,22 +120,66 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void RawDecode_ThrowsNotImplementedUntilPhaseB()
+    public void Cr3_DecodesM50CrawToMosaic_ProducesPlausibleSignal()
     {
-        var path = FixturePath;
+        // Phase B.5 end-to-end gate. Uses the CRAW.CR3 fixture
+        // (encType=0 levels=3 — full CDF 5/3 wavelet pyramid, the path
+        // that exercises CrxWaveletPlaneDecoder + the H-band line decoder).
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Canon_EOS_M50_CRAW.CR3");
         if (!File.Exists(path))
         {
-            Assert.Skip($"CR3 fixture not present at {path}. " +
-                "If running locally outside CI, run `git lfs pull` or set FC_SDK_RAW_TEST_CR3.");
+            Assert.Skip($"CR3 CRAW fixture not present at {path}. Run `git lfs pull` to fetch.");
             return;
         }
 
-        // The production entry point (CanonRaw.Open / FromBytes → Cr3Decoder.Decode
-        // with decodeMosaic=true) deliberately throws after the BMFF parse runs.
-        // That way structural errors surface with a clear container-level
-        // message before users hit the Phase B "CRX wavelet pending" one.
-        var ex = Should.Throw<NotImplementedException>(() => CanonRaw.Open(path));
-        ex.Message.ShouldContain("CRX");
+        var bytes = File.ReadAllBytes(path);
+        var file = Cr3Decoder.Decode(bytes, decodeMosaic: true);
+
+        file.Width.ShouldBe(6288);
+        file.Height.ShouldBe(4056);
+        file.BitDepth.ShouldBe(14);
+        file.CfaPattern.ShouldBe(CanonCfaPattern.Rggb);
+
+        file.BayerMosaic.ShouldNotBeNull();
+        file.BayerMosaic.Length.ShouldBe(file.Width * file.Height);
+
+        var max14 = (1 << 14) - 1;
+        ushort min = ushort.MaxValue, max = 0;
+        var distinct = new HashSet<ushort>();
+        foreach (var v in file.BayerMosaic)
+        {
+            if (v < min) min = v;
+            if (v > max) max = v;
+            if (distinct.Count < 4096) distinct.Add(v);
+        }
+        output.WriteLine($"M50 CRAW mosaic: min={min}, max={max}, distinct(cap 4096)={distinct.Count}");
+        (max - min).ShouldBeGreaterThan(max14 / 10,
+            $"M50 CRAW mosaic dynamic range only {max - min} < {max14 / 10} — wavelet decode looks broken.");
+        distinct.Count.ShouldBeGreaterThan(256,
+            $"M50 CRAW mosaic only has {distinct.Count} distinct values — wavelet decode is producing degenerate output.");
+        max.ShouldBeLessThanOrEqualTo((ushort)max14, "mosaic value exceeds 14-bit range — clamp regression.");
+
+        var outDir = CreateTestOutputDir(nameof(Cr3_DecodesM50CrawToMosaic_ProducesPlausibleSignal));
+        var img = CanonDemosaic.Render(file, new CanonRenderOptions { Algorithm = CanonDemosaicAlgorithm.Bilinear });
+        var rgba = new byte[file.Width * file.Height * 4];
+        for (var p = 0; p < file.Width * file.Height; p++)
+        {
+            rgba[p * 4]     = (byte)(img.InterleavedRgb[p * 3]     >> 8);
+            rgba[p * 4 + 1] = (byte)(img.InterleavedRgb[p * 3 + 1] >> 8);
+            rgba[p * 4 + 2] = (byte)(img.InterleavedRgb[p * 3 + 2] >> 8);
+            rgba[p * 4 + 3] = 0xFF;
+        }
+        var pngPath = Path.Combine(outDir, "cr3_m50_craw_bilinear.png");
+        File.WriteAllBytes(pngPath, PngWriter.Encode(rgba, file.Width, file.Height));
+        output.WriteLine($"M50 CRAW bilinear render: {pngPath} ({file.Width}x{file.Height})");
+
+        // Dump the raw mosaic as ushort[] .bin so the LibRaw oracle compare
+        // (unprocessed_raw + tifffile) can do byte-exact validation.
+        var binPath = Path.Combine(outDir, "cr3_m50_craw_mosaic.bin");
+        var rawBytes = new byte[file.BayerMosaic.Length * 2];
+        Buffer.BlockCopy(file.BayerMosaic, 0, rawBytes, 0, rawBytes.Length);
+        File.WriteAllBytes(binPath, rawBytes);
+        output.WriteLine($"M50 CRAW raw-mosaic bin: {binPath} ({rawBytes.Length} bytes)");
     }
 
     [Theory]

@@ -76,9 +76,15 @@ internal sealed class CrxBitstream
         if (_bitData != 0)
         {
             var zeros = BitOperations.LeadingZeroCount(_bitData);
-            // Consume the zeros AND the terminating 1.
-            _bitData <<= zeros + 1;
-            _bitsLeft -= zeros + 1;
+            var consume = zeros + 1;
+            // C# left-shift of uint by >= 32 is masked to count & 31 — i.e.
+            // shifting by 32 is a no-op, leaving the terminating 1 bit
+            // stranded in the accumulator. That happens when the unary
+            // count is exactly 31 (the entire accumulator is "31 zeros +
+            // terminator"). Handle the boundary by clearing _bitData
+            // explicitly when we'd consume all 32 bits.
+            _bitData = consume == 32 ? 0u : _bitData << consume;
+            _bitsLeft -= consume;
             return zeros;
         }
 
@@ -95,7 +101,11 @@ internal sealed class CrxBitstream
             if (next != 0)
             {
                 var zeros = BitOperations.LeadingZeroCount(next);
-                _bitData = next << (zeros + 1);
+                var consume = zeros + 1;
+                // Same boundary as the fast path: when the terminator
+                // lands at bit 0 (unary count == 31 within the new word),
+                // shifting left by 32 is a no-op in C# — clear explicitly.
+                _bitData = consume == 32 ? 0u : next << consume;
                 _bitsLeft = 31 - zeros;
                 return total + zeros;
             }
