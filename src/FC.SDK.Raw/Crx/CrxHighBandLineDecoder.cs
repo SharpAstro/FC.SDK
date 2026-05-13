@@ -201,7 +201,18 @@ internal sealed class CrxHighBandLineDecoder
     /// THREE are zero does the encoder admit a run.</summary>
     private void DecodeLine(Span<int> destination)
     {
-        Array.Clear(_currLine);
+        // The for-loop below writes _currLine[1..Width] in every code path
+        // (regular symbol, run-fill, post-run sample, final symbol), so the
+        // only cells that need to start at zero are the two sentinels:
+        //   _currLine[0]        = synthetic left neighbour for i=0's context
+        //   _currLine[Width+1]  = right sentinel read by NEXT row's i==Width-1
+        // The buffer arrives stale from two rows ago via the ping-pong swap,
+        // so leaving cells [1..Width] alone is fine — they'll get overwritten
+        // before any read. Avoiding the full Array.Clear here is a ~50% win
+        // on the CR3 wavelet decode (the per-row clears were 63% of decode
+        // time on R5 cRAW, per dotnet-trace cpu sampling).
+        _currLine[0] = 0;
+        _currLine[Width + 1] = 0;
 
         var i = 0;
         for (; i < Width - 1; i++)

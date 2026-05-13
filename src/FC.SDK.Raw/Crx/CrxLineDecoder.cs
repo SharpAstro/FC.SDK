@@ -207,7 +207,14 @@ internal sealed class CrxLineDecoder
         if (destination.Length < Width)
             throw new ArgumentException("destination too small for line width", nameof(destination));
 
-        Array.Clear(_currLine);
+        // No Array.Clear needed — every cell of _currLine[1..Width] is
+        // written below (DecodeSymbolL1, run-fill loop, or final sample);
+        // _currLine[0] is set explicitly on the next line; and the right
+        // sentinel _currLine[Width+1] is set at end-of-line via
+        // `_currLine[pos + 1] = _currLine[pos] + 1`. The buffer arrives stale
+        // from two rows ago via the ping-pong swap, which is harmless when
+        // every cell gets overwritten before any read.
+        //
         // Seed _currLine[0] (the synthetic-left slot for the first sample)
         // with _prevLine[1] = the top neighbour of the first sample. This
         // mirrors LibRaw's `param->lineBuf1[0] = param->lineBuf0[1];` —
