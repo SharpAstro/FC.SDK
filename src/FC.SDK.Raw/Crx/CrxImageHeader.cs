@@ -30,7 +30,13 @@ internal sealed record CrxImageHeader(
     int EncType,
     int Levels,
     long MdatOffset,
-    int MdatSize)
+    int MdatSize,
+    // Byte size of the structural-marker zone (0xFF01 tile / 0xFF02 plane /
+    // 0xFF03 subband) at the start of this track's mdat payload. The
+    // compressed subband bytes live at [MdatOffset + MdatHdrSize, MdatOffset
+    // + MdatSize). Read from CMP1[+28..+32] big-endian per LibRaw's
+    // crxParseImageHeader.
+    int MdatHdrSize)
 {
     /// <summary>Number of horizontal tiles. CR3 splits the sensor into
     /// rectangular tiles when <see cref="TileWidth"/> &lt; <see cref="Width"/>;

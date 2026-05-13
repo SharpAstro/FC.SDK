@@ -3,6 +3,7 @@ using SharpAstro.Png;
 using Shouldly;
 using StbImageSharp;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Xunit;
 
@@ -173,6 +174,90 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
         header.MdatOffset.ShouldBeGreaterThan(0);
         header.MdatSize.ShouldBeGreaterThan(0);
         (header.MdatOffset + header.MdatSize).ShouldBeLessThanOrEqualTo(bytes.LongLength);
+        // MdatHdrSize is the structural-marker zone at the start of the
+        // track's mdat payload; it must be > 0 (else the parser produces no
+        // subbands) and strictly less than the total mdat size.
+        header.MdatHdrSize.ShouldBeGreaterThan(0);
+        header.MdatHdrSize.ShouldBeLessThan(header.MdatSize);
+    }
+
+    [Fact]
+    public void Cr3_DecodesM50RawToMosaic_ProducesPlausibleSignal()
+    {
+        // Phase B.4 end-to-end gate. Uses the simpler RAW.CR3 fixture
+        // (encType=0 levels=0 — no wavelet, single LL band per plane) since
+        // levels>0 wavelet recombination is the B.5 task. CRAW.CR3 still
+        // throws at decode time with a "B.5 pending" message.
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Canon_EOS_M50_RAW.CR3");
+        if (!File.Exists(path))
+        {
+            Assert.Skip($"CR3 RAW fixture not present at {path}. Run `git lfs pull` to fetch.");
+            return;
+        }
+
+        var bytes = File.ReadAllBytes(path);
+        var file = Cr3Decoder.Decode(bytes, decodeMosaic: true);
+
+        // Container-level invariants — must match what HeaderParse asserts.
+        file.Width.ShouldBe(6288);
+        file.Height.ShouldBe(4056);
+        file.BitDepth.ShouldBe(14);
+        file.CfaPattern.ShouldBe(CanonCfaPattern.Rggb);
+
+        // Mosaic shape: one ushort per sensor pixel.
+        file.BayerMosaic.ShouldNotBeNull();
+        file.BayerMosaic.Length.ShouldBe(file.Width * file.Height);
+
+        // Plausibility gates: a 14-bit sensor frame from a real scene must
+        // (a) span a substantial fraction of the available dynamic range
+        // and (b) carry many distinct values — a stuck/zeroed decode would
+        // collapse to a few values and a tiny range. Same coherent-signal
+        // checks Cr2EndToEndTests applies.
+        var max14 = (1 << 14) - 1;
+        ushort min = ushort.MaxValue, max = 0;
+        var distinct = new HashSet<ushort>();
+        foreach (var v in file.BayerMosaic)
+        {
+            if (v < min) min = v;
+            if (v > max) max = v;
+            // Bound the set size so we don't blow memory on a 25M-pixel scan.
+            if (distinct.Count < 4096) distinct.Add(v);
+        }
+        output.WriteLine($"M50 RAW mosaic: min={min}, max={max}, distinct(cap 4096)={distinct.Count}");
+        (max - min).ShouldBeGreaterThan(max14 / 10,
+            $"M50 RAW mosaic dynamic range only {max - min} < {max14 / 10} — decoder looks broken or stream truncated.");
+        distinct.Count.ShouldBeGreaterThan(256,
+            $"M50 RAW mosaic only has {distinct.Count} distinct values — decoder is producing degenerate output.");
+        max.ShouldBeLessThanOrEqualTo((ushort)max14, "mosaic value exceeds 14-bit range — clamp regression.");
+
+        // Visual gate: run the decoded mosaic through the production demosaic
+        // pipeline (black subtract + WB + bilinear interpolation + colour
+        // matrix + gamma) and dump a PNG. A correct decode produces a
+        // recognisable scene; a coordinate-system bug or per-plane swap
+        // would visibly garble the image even when the per-channel stats pass.
+        var outDir = CreateTestOutputDir(nameof(Cr3_DecodesM50RawToMosaic_ProducesPlausibleSignal));
+        var img = CanonDemosaic.Render(file, new CanonRenderOptions { Algorithm = CanonDemosaicAlgorithm.Bilinear });
+        var rgba = new byte[file.Width * file.Height * 4];
+        for (var p = 0; p < file.Width * file.Height; p++)
+        {
+            rgba[p * 4]     = (byte)(img.InterleavedRgb[p * 3]     >> 8);
+            rgba[p * 4 + 1] = (byte)(img.InterleavedRgb[p * 3 + 1] >> 8);
+            rgba[p * 4 + 2] = (byte)(img.InterleavedRgb[p * 3 + 2] >> 8);
+            rgba[p * 4 + 3] = 0xFF;
+        }
+        var pngPath = Path.Combine(outDir, "cr3_m50_raw_bilinear.png");
+        File.WriteAllBytes(pngPath, PngWriter.Encode(rgba, file.Width, file.Height));
+        output.WriteLine($"M50 RAW bilinear render: {pngPath} ({file.Width}x{file.Height})");
+
+        // Dump the raw mosaic as a flat ushort[] binary so the LibRaw oracle
+        // (simple_dcraw / unprocessed_raw + tifffile) can do byte-exact
+        // comparison. The dump path is stable across test runs so the
+        // companion Python diff script can pick it up.
+        var binPath = Path.Combine(outDir, "cr3_m50_raw_mosaic.bin");
+        var bytes2 = new byte[file.BayerMosaic.Length * 2];
+        Buffer.BlockCopy(file.BayerMosaic, 0, bytes2, 0, bytes2.Length);
+        File.WriteAllBytes(binPath, bytes2);
+        output.WriteLine($"M50 RAW raw-mosaic bin: {binPath} ({bytes2.Length} bytes)");
     }
 
     private static string CreateTestOutputDir(string testName)

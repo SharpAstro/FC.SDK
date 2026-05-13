@@ -67,45 +67,59 @@ internal sealed class CrxGolombRice
         SParam = 0;
     }
 
-    /// <summary>Read one Rice-coded symbol, advancing the bitstream and
-    /// updating <see cref="KParam"/>. Returns the unsigned magnitude
-    /// (use <see cref="FoldSign"/> for the signed coefficient).</summary>
+    /// <summary>Read one Rice-coded symbol — just the bit decoding step,
+    /// no K adaptation. Use when the caller needs to smooth the bitCode
+    /// against a neighbour gradient before driving the K update
+    /// (LibRaw's <c>crxDecodeSymbolL1</c> non-EOL path). After reading,
+    /// invoke <see cref="AdaptK"/> with the final (possibly smoothed)
+    /// bitCode to update <see cref="KParam"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    public uint DecodeSymbol(CrxBitstream stream)
+    public uint ReadBitCode(CrxBitstream stream)
     {
         var q = stream.GetZeros();
-        uint bitCode;
         if (q >= 41)
         {
             // Escape: the unary prefix is the "I give up, here's a literal"
             // signal. Read a raw 21-bit value. 21 covers 14-bit raw data
             // amplified through the wavelet without overflow.
-            bitCode = stream.GetBits(21);
+            return stream.GetBits(21);
         }
-        else if (KParam > 0)
+        if (KParam > 0)
         {
             // Standard Rice decode: quotient = q (unary prefix), remainder =
             // next KParam bits, combined as `quotient << K | remainder`.
-            bitCode = (uint)q << KParam | stream.GetBits(KParam);
+            return (uint)q << KParam | stream.GetBits(KParam);
         }
-        else
-        {
-            // K == 0 reduces Rice to pure unary; the prefix length IS the value.
-            bitCode = (uint)q;
-        }
+        // K == 0 reduces Rice to pure unary; the prefix length IS the value.
+        return (uint)q;
+    }
 
-        // K adaptation per LibRaw's crxPredictKParameter. The three deltas are
-        // computed against the *previous* K, then summed onto it — order of
-        // evaluation matters because they each test bitCode against a power
-        // of (oldK). The (1 << oldK >> 1) trick gives 0 when oldK == 0 (so
-        // the decrement never triggers at K=0), which is what we want.
+    /// <summary>Update <see cref="KParam"/> from <paramref name="bitCode"/>.
+    /// LibRaw's <c>crxPredictKParameter</c> — three deltas summed onto the
+    /// previous K, then clamped to <see cref="MaxK"/>. The
+    /// <c>(1 &lt;&lt; oldK &gt;&gt; 1)</c> trick yields 0 when <c>oldK == 0</c>,
+    /// so the decrement never fires at K=0 (which would otherwise drive
+    /// K negative).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void AdaptK(uint bitCode)
+    {
         var oldK = KParam;
         var newK = oldK
             - (bitCode < (1u << oldK >> 1) ? 1 : 0)
             + ((bitCode >> oldK) > 2 ? 1 : 0)
             + ((bitCode >> oldK) > 5 ? 1 : 0);
-        // Clamp to MaxK (15 for subband, 7 for QP-map).
         KParam = newK >= MaxK ? MaxK : newK;
+    }
+
+    /// <summary>Read one Rice-coded symbol AND update <see cref="KParam"/>
+    /// using the raw bitCode. Convenience for callers that don't smooth
+    /// (top-line decode, simple subband bands). Returns the unsigned
+    /// magnitude — use <see cref="FoldSign"/> for the signed coefficient.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public uint DecodeSymbol(CrxBitstream stream)
+    {
+        var bitCode = ReadBitCode(stream);
+        AdaptK(bitCode);
         return bitCode;
     }
 

@@ -25,10 +25,14 @@ internal sealed class CrxLineDecoder
 {
     private readonly CrxBitstream _stream;
     private readonly CrxGolombRice _rice;
-    /// <summary>Previous-line buffer with 2-sample left padding + 1-sample
-    /// right padding. Layout in memory: <c>[pad_left, pad_left, row[0..N-1], pad_right]</c>.
-    /// The padding lets the median predictor's neighbour accesses
-    /// (lineBuf0[-1], lineBuf0[0], lineBuf0[1]) never need bounds checks.</summary>
+    /// <summary>Previous-line buffer. Layout matches LibRaw's
+    /// <c>CrxBandParam.lineBuf0</c>: 1 left-padding sample at index 0,
+    /// then <see cref="Width"/> decoded samples at indices [1..Width],
+    /// then a 1-sample sentinel slot at index Width+1 (set to
+    /// <c>lastSample + 1</c> after each line, so the next line's median
+    /// predictor sees a distinct top-right when reading past the row end).
+    /// We allocate Width+3 to cover the worst-case top-right gradient
+    /// lookahead at <c>topPos + 2</c> when topPos = Width.</summary>
     private int[] _prevLine = [];
     /// <summary>Current-line buffer, same layout convention as <see cref="_prevLine"/>.</summary>
     private int[] _currLine = [];
@@ -37,6 +41,7 @@ internal sealed class CrxLineDecoder
     /// equals <c>tileWidth / 2</c> (per-plane subsampled width).</summary>
     public int Width { get; }
 
+
     public CrxLineDecoder(CrxBitstream stream, int width)
     {
         ArgumentNullException.ThrowIfNull(stream);
@@ -44,12 +49,14 @@ internal sealed class CrxLineDecoder
         _stream = stream;
         _rice = new CrxGolombRice(maxK: 15);
         Width = width;
-        // Allocate line buffers with padding on each side. The +3 left and
-        // +1 right matches LibRaw's CrxBandParam.lineBuf0/1 layout: the
-        // predictor uses indices [-1, 0, 1, 2] relative to the current
-        // position, so we need room on both sides.
-        _prevLine = new int[width + 4];
-        _currLine = new int[width + 4];
+        // Buffer size = Width + 2: 1 left-pad slot at index 0, then Width
+        // sample slots at indices 1..Width, then the sentinel slot at index
+        // Width+1. Matches LibRaw's `lineLength = subbandWidth + 2`. The
+        // gradient lookahead at topPos+2 stays in-bounds because the loop
+        // exits before topPos > Width-2 (the length==1 EOL case doesn't
+        // touch topPos+2).
+        _prevLine = new int[width + 2];
+        _currLine = new int[width + 2];
     }
 
     /// <summary>K parameter (Rice quotient bit-count). Exposed for test
@@ -79,14 +86,17 @@ internal sealed class CrxLineDecoder
         if (destination.Length < Width)
             throw new ArgumentException("destination too small for line width", nameof(destination));
 
-        // Reset state for a new band: K starts at 0 (per LibRaw's crxParamInit),
-        // S starts at 0, both line buffers zeroed (padding intact).
+        // Zero the buffer — _currLine[0] is the synthetic left-of-line slot
+        // for the predictor (initially 0 since top-line has no left context).
+        // K and S adaptive parameters live on _rice; this decoder is built
+        // per-band so they're already 0 from the constructor.
         Array.Clear(_currLine);
-        _currLine[2] = 0; // synthetic left-of-line; predictor reads currLine[idx] where idx starts at 2
 
-        // The current-position pointer walks _currLine starting at index 2
-        // (the first actual sample slot, after the 2-byte left padding).
-        var pos = 2;
+        // pos = index of the "current left" slot (matches LibRaw's
+        // lineBuf1+0 pointer offset). Loop body writes the new sample to
+        // _currLine[pos+1] and then advances pos++. With pos starting at 0,
+        // the first sample lands at _currLine[1] and the last at _currLine[Width].
+        var pos = 0;
         var length = Width;
 
         while (length > 1)
@@ -158,11 +168,14 @@ internal sealed class CrxLineDecoder
 
         // Sentinel at end-of-line: prev_line[end+1] = prev_line[end] + 1.
         // Used by the next line's median predictor to detect the
-        // out-of-bounds right neighbour cleanly.
+        // out-of-bounds right neighbour cleanly (lastSample + 1 is
+        // guaranteed != lastSample, which forces the run-length flat check
+        // to fail at the row boundary).
         _currLine[pos + 1] = _currLine[pos] + 1;
 
         // Copy the active region (excluding padding) to the caller's buffer.
-        _currLine.AsSpan(2, Width).CopyTo(destination);
+        // Samples land at indices 1..Width; destination wants Width ints.
+        _currLine.AsSpan(1, Width).CopyTo(destination);
 
         // Swap currLine -> prevLine for the next line's predictor context.
         (_prevLine, _currLine) = (_currLine, _prevLine);
@@ -178,12 +191,16 @@ internal sealed class CrxLineDecoder
             throw new ArgumentException("destination too small for line width", nameof(destination));
 
         Array.Clear(_currLine);
-        // Seed currLine[2] with prevLine[3] = the top neighbour of the first
-        // sample (per LibRaw: `param->lineBuf1[0] = param->lineBuf0[1]`).
-        _currLine[2] = _prevLine[3];
+        // Seed _currLine[0] (the synthetic-left slot for the first sample)
+        // with _prevLine[1] = the top neighbour of the first sample. This
+        // mirrors LibRaw's `param->lineBuf1[0] = param->lineBuf0[1];` —
+        // the first sample's "current left" predictor input is the value
+        // directly above it from the prev line, so an identical-value
+        // column tracks cleanly through the run-length flat detector.
+        _currLine[0] = _prevLine[1];
 
-        var pos = 2;          // current-line position
-        var topPos = 2;       // previous-line position
+        var pos = 0;          // current-line position (LibRaw lineBuf1+0)
+        var topPos = 0;       // previous-line position (LibRaw lineBuf0+0)
         var length = Width;
 
         while (length > 1)
@@ -243,7 +260,10 @@ internal sealed class CrxLineDecoder
         }
 
         _currLine[pos + 1] = _currLine[pos] + 1;
-        _currLine.AsSpan(2, Width).CopyTo(destination);
+        // Samples occupy _currLine[1..Width] (offset 1 after the 1-byte left
+        // pad). DecodeTopLine uses the same CopyTo range; both must match
+        // the buffer layout LibRaw's lineBuf1[1..W] convention establishes.
+        _currLine.AsSpan(1, Width).CopyTo(destination);
         (_prevLine, _currLine) = (_currLine, _prevLine);
     }
 
@@ -255,56 +275,55 @@ internal sealed class CrxLineDecoder
         int predicted;
         if (doMedianPrediction)
         {
-            // LOCO-I median predictor: four context samples produce a
-            // gradient-based prediction. delta = top - top-left.
-            var delta = _prevLine[topPos + 1] - _prevLine[topPos];
-            var topMid = _prevLine[topPos + 1];
-            Span<int> symb = stackalloc int[4];
-            symb[2] = _currLine[pos];        // left
-            symb[0] = symb[1] = delta + symb[2]; // left + gradient
-            symb[3] = topMid;                 // top
-            // Branch selection per LibRaw: bit 1 = (topLeft<top) XOR (delta<0);
-            // bit 0 = (top<topRight) XOR (delta<0). Picks one of the 4 symbs.
+            // LOCO-I median predictor: four candidate predictions chosen by
+            // a gradient-based context. delta = top - top-left captures the
+            // horizontal trend in the previous line; sign of delta toggles
+            // the context-quadrant bits below. Per LibRaw's crxDecodeSymbolL1.
             var topLeft = _prevLine[topPos];
-            var topRight = _prevLine[topPos + 2];
-            var idx = (((topLeft < topMid ? 1 : 0) ^ (delta < 0 ? 1 : 0)) << 1)
-                    | ((topMid < topRight ? 1 : 0) ^ (delta < 0 ? 1 : 0));
+            var topMid = _prevLine[topPos + 1];
+            var curLeft = _currLine[pos];
+            var delta = topMid - topLeft;
+            Span<int> symb = stackalloc int[4];
+            symb[2] = curLeft;
+            symb[0] = symb[1] = delta + curLeft;
+            symb[3] = topMid;
+            // Branch selection: bit 1 = (topLeft < curLeft) XOR (delta<0);
+            // bit 0 = (curLeft < topMid) XOR (delta<0). Note that ALL THREE
+            // comparisons involve curLeft — the current-line's left neighbour
+            // is the swing vote between the four candidate predictions.
+            // (An earlier version of this code used (topMid<topRight) which
+            // looks similar but doesn't bring in the current-line context and
+            // is wrong.)
+            var idx = (((topLeft < curLeft ? 1 : 0) ^ (delta < 0 ? 1 : 0)) << 1)
+                    | ((curLeft < topMid ? 1 : 0) ^ (delta < 0 ? 1 : 0));
             predicted = symb[idx];
         }
         else
         {
-            // Run continuation: predicted = top.
+            // Run continuation: predicted = top neighbour.
             predicted = _prevLine[topPos + 1];
         }
 
-        var bitCode = _rice.DecodeSymbol(_stream);
+        // Two-stage decode so we can override bitCode before the K update:
+        // ReadBitCode pulls the Rice/unary symbol but doesn't touch K;
+        // AdaptK below performs the single update with the (possibly
+        // smoothed) bitCode. Matches LibRaw's crxDecodeSymbolL1 exactly:
+        // K is predicted once per symbol, using the smoothed magnitude when
+        // we're not at end-of-line.
+        var bitCode = _rice.ReadBitCode(_stream);
         _currLine[pos + 1] = predicted + CrxGolombRice.FoldSign(bitCode);
 
-        // For non-end-of-line, peek at the next gradient to bias the K update.
-        // LibRaw averages the bitCode with abs(next-delta) before adapting K.
         if (notEOL)
         {
+            // Look one sample ahead in the previous line to estimate the
+            // next symbol's magnitude. nextDelta is pre-shifted by 1 (so it's
+            // 2 * (topRight - topMid)) and abs() folds into a uint magnitude
+            // already weighted x2 — matches LibRaw's
+            // `(bitCode + _abs(nextDelta)) >> 1` exactly.
             var nextDelta = (_prevLine[topPos + 2] - _prevLine[topPos + 1]) << 1;
             var nextAbs = (uint)Math.Abs(nextDelta);
-            // The 2nd K-update arg is the smoothed bitCode; we replicate
-            // LibRaw's formula (bitCode + 2*abs(nextDelta)) >> 1.
-            // Already-updated KParam from DecodeSymbol → re-update with the
-            // smoothed magnitude is intentional (matches LibRaw exactly).
-            var smoothed = (bitCode + 2 * nextAbs) >> 1;
-            _rice.KParam = ClampedKUpdate(_rice.KParam, smoothed, maxK: 15);
+            bitCode = (bitCode + nextAbs) >> 1;
         }
-    }
-
-    /// <summary>K-parameter update with the same formula
-    /// <see cref="CrxGolombRice.DecodeSymbol"/> uses, but applied a second
-    /// time with the smoothed magnitude in the non-EOL case. Replicates
-    /// LibRaw's K-prediction re-call inside the inner symbol loop.</summary>
-    private static int ClampedKUpdate(int prevK, uint bitCode, int maxK)
-    {
-        var newK = prevK
-            - (bitCode < (1u << prevK >> 1) ? 1 : 0)
-            + ((bitCode >> prevK) > 2 ? 1 : 0)
-            + ((bitCode >> prevK) > 5 ? 1 : 0);
-        return newK >= maxK ? maxK : newK;
+        _rice.AdaptK(bitCode);
     }
 }

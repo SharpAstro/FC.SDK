@@ -91,18 +91,20 @@ internal static class Cr3Decoder
         var crxHeader = ResolveRawTrack(bytes, moov)
             ?? throw new InvalidDataException("CR3 has no raw track with CMP1 — sensor dimensions unavailable");
 
-        if (decodeMosaic)
-            throw new NotImplementedException(
-                $"CR3 CRX wavelet+Golomb-Rice decoder pending (Phase B). " +
-                $"Track header parsed: {crxHeader.Width}x{crxHeader.Height} {crxHeader.BitDepth}-bit, " +
-                $"encType={crxHeader.EncType} levels={crxHeader.Levels} tile={crxHeader.TileWidth}x{crxHeader.TileHeight} " +
-                $"mdat=[{crxHeader.MdatOffset}, {crxHeader.MdatOffset + crxHeader.MdatSize}). " +
-                $"Metadata + thumbnail extraction work via `decodeMosaic=false`.");
+        // Phase B.4 brings the CRX decoder online for the encType=0 levels=0
+        // path (Canon "RAW" mode — lossless HQ, no wavelet decomposition).
+        // Other combos (encType=3 cRAW, encType=0 levels>0 CRAW, encType=1
+        // monochrome) throw inside CrxDecoder with a B.5+ pending message;
+        // we rethrow with the resolved header context attached so users
+        // can identify which fixture-family hit the unsupported branch.
+        var bayerMosaic = decodeMosaic
+            ? CrxDecoder.Decode(bytes, crxHeader)
+            : Array.Empty<ushort>();
 
         return new CanonRawFile(
             Width: crxHeader.Width,
             Height: crxHeader.Height,
-            BayerMosaic: Array.Empty<ushort>(),
+            BayerMosaic: bayerMosaic,
             BitDepth: crxHeader.BitDepth,
             CfaPattern: crxHeader.Cfa,
             Exif: exif,
@@ -352,7 +354,10 @@ internal static class Cr3Decoder
     /// +12 image height (uint32), +16 tile width (uint32), +20 tile height
     /// (uint32), +24 bits per sample (byte), +25 plane count (high nibble) +
     /// CFA layout (low nibble), +26 encType (high nibble) + image levels
-    /// (low nibble), +27 flags, +28 something (subband-related).</summary>
+    /// (low nibble), +27 flags, +28 mdat header size (uint32) — bytes from
+    /// the start of this track's mdat payload that carry the structural
+    /// 0xFF01/0xFF02/0xFF03 markers before the entropy-coded subband
+    /// bitstreams begin.</summary>
     private static CrxImageHeader ParseCmp1(
         ReadOnlySpan<byte> bytes, IsoBmffReader.Box cmp1, long mdatOffset, int mdatSize)
     {
@@ -366,6 +371,11 @@ internal static class Cr3Decoder
         var cfaByte = bytes[p + 25] & 0xF;
         var encType = bytes[p + 26] >> 4;
         var levels = bytes[p + 26] & 0xF;
+        // mdatHdrSize is the structural-marker zone size at the start of the
+        // track's mdat payload. Per LibRaw's crxParseImageHeader (line ~2714)
+        // it lives at CMP1[+28..+32] big-endian. We need it to know where
+        // entropy-coded subband data starts.
+        var mdatHdrSize = (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(p + 28, 4));
         var cfa = cfaByte switch
         {
             0 => CanonCfaPattern.Rggb,
@@ -385,7 +395,8 @@ internal static class Cr3Decoder
             EncType: encType,
             Levels: levels,
             MdatOffset: mdatOffset,
-            MdatSize: mdatSize);
+            MdatSize: mdatSize,
+            MdatHdrSize: mdatHdrSize);
     }
 
     /// <summary>Legacy brute-force scan retained for the metadata-only
