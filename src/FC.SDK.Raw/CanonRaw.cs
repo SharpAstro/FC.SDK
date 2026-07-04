@@ -11,7 +11,7 @@ namespace FC.SDK.Raw;
 /// Pipeline:
 /// <list type="number">
 /// <item><b>CR2</b>: outer TIFF parse → locate the raw IFD (compression 6 +
-///   CR2Slice tag 0xC640) → SOF3 lossless-JPEG decode via SharpAstro.StbImage →
+///   CR2Slice tag 0xC640) → SOF3 lossless-JPEG decode via SharpAstro.Jpeg →
 ///   slice unscramble per the CR2Slice descriptor → parse Canon MakerNote
 ///   (TIFF tag 0x927C) for sensor / model / colour-matrix info → return
 ///   <see cref="CanonRawFile"/>.</item>

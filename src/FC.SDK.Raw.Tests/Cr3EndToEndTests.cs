@@ -1,7 +1,7 @@
 using FC.SDK.Raw.Crx;
+using SharpAstro.Jpeg;
 using SharpAstro.Png;
 using Shouldly;
-using StbImageSharp;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -21,7 +21,7 @@ namespace FC.SDK.Raw.Tests;
 ///   dimensions / bit depth / CFA pattern / EXIF model from the BMFF
 ///   walk, with <c>BayerMosaic</c> deliberately empty in Phase A.</item>
 /// <item><c>ThumbnailRendersToPng</c>: extract PRVW JPEG, decode via
-///   StbImageSharp, write PNG. Verifies the BMFF preview-container
+///   SharpAstro.Jpeg, write PNG. Verifies the BMFF preview-container
 ///   walk + JPEG byte slice are correct.</item>
 /// <item><c>RawDecode_ThrowsNotImplementedUntilPhaseB</c>: confirms
 ///   that the production entry point (with <c>decodeMosaic=true</c>)
@@ -107,15 +107,15 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
 
         // Decode the JPEG to confirm it's actually valid sRGB content (not just
         // a JPEG-shaped byte sequence that the box walker happened to slice out).
-        var img = ImageResult.FromMemory(jpegBytes, ColorComponents.RedGreenBlueAlpha);
+        var img = JpegDecoder.Decode(jpegBytes);
         img.ShouldNotBeNull();
         img.Width.ShouldBeGreaterThan(0);
         img.Height.ShouldBeGreaterThan(0);
-        img.Data.Length.ShouldBe(img.Width * img.Height * 4);
+        img.Pixels.Length.ShouldBe(img.Width * img.Height * 4);
 
         var outDir = CreateTestOutputDir(nameof(ThumbnailRendersToPng));
         var pngPath = Path.Combine(outDir, "cr3_thumbnail.png");
-        File.WriteAllBytes(pngPath, PngWriter.Encode(img.Data, img.Width, img.Height));
+        File.WriteAllBytes(pngPath, PngWriter.Encode(img.Pixels, img.Width, img.Height));
         output.WriteLine($"Thumbnail PNG: {pngPath} ({img.Width}x{img.Height})");
     }
 

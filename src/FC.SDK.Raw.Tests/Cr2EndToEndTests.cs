@@ -1,6 +1,6 @@
+using SharpAstro.Jpeg;
 using SharpAstro.Png;
 using Shouldly;
-using StbImageSharp;
 using System;
 using System.IO;
 using Xunit;
@@ -15,7 +15,7 @@ namespace FC.SDK.Raw.Tests;
 /// <item><c>DecodesRealCr2_DimensionsAndBitDepthMatch</c>: structural —
 ///   dimensions, bit depth, EXIF model, per-pixel range.</item>
 /// <item><c>ThumbnailRendersToPng</c>: extracts the IFD0 preview JPEG, decodes
-///   via StbImageSharp, writes a PNG to the test output dir. Verifies our
+///   via SharpAstro.Jpeg, writes a PNG to the test output dir. Verifies our
 ///   JPEG-thumbnail extraction + the embedded preview is a valid sRGB image
 ///   with plausible content (per-channel dynamic range).</item>
 /// <item><c>RawRendersToPng_WithSensibleDefaults</c>: decodes the raw Bayer
@@ -96,23 +96,23 @@ public class Cr2EndToEndTests(ITestOutputHelper output)
         jpegBytes[0].ShouldBe((byte)0xFF);
         jpegBytes[1].ShouldBe((byte)0xD8);
 
-        // Decode the JPEG. StbImageSharp handles baseline JPEG (DCT) — the IFD0 preview
+        // Decode the JPEG. SharpAstro.Jpeg handles baseline JPEG (DCT) — the IFD0 preview
         // is always a standard sRGB JPEG, not the lossless SOF3 used for raw.
-        var img = ImageResult.FromMemory(jpegBytes, ColorComponents.RedGreenBlueAlpha);
+        var img = JpegDecoder.Decode(jpegBytes);
         img.ShouldNotBeNull();
         img.Width.ShouldBeGreaterThan(0);
         img.Height.ShouldBeGreaterThan(0);
-        img.Data.Length.ShouldBe(img.Width * img.Height * 4);
+        img.Pixels.Length.ShouldBe(img.Width * img.Height * 4);
 
         // Sanity-check the content — per-channel byte ranges must show non-trivial signal
         // (catches "extracted the wrong bytes" failures that produce a decoder-noise image).
-        AssertHasSignal(img.Data);
+        AssertHasSignal(img.Pixels);
 
         // Persist for visual inspection. Output dir is unique per test class so multiple
         // runs don't clobber each other.
         var outDir = CreateTestOutputDir(nameof(ThumbnailRendersToPng));
         var pngPath = Path.Combine(outDir, "thumbnail.png");
-        File.WriteAllBytes(pngPath, PngWriter.Encode(img.Data, img.Width, img.Height));
+        File.WriteAllBytes(pngPath, PngWriter.Encode(img.Pixels, img.Width, img.Height));
         output.WriteLine($"Thumbnail PNG: {pngPath} ({img.Width}x{img.Height})");
     }
 
