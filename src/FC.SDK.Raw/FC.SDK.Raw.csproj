@@ -40,15 +40,15 @@
       AND Exists('$(MSBuildThisFileDirectory)..\..\..\StbImageSharp\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj')">true</UseLocalSiblings>
   </PropertyGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' == 'true'">
-    <!-- StbImage: SOF3 lossless JPEG decode for the CR2 raw IFD payload. -->
-    <ProjectReference Include="..\..\..\StbImageSharp\src\StbImageSharp\StbImageSharp.csproj" />
+    <!-- Jpeg: SOF3 lossless JPEG (LosslessJpeg) decode for the CR2 raw IFD payload. -->
+    <ProjectReference Include="..\..\..\StbImageSharp\src\SharpAstro.Jpeg\SharpAstro.Jpeg.csproj" />
     <!-- Exif: standard EXIF parse for IFD0 metadata + access to Canon MakerNote bytes. -->
     <ProjectReference Include="..\..\..\StbImageSharp\src\SharpAstro.Exif\SharpAstro.Exif.csproj" />
     <!-- Tiff: walk CR2's IFD chain to locate the raw IFD (transitively via Exif). -->
     <ProjectReference Include="..\..\..\StbImageSharp\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
-    <PackageReference Include="SharpAstro.StbImage" Version="3.0.*" />
+    <PackageReference Include="SharpAstro.Jpeg" Version="3.3.*" />
     <PackageReference Include="SharpAstro.Exif" Version="3.0.*" />
     <PackageReference Include="SharpAstro.Tiff" Version="3.0.*" />
   </ItemGroup>

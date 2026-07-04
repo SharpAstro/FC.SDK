@@ -1,6 +1,6 @@
 using SharpAstro.Exif;
 using SharpAstro.Tiff;
-using StbImageSharp;
+using SharpAstro.Jpeg;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -75,7 +75,7 @@ internal static class Cr2Decoder
         var (sliceCount, sliceWidth, lastSliceWidth) = ReadCr2Slice(rawIfd, fileIsLE)
             ?? (1, width, width);
 
-        // ---- Decode the lossless JPEG payload via SharpAstro.StbImage ----
+        // ---- Decode the lossless JPEG payload via SharpAstro.Jpeg (LosslessJpeg) ----
         if (stripOffset < 0 || stripOffset + stripByteCount > bytes.Length)
             throw new InvalidDataException($"CR2 strip offset {stripOffset} + length {stripByteCount} out of bounds");
         var jpegBytes = bytes.Slice(stripOffset, stripByteCount);

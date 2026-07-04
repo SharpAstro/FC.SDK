@@ -10,7 +10,7 @@ namespace FC.SDK.Raw;
 /// (which decodes pixel data and rejects unsupported compression), this walker just
 /// returns the raw tag → value map per IFD so the CR2 decoder can locate strip offsets,
 /// the Canon CR2Slice tag, the MakerNote IFD, etc. Pixel decode happens via the
-/// SharpAstro.StbImage lossless-JPEG path, not through DIR.Lib's TiffReader.
+/// SharpAstro.Jpeg lossless-JPEG path, not through DIR.Lib's TiffReader.
 ///
 /// Intentionally duplicates ~50 lines from SharpAstro.Exif.ExifReader's private IFD walker
 /// — the same comment there ("this is the boundary where EXIF parsing becomes a
