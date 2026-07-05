@@ -31,21 +31,21 @@
     <InternalsVisibleTo Include="FC.SDK.Raw.Tests" />
   </ItemGroup>
 
-  <!-- SharpAstro codec packages (sibling repo: StbImageSharp). When the working
+  <!-- SharpAstro codec packages (sibling repo: Codecs). When the working
        copy is present locally, switch to ProjectReference for fast iteration;
        otherwise fall through to the published NuGet packages.
        Override: dotnet build -p:UseLocalSiblings=false -->
   <PropertyGroup>
     <UseLocalSiblings Condition="'$(UseLocalSiblings)' == ''
-      AND Exists('$(MSBuildThisFileDirectory)..\..\..\StbImageSharp\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj')">true</UseLocalSiblings>
+      AND Exists('$(MSBuildThisFileDirectory)..\..\..\Codecs\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj')">true</UseLocalSiblings>
   </PropertyGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' == 'true'">
     <!-- Jpeg: SOF3 lossless JPEG (LosslessJpeg) decode for the CR2 raw IFD payload. -->
-    <ProjectReference Include="..\..\..\StbImageSharp\src\SharpAstro.Jpeg\SharpAstro.Jpeg.csproj" />
+    <ProjectReference Include="..\..\..\Codecs\src\SharpAstro.Jpeg\SharpAstro.Jpeg.csproj" />
     <!-- Exif: standard EXIF parse for IFD0 metadata + access to Canon MakerNote bytes. -->
-    <ProjectReference Include="..\..\..\StbImageSharp\src\SharpAstro.Exif\SharpAstro.Exif.csproj" />
+    <ProjectReference Include="..\..\..\Codecs\src\SharpAstro.Exif\SharpAstro.Exif.csproj" />
     <!-- Tiff: walk CR2's IFD chain to locate the raw IFD (transitively via Exif). -->
-    <ProjectReference Include="..\..\..\StbImageSharp\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj" />
+    <ProjectReference Include="..\..\..\Codecs\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
     <PackageReference Include="SharpAstro.Jpeg" Version="3.4.*" />
