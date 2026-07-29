@@ -157,11 +157,38 @@ public enum EdsAEMode : uint
 }
 
 /// <summary>Capture destination. Set via <see cref="EdsPropertyId.SaveTo"/>.</summary>
+/// <remarks>
+/// These are EDSDK's <c>kEdsSaveTo_*</c> numbers. The Canon PTP CaptureDestination property
+/// (0xD11C) uses a different numbering — see <see cref="CanonCaptureDestination"/> — so the value
+/// is translated on the way to the wire rather than passed straight through.
+/// </remarks>
 public enum EdsSaveTo : uint
 {
     Camera = 1,
     Host = 2,
     Both = 3,
+}
+
+/// <summary>
+/// Wire values for the Canon PTP CaptureDestination property (0xD11C).
+/// </summary>
+/// <remarks>
+/// Deliberately distinct from <see cref="EdsSaveTo"/>: EDSDK numbers the same concept
+/// Camera=1/Host=2/Both=3, and sending an EDSDK number to the PTP property selects the wrong
+/// destination (EDSDK's Host, 2, is the PTP value for the card). Only <see cref="Host"/> is fixed
+/// by the protocol; the card value is whatever the body offers in its allowed-value list, so
+/// prefer <see cref="FC.SDK.CanonCamera.GetAllowedValuesAsync"/> over assuming a number.
+/// </remarks>
+public enum CanonCaptureDestination : uint
+{
+    /// <summary>Camera card. 2 on every body seen so far, but confirm against the allowed values.</summary>
+    Card = 2,
+
+    /// <summary>Host / PC. Protocol constant (libgphoto2 <c>PTP_CANON_EOS_CAPTUREDEST_HD</c>).</summary>
+    Host = 4,
+
+    /// <summary>Card and host. Not confirmed on any body — check the allowed values before using.</summary>
+    Both = 6,
 }
 
 /// <summary>Canon metering mode. Set via <see cref="EdsPropertyId.MeteringMode"/>.</summary>

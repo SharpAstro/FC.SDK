@@ -40,6 +40,20 @@ internal static class CanonPropertyMap
             [EdsPropertyId.Copyright] = (0xD1D1, 4),
         }.ToFrozenDictionary();
 
+    private static readonly FrozenDictionary<ushort, EdsPropertyId> _reverseMap =
+        _map.ToDictionary(kv => kv.Value.PtpCode, kv => kv.Key).ToFrozenDictionary();
+
+    /// <summary>All EDSDK property IDs that have a known Canon PTP mapping.</summary>
+    internal static IEnumerable<EdsPropertyId> MappedProperties => _map.Keys;
+
+    /// <summary>
+    /// Best-effort name for a raw PTP property code — the mapped EDSDK ID when known,
+    /// otherwise null. Used for diagnostics dumps of the event-fed property cache, which
+    /// contains far more codes than <see cref="EdsPropertyId"/> covers.
+    /// </summary>
+    internal static EdsPropertyId? TryGetPropertyId(ushort ptpCode) =>
+        _reverseMap.TryGetValue(ptpCode, out var id) ? id : null;
+
     internal static bool TryGetPtpCode(EdsPropertyId id, out ushort ptpCode, out int size)
     {
         if (_map.TryGetValue(id, out var entry))

@@ -35,14 +35,39 @@ internal enum PtpOperationCode : ushort
     CanonTransferComplete = 0x9117,
     CanonCancelTransfer = 0x9118,
     CanonResetTransfer = 0x9119,
+
+    /// <summary>
+    /// Reports host free space to the camera: (freeClusters, bytesPerSector, reset).
+    /// Required before capturing to host, otherwise AvailableShots stays 0 and capture fails.
+    /// </summary>
+    CanonPcHddCapacity = 0x911A,
+    CanonSetUILock = 0x911B,
+    CanonResetUILock = 0x911C,
+    CanonKeepDeviceOn = 0x911D,
     CanonBulbStart = 0x9125,
     CanonBulbEnd = 0x9126,
+
+    /// <summary>
+    /// Asks the camera to push a property value into the event stream. There is no EOS
+    /// "get property" operation — values only ever arrive via GetEvent (0x9116).
+    /// </summary>
+    CanonRequestDevicePropValue = 0x9127,
     CanonRemoteReleaseOn = 0x9128,
     CanonRemoteReleaseOff = 0x9129,
+    CanonResetMirrorLockupState = 0x9130,
+
+    /// <summary>
+    /// Subscribes to the "on-screen level control" info group (mask 0x1fff) delivered via
+    /// OLCInfoChanged events. Without it newer bodies never report Tv/Av/ISO/AvailableShots.
+    /// </summary>
+    CanonSetRequestOLCInfoGroup = 0x913D,
     CanonInitiateViewfinder = 0x9151,
     CanonTerminateViewfinder = 0x9152,
     CanonGetViewfinderData = 0x9153,
+    CanonDoAf = 0x9154,
     CanonDriveLens = 0x9155,
+    CanonDepthOfFieldPreview = 0x9156,
+    CanonAfCancel = 0x9160,
     CanonChangeUSBProtocol = 0x901F,
     CanonZoom = 0x9158,
     CanonGetObjectInfo64 = 0x9170,
