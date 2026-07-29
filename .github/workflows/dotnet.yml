@@ -64,9 +64,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: build
-    # Unchanged for branch/PR events. Excluded on tags and manual dispatch so cutting a viewer
-    # release does not also push a second, differently-numbered set of packages to nuget.org.
-    if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+    # Pushes to nuget.org, which is irreversible — a version can be unlisted but never replaced.
+    # So: only a real push to main. Excluded on
+    #   - pull_request, which used to publish a package per PR from unreviewed code and burn the
+    #     version number for the eventual merge (this cost 1.5.531);
+    #   - tags and workflow_dispatch, so cutting a viewer release does not also push a second,
+    #     differently-numbered set of packages.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
     - name: Download NuGet packages
