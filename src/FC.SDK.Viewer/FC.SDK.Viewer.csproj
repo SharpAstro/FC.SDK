@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FC.SDK.Viewer</RootNamespace>
+    <AssemblyName>fc-viewer</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <!-- Released as a self-contained native binary per RID so a bug reporter can run it without
+         installing a .NET SDK — the whole point is lowering the cost of getting a log back. -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!-- DIR.Lib's convention: alias the nested Layout namespace instead of importing its
+       collision-prone barewords (Node, Content, Size<T>). -->
+  <ItemGroup>
+    <Using Include="DIR.Lib.Layout" Alias="Layout" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FC.SDK\FC.SDK.csproj" />
+    <!-- Raw: decodes a downloaded CR2/CR3 so a capture can be verified in-app. Also the path
+         through which SharpAstro.Jpeg (live-view + thumbnail JPEG decode) arrives. -->
+    <ProjectReference Include="..\FC.SDK.Raw\FC.SDK.Raw.csproj" />
+  </ItemGroup>
+
+  <!-- Renderer siblings (SdlVulkan.Renderer + DIR.Lib). ProjectReference when the working copies
+       are checked out next to this repo, otherwise the published packages. Detection lives in
+       src/Directory.Build.props. Override: dotnet build -p:UseLocalSiblings=false -->
+  <ItemGroup Condition="'$(UseLocalSiblings)' == 'true'">
+    <ProjectReference Include="..\..\..\SdlVulkan.Renderer\src\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
+    <ProjectReference Include="..\..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
+    <PackageReference Include="SdlVulkan.Renderer" Version="7.3.*" />
+    <PackageReference Include="DIR.Lib" Version="7.3.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Versions kept in lockstep with the other SharpAstro renderer consumers (tianwen). -->
+    <PackageReference Include="SDL3-CS" Version="3.5.0-preview.20260213-150035" NoWarn="NU5104" />
+    <!-- Ships the native SDL3 binary; the renderer package deliberately leaves it to the app. -->
+    <PackageReference Include="SDL3-CS.Native" Version="3.5.0-preview.20260205-174353" NoWarn="NU5104" />
+    <PackageReference Include="Vortice.Vulkan" Version="3.2.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.5" />
+  </ItemGroup>
+
+</Project>

@@ -32,15 +32,46 @@ Four layers, bottom-up:
 
 ### Canon (`Canon/`)
 
-- **`CanonPtpSession`** — Wraps all Canon vendor opcodes (0x9xxx range). Session lifecycle: `OpenSession(0x1002)` → `SetRemoteMode(0x9114, 1)` → `SetEventMode(0x9115, 1)`. Capture uses `RemoteReleaseOn/Off(0x9128/0x9129)` with param 0x01=AF, 0x02=shutter. Bulb wraps AF + `BulbStart(0x9125)` / `BulbEnd(0x9126)`.
+- **`CanonPtpSession`** — Wraps all Canon vendor opcodes (0x9xxx range). Session lifecycle: `OpenSession(0x1002)` → `GetDeviceInfo(0x1001)` → `SetRemoteMode(0x9114, 1)` → `SetEventMode(0x9115, 1)` → `SetRequestOLCInfoGroup(0x913D, 0x1fff)` → drain `GetEvent` → `RequestDevicePropValue(0x9127)` for the properties the camera never volunteers → drain again. Capture uses `RemoteReleaseOn/Off(0x9128/0x9129)` with param 0x01=AF, 0x02=shutter. Bulb wraps AF + `BulbStart(0x9125)` / `BulbEnd(0x9126)`.
 
-- **`CanonPropertyMap`** — `FrozenDictionary<EdsPropertyId, (ushort PtpCode, int Size)>` mapping EDSDK property IDs to Canon PTP property codes (0xD1xx). Canon's `SetPropValue(0x9110)` sends an 8-byte data phase: `[propcode:u32][value:u32]`.
+- **`CanonPropertyMap`** — `FrozenDictionary<EdsPropertyId, (ushort PtpCode, int Size)>` mapping EDSDK property IDs to Canon PTP property codes (0xD1xx), plus the reverse map for naming raw codes in diagnostics dumps.
 
-- **`EventPoller`** — Background `Task.Run` loop polling `GetEvent(0x9116)` every ~200ms. Events are variable-length records terminated by sentinel `{length=8, type=0}`. Decoded into `CanonPtpEvent` structs.
+- **`CanonPropertyCache`** — Mirror of the camera's property state, fed **only** by the event stream. See "Reading and writing EOS properties" below; this is the single most load-bearing thing to understand about the Canon protocol.
+
+- **`EventPoller`** — Background `Task.Run` loop calling `CanonPtpSession.DrainEventsAsync` every ~200ms. Decoding, cache updates and event dispatch all live in `PollEventsAsync`, so every consumer sees the same stream no matter who polled. Events are variable-length records terminated by sentinel `{length=8, type=0}`, decoded into `CanonPtpEvent` structs (which retain the raw payload for records wider than three words).
 
 ### Public API (root)
 
-- **`CanonCamera`** — Entry point. Static factories: `ConnectUsb`, `ConnectWifi`. Async session/capture/live-view/property methods. Event handlers (`PropertyChanged`, `ObjectAdded`, `StateChanged`) dispatched from `EventPoller`.
+- **`CanonCamera`** — Entry point. Static factories: `ConnectUsb`, `ConnectWifi`, `ConnectWpd`. Async session/capture/live-view/property methods. Event handlers (`PropertyChanged`, `ObjectAdded`, `StateChanged`) are subscribed for the object's whole lifetime, not just while the poller runs, because the open-session drain and property reads also pull events. Diagnostics: `DumpPropertiesAsync`, `SupportedOperations`, `GetRawPropertyAsync`/`SetRawPropertyAsync`, `GetAllowedValuesAsync`.
+
+## Reading and writing EOS properties
+
+**There is no EOS "get property" operation.** EOS bodies do not list standard PTP `GetDevicePropValue` (0x1015) in
+their supported-operations set at all, so calling it for a 0xD1xx code answers `OperationNotSupported` →
+`EdsError.NotSupported`. Canon 0x9127 is `RequestDevicePropValue`, *not* a getter — it only asks the camera to emit
+the value as an event. Values arrive exclusively as `PropValueChanged` (0xC189) records in the `GetEvent` (0x9116)
+stream; the selectable-value lists arrive as `AvailListChanged` (0xC18A). Both feed `CanonPropertyCache`, and
+`GetPropertyAsync` answers out of it (requesting a push + draining first if the code has not been seen, then falling
+back to 0x1015 for pre-vendor-extension PowerShots). This mirrors EDSDK and libgphoto2 — `ptp_canon_eos_getdevicepropdesc`
+is a pure cache lookup.
+
+Consequences worth remembering:
+
+- **The event pump is not optional.** An undrained event queue makes the camera answer `DeviceBusy` to
+  `SetDevicePropValueEx`, so `SetPropertyUInt32Async` drains-and-retries on busy, and `TakePictureAsync` drains first.
+- **`SetDevicePropValueEx` (0x9110) writes a 12-byte record**, not 8: `[size:u32][propCode:u32][value:u32]`, where
+  `size` covers the whole record. Verified against libgphoto2 `ptp_canon_eos_setdevicepropvalue` and the decompiled
+  EDSDK (`rev/EDSDK_decompiled.c:65711` bounds-checks `*param_3 > 0xb` before reading `param_3[1]` as the prop code).
+  Omitting the size word is what made every property write fail with `DeviceBusy`.
+- **Setting a property to the value it already holds returns `DeviceBusy`** on at least CaptureDestination, so writes
+  are skipped when the cache already agrees.
+- **`SaveTo` is not passed through.** EDSDK numbers it Camera=1/Host=2/Both=3; the PTP CaptureDestination property
+  (0xD11C) uses Host=4 and takes the card value from the body's own allowed-value list (2 in practice). Sending EDSDK's
+  Host=2 selects the *card*. `CanonCaptureDestination` holds the wire values and `SetSaveToAsync` translates.
+- **Capturing to the host needs `PCHDDCapacity` (0x911A)** with `(0x0FFFFFFF, 0x1000, 1)`, otherwise `AvailableShots`
+  stays at 0 and the body refuses to release. `SetCaptureDestinationAsync` sends it automatically.
+- **`SetRequestOLCInfoGroup` (0x913D, mask 0x1fff)** is required on newer bodies before they report Tv/Av/ISO and AF
+  state via `OLCInfoChanged` (0xC1A5).
 
 ## Canon PTP opcodes reference
 
@@ -48,19 +79,26 @@ Four layers, bottom-up:
 |--------|------|-----------|
 | 0x1002 | OpenSession | none |
 | 0x1003 | CloseSession | none |
-| 0x9110 | SetPropValue | write: [propcode:u32][value:u32] |
-| 0x9114 | SetRemoteMode | none, param=1 |
+| 0x9110 | SetDevicePropValueEx | write: [size:u32][propcode:u32][value:u32] — size covers the record (12 for a scalar) |
+| 0x9114 | SetRemoteMode | none, param=1 (EOS M / newer PowerShots want 0x15 — not implemented) |
 | 0x9115 | SetEventMode | none, param=1 |
 | 0x9116 | GetEvent | read: event record list |
 | 0x9117 | TransferComplete | none, param=objectHandle |
+| 0x911A | PCHDDCapacity | none, params=(freeClusters, bytesPerSector, reset) |
+| 0x911B / 0x911C | SetUILock / ResetUILock | none |
+| 0x911D | KeepDeviceOn | none |
 | 0x9125 | BulbStart | none |
 | 0x9126 | BulbEnd | none |
+| 0x9127 | RequestDevicePropValue | none, param=propcode — a *request to emit*, NOT a getter |
 | 0x9128 | RemoteReleaseOn | none, param=0x01(AF)/0x02(shutter) |
 | 0x9129 | RemoteReleaseOff | none, param=0x01(AF)/0x02(shutter) |
+| 0x9130 | ResetMirrorLockupState | none |
+| 0x913D | SetRequestOLCInfoGroup | none, param=group mask (0x1fff = all) |
 | 0x9104 | GetObject | read: file data |
 | 0x9151 | InitiateViewfinder | none |
 | 0x9152 | TerminateViewfinder | none |
 | 0x9153 | GetViewfinderData | read: JPEG frame (~160KB) |
+| 0x9160 | AfCancel | none |
 
 ## Canon PTP property codes
 
@@ -100,14 +138,83 @@ This was discovered by Frida-hooking `PortableDeviceApi.dll!SendCommand` and com
 
 In `SetOperationParams`, the collection is always created and attached regardless of whether `params` is empty.
 
+## Diagnostic viewer (`src/FC.SDK.Viewer`)
+
+`dotnet run --project src/FC.SDK.Viewer [output-directory]` — an SDL3 + Vulkan GUI (sibling
+`../SdlVulkan.Renderer` + `../DIR.Lib`) that exposes every mapped control, every action, and the raw
+event-stream property cache side by side, and writes a timestamped log of every PTP exchange to
+`<output-directory>/fc-viewer-*.log`. That log is what to ask a bug reporter for.
+
+- Layout is **declarative only** — `Layout.Node` trees painted through `PixelWidgetBase.RenderLayout`,
+  which binds each click region to the rect it drew. No hand-rolled hit rectangles. Row virtualization
+  is delegated to `ListScrollController`; the only arithmetic in the widget is letterboxing an image,
+  which depends on image dimensions rather than layout.
+- **Fonts are a trio, not one file** (`ViewerFonts`, same shape as `drawboard/pdf-viewer`): a platform
+  text face, a symbol face, an emoji face. A platform UI face is narrower than it looks — Segoe UI
+  carries `→ — ·` but *none* of `◀ ▶ ☑ ☐ ✓ ✗ ⟵ ⟶ ⏳ 📷`, all of which live in Segoe UI Symbol.
+  Coverage is read from each candidate's cmap via `OpenTypeFont.GetGlyphId`, so `ViewerGlyphs` returns
+  the real glyph when something can draw it and an ASCII stand-in otherwise — never a blank box.
+- **`FontResolver.ResolveInstalledFont` cannot find these faces by family.** It consults a hard-coded
+  standard-family table and otherwise probes only `<family>.ttf`, so it resolves `Segoe UI` but never
+  `Segoe UI Symbol` (the file is `seguisym.ttf`). `ViewerFonts` therefore falls back to matching *file
+  names* against `FontResolver.EnumerateInstalledFonts()`. Same class of gap as pdf-viewer's issue #111
+  for macOS `.ttc` collections.
+- **Symbol glyphs go through the `Fill` escape hatch**, not a text leaf: `PaintLayout` draws a whole
+  text leaf with one font, and per-run fallback in that path is
+  [DIR.Lib#29](https://github.com/SharpAstro/DIR.Lib/issues/29). `ViewerWidget.Glyph(...)` emits a
+  `Fill` leaf whose rect still comes from arrange; only the font is chosen by the widget. Once #29
+  lands these can collapse back into ordinary `Text` leaves.
+  Supplementary-plane pictographs (📷, U+1F4F7) need none of this — `PixelWidgetBase.EmojiFontPath`
+  routes them automatically, but *only* above U+FFFF (it tests for a surrogate pair).
+- **A nested `RenderLayout` must forward `drawFill`.** Without it a `Fill` leaf still arranges and
+  reserves its space, then nothing paints it — a silent blank, no error. This bit the panel rows once.
+- `DebugInspector.Attach` is wired under `#if SIBLING_DEBUG_INSPECTORS` — **not** plain `DEBUG`. The
+  type is `#if DEBUG` upstream, so it exists only in a Debug-compiled sibling; the published package is
+  Release and does not contain it. See `src/Directory.Build.props`. It lets the app answer `screenshot` /
+  `describe_ui` / synthesized clicks over loopback, which is how the UI gets verified without a camera.
+
+## Sibling working copies
+
+`src/Directory.Build.props` owns one `UseLocalSiblings` switch for the whole repo: when the Codecs,
+SdlVulkan.Renderer and DIR.Lib working copies all exist next to this one, every project uses
+`ProjectReference`; otherwise all of them use `PackageReference`. All-or-nothing on purpose — a half-local
+graph resolves the same assembly from both a project and a package. Override with
+`-p:UseLocalSiblings=false`, and check that override builds in **Debug** too, since that is the
+combination the `SIBLING_DEBUG_INSPECTORS` guard exists for.
+
+`SIBLING_DEBUG_INSPECTORS` is defined in `src/Directory.Build.targets`, **not** `.props`:
+`Directory.Build.props` is imported before the SDK assigns `$(Configuration)` its default, so a
+`'$(Configuration)' == 'Debug'` test there reads empty on any build that did not pass `-c` explicitly —
+and the constant silently goes missing on a plain `dotnet build`. Any other Configuration-dependent
+property in this repo belongs in `.targets` for the same reason.
+
+## Releasing the viewer
+
+Push a `v*` tag. `.github/workflows/dotnet.yml` then runs `publish-viewer` (NativeAOT, six RIDs) and
+`release`, which attaches `.zip` for Windows RIDs and `.tar.gz` for the rest. A `workflow_dispatch` run
+does the same as a dry run, tagged `build-<n>` and marked pre-release. The NuGet `publish` job is
+excluded on both so cutting a viewer release does not push a second set of packages.
+
+Two things to know about the AOT build:
+
+- **`LibUsbDotNet` 2.2.75 is not trim/AOT annotated** and emits IL2104 + IL3053 on every publish. The
+  warnings are left visible because the risk is real: the cross-platform USB transport may fail at
+  runtime in an AOT binary. WPD (Windows) and PTP/IP (WiFi) go through `[GeneratedComInterface]` and
+  sockets respectively and are AOT-clean. Verify USB against a real body before claiming it works.
+- **No `Enum.GetValues(Type)`** in viewer code — it is `RequiresDynamicCode` (IL3050). Use
+  `Enum.GetValuesAsUnderlyingType(Type)`, which is what `CameraControl.CycleValues` does.
+
 ## Testing
 
-No automated tests yet — the library requires a physical Canon camera. Manual test sequence:
-1. Connect camera (USB or WiFi)
-2. Open session
-3. Read battery level: `GetPropertyAsync(EdsPropertyId.BatteryLevel)`
+Automated tests cover `FC.SDK.Raw` only; the device layer needs a physical Canon body. Manual sequence
+(all of it available as buttons in the viewer):
+1. Connect camera (WPD, USB or WiFi)
+2. Open session — check the log's operation-support list, especially whether 0x1015 is absent
+3. Read all properties and confirm the event cache is populated
 4. Take picture: `TakePictureAsync()`
 5. Live view: `StartLiveViewAsync()` → `GetLiveViewFrameAsync()` → verify JPEG
 6. Bulb: `BulbStartAsync()` → delay → `BulbEndAsync()`
 
-First test target: Canon EOS 6D (USB VID=0x04A9, PID=0x3215, WiFi AP at 192.168.0.1).
+Test targets so far: Canon EOS 6D (USB VID=0x04A9, PID=0x3215, WiFi AP at 192.168.0.1).
+Reported working under EDSDK but previously failing here: EOS 200D II / 250D / Rebel SL3 (DIGIC 8) —
+see the property-read and property-write notes above; both symptoms in issue #1 trace back to them.

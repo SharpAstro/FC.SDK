@@ -8,3 +8,5 @@ obj/
 *.yml
 MISC
 rev/
+# Default output of src/FC.SDK.Viewer: captures, live-view stills, property dumps and PTP logs.
+fc-viewer-output/
