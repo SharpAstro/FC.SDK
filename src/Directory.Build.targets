@@ -1,0 +1,20 @@
+<Project>
+
+  <!--
+    Whether SdlVulkan.Renderer's DEBUG-only DebugInspector surface is available to compile against.
+
+    DebugInspector is wrapped in #if DEBUG upstream, so it exists only in a DEBUG-compiled sibling.
+    A PackageReference resolves the RELEASE-built package, where the type is absent entirely — so a
+    plain `#if DEBUG` at our call site asks the wrong question: it tests how WE are compiled, not how
+    the library was. Debug plus -p:UseLocalSiblings=false (see Directory.Build.props) would fail with
+    CS0103 on a name that genuinely is not in that package.
+
+    Lives in .targets rather than .props on purpose: Directory.Build.props is imported before the SDK
+    assigns $(Configuration) its default, so the same condition there reads empty for any build that
+    did not pass -c explicitly — and the constant would go missing on a plain `dotnet build`.
+  -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug' AND '$(UseLocalSiblings)' == 'true'">
+    <DefineConstants>$(DefineConstants);SIBLING_DEBUG_INSPECTORS</DefineConstants>
+  </PropertyGroup>
+
+</Project>

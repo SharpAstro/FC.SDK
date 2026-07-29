@@ -1,0 +1,28 @@
+<Project>
+
+  <!--
+    Auto-detect sibling SharpAstro working copies.
+    When every sibling repo exists locally, their projects are used via ProjectReference
+    for fast in-tree iteration. CI and package builds without the siblings fall through
+    to PackageReference automatically (versions pinned in each csproj).
+
+    All-or-nothing on purpose: a half-local graph resolves the same assembly from both a
+    project and a package, which NuGet reports as a downgrade or resolves inconsistently.
+    Same arrangement as tianwen/src/Directory.Build.props.
+
+    Override: dotnet build -p:UseLocalSiblings=false
+  -->
+  <PropertyGroup>
+    <UseLocalSiblings Condition="'$(UseLocalSiblings)' == ''
+      AND Exists('$(MSBuildThisFileDirectory)..\..\Codecs\src\SharpAstro.Jpeg\SharpAstro.Jpeg.csproj')
+      AND Exists('$(MSBuildThisFileDirectory)..\..\Codecs\src\SharpAstro.Exif\SharpAstro.Exif.csproj')
+      AND Exists('$(MSBuildThisFileDirectory)..\..\Codecs\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj')
+      AND Exists('$(MSBuildThisFileDirectory)..\..\SdlVulkan.Renderer\src\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj')
+      AND Exists('$(MSBuildThisFileDirectory)..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj')">true</UseLocalSiblings>
+  </PropertyGroup>
+
+  <!-- SIBLING_DEBUG_INSPECTORS is defined in Directory.Build.targets, not here: this file is
+       imported before the SDK defaults $(Configuration), so a Configuration test would silently
+       read empty on any build that did not pass -c explicitly. -->
+
+</Project>

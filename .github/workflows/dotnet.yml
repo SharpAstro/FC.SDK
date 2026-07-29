@@ -3,11 +3,15 @@ name: CI/CD
 on:
   push:
     branches: [ main ]
+    # A v* tag is what ships the viewer: publish-viewer + release are gated on it (or on a
+    # manual dispatch for a dry run). Six AOT publishes are far too slow to run per push.
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 env:
-  VERSION_PREFIX: 1.4.${{ github.run_number }}
+  VERSION_PREFIX: 1.5.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_SUFFIX: +${{ github.sha }}
   BUILD_CONF: Release
@@ -60,6 +64,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: build
+    # Unchanged for branch/PR events. Excluded on tags and manual dispatch so cutting a viewer
+    # release does not also push a second, differently-numbered set of packages to nuget.org.
+    if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
 
     steps:
     - name: Download NuGet packages
@@ -68,3 +75,112 @@ jobs:
         name: nuget-packages
     - name: Push NuGet package
       run: dotnet nuget push **/*.nupkg -s nuget.org -k ${{ secrets.NUGET_API_KEY }}
+
+  # Self-contained NativeAOT builds of the diagnostic viewer, one per RID. A bug reporter should be
+  # able to download one file, run it, and send back the log — no .NET SDK, no build step.
+  #
+  # Runs in parallel with `build` rather than after it: an AOT publish takes minutes per RID, and
+  # the `release` job below re-gates on both, so nothing ships unless the tests also passed.
+  publish-viewer:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest,   rid: win-x64 }
+          - { os: windows-latest,   rid: win-arm64 }
+          - { os: ubuntu-latest,    rid: linux-x64 }
+          - { os: ubuntu-24.04-arm, rid: linux-arm64 }
+          - { os: macos-latest,     rid: osx-arm64 }
+          - { os: macos-latest,     rid: osx-x64 }
+
+    runs-on: ${{ matrix.os }}
+    steps:
+    # Defender real-time scanning in-lines every file write, which is brutal on an AOT publish
+    # (ILC + MSVC link churn thousands of object files). Excluding the work dirs before checkout
+    # lands any files is the cheap fix; same step as tianwen's publish matrix.
+    - name: Exclude work dirs from Defender (Windows CI speedup)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE", "$env:RUNNER_TEMP", "$env:USERPROFILE\.nuget"
+    - uses: actions/checkout@v4
+      with:
+        # No LFS pull at all: the CR2/CR3 fixtures belong to FC.SDK.Raw.Tests, and publishing a
+        # single app project never builds the test project.
+        lfs: false
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+    - name: Resolve version
+      id: ver
+      shell: bash
+      run: |
+        # A tag is authoritative when present (v1.5.0 -> 1.5.0); a manual dispatch falls back to
+        # the same run-number scheme the library build uses.
+        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+        else
+          echo "version=${VERSION_PREFIX}.${VERSION_REV}" >> $GITHUB_OUTPUT
+        fi
+    - name: Publish FC.SDK.Viewer
+      shell: bash
+      # GeneratePackageOnBuild=false: the two library projects in the graph pack by default, and a
+      # publish has no business emitting nupkgs that the `publish` job might then pick up.
+      run: >
+        dotnet publish src/FC.SDK.Viewer/FC.SDK.Viewer.csproj
+        -r ${{ matrix.rid }} -c Release
+        -p:Version=${{ steps.ver.outputs.version }}
+        -p:ContinuousIntegrationBuild=true
+        -p:GeneratePackageOnBuild=false
+    - uses: actions/upload-artifact@v4
+      with:
+        name: fc-viewer-${{ matrix.rid }}
+        path: src/FC.SDK.Viewer/bin/Release/net10.0/${{ matrix.rid }}/publish/
+
+  # Only ship binaries once the tests passed AND every RID published.
+  release:
+    needs: [build, publish-viewer]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: fc-viewer-*
+        path: artifacts
+    - name: Create release archives
+      run: |
+        cd artifacts
+        for dir in fc-viewer-*/; do
+          name="${dir%/}"
+          # zip for Windows RIDs, tar.gz elsewhere. The audience is someone triaging their camera,
+          # not a developer — a double-click-to-extract archive removes one step of friction.
+          if [[ "$name" == *-win-* ]]; then
+            (cd "$dir" && zip -qr "../../${name}.zip" .)
+          else
+            tar -czf "../${name}.tar.gz" -C "$dir" .
+          fi
+        done
+    - name: Resolve release tag
+      id: tag
+      run: |
+        # On a tag push the tag already exists, so reuse it verbatim. A dispatch run gets a
+        # build-numbered tag so a dry run never collides with a real version.
+        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          echo "name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+        else
+          echo "name=build-${{ github.run_number }}" >> $GITHUB_OUTPUT
+        fi
+    - name: Create GitHub Release
+      uses: SharpAstro/action-gh-release@v3
+      with:
+        tag_name: ${{ steps.tag.outputs.name }}
+        name: ${{ steps.tag.outputs.name }}
+        generate_release_notes: true
+        # A dispatch run is a dry run: keep it out of "Latest".
+        prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        files: |
+          fc-viewer-*.zip
+          fc-viewer-*.tar.gz

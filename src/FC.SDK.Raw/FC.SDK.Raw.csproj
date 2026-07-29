@@ -31,14 +31,10 @@
     <InternalsVisibleTo Include="FC.SDK.Raw.Tests" />
   </ItemGroup>
 
-  <!-- SharpAstro codec packages (sibling repo: Codecs). When the working
-       copy is present locally, switch to ProjectReference for fast iteration;
-       otherwise fall through to the published NuGet packages.
-       Override: dotnet build -p:UseLocalSiblings=false -->
-  <PropertyGroup>
-    <UseLocalSiblings Condition="'$(UseLocalSiblings)' == ''
-      AND Exists('$(MSBuildThisFileDirectory)..\..\..\Codecs\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj')">true</UseLocalSiblings>
-  </PropertyGroup>
+  <!-- SharpAstro codec packages (sibling repo: Codecs). ProjectReference when the working
+       copies are present locally, otherwise the published NuGet packages. The detection
+       itself lives in src/Directory.Build.props so every project in this repo agrees on
+       whether the graph is local. Override: dotnet build -p:UseLocalSiblings=false -->
   <ItemGroup Condition="'$(UseLocalSiblings)' == 'true'">
     <!-- Jpeg: SOF3 lossless JPEG (LosslessJpeg) decode for the CR2 raw IFD payload. -->
     <ProjectReference Include="..\..\..\Codecs\src\SharpAstro.Jpeg\SharpAstro.Jpeg.csproj" />

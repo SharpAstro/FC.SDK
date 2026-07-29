@@ -30,6 +30,10 @@ await camera.SetISOAsync(EdsISOSpeed.ISO_800);
 await camera.SetShutterSpeedAsync(EdsTv.Tv_1_125);
 await camera.SetApertureAsync(EdsAv.Av_2_8);
 
+// Keep the event pump running for the whole session: on EOS bodies property values only ever
+// arrive through GetEvent, and an undrained queue makes the camera reject property writes.
+camera.StartEventPolling();
+
 // Snap and download (auto-detects CR2, CR3, JPG)
 await camera.SetSaveToAsync(EdsSaveTo.Host);
 camera.ObjectAdded += async (s, e) =>
@@ -39,7 +43,6 @@ camera.ObjectAdded += async (s, e) =>
     await camera.DownloadAsync(e.ObjectHandle, fs);
     await camera.TransferCompleteAsync(e.ObjectHandle);
 };
-camera.StartEventPolling();
 await camera.TakePictureAsync();
 
 // Bulb exposure (mode dial must be on B)
@@ -60,9 +63,48 @@ await camera.StopLiveViewAsync();
 ```
 CanonCamera              (public async API)
   CanonPtpSession        (Canon vendor opcodes 0x9xxx)
+    CanonPropertyCache   (property mirror fed by the GetEvent stream)
     PtpSession           (transaction management, half-duplex lock)
       IPtpTransport      (WPD / USB / PTP-IP)
 ```
+
+### How EOS properties are read
+
+EOS bodies expose **no** property-read operation: standard PTP `GetDevicePropValue` (0x1015) is absent from
+their supported-operations list, and Canon's 0x9127 is `RequestDevicePropValue` — it asks the camera to *emit*
+a value, it does not return one. Values and their selectable-value lists arrive only as `PropValueChanged` /
+`AvailListChanged` records in the `GetEvent` (0x9116) stream. `CanonPropertyCache` mirrors that stream and
+`GetPropertyAsync` answers out of the mirror, requesting a push when a code has not been seen yet. Same design
+as EDSDK and libgphoto2.
+
+Two practical consequences: run `StartEventPolling` for the whole session, and expect `DeviceBusy` on property
+writes if you don't (the SDK drains and retries, but the camera really does gate writes on an empty queue).
+
+## Diagnostic viewer
+
+Prebuilt, self-contained binaries are attached to every [release](https://github.com/SharpAstro/FC.SDK/releases)
+— `fc-viewer-<rid>.zip` for Windows, `.tar.gz` for Linux and macOS. No .NET install needed. The archive
+carries the SDL3 native; the Vulkan loader comes from the OS:
+
+| Platform | Also needs |
+|---|---|
+| Windows (`win-x64`, `win-arm64`) | nothing — `vulkan-1.dll` ships with any modern GPU driver |
+| Linux (`linux-x64`, `linux-arm64`) | `libvulkan.so.1` + an ICD (`mesa-vulkan-drivers`), and a font package (`fonts-dejavu-core`) |
+| macOS (`osx-arm64`, `osx-x64`) | MoltenVK (Vulkan-on-Metal) |
+
+Or from source:
+
+```
+dotnet run --project src/FC.SDK.Viewer [output-directory]
+```
+
+An SDL3 + Vulkan GUI that exposes every control and action the SDK has, shows the raw event-stream property
+cache next to the typed values, previews live view and captures, and writes a full timestamped log of every
+PTP exchange (including which PTP operations your body advertises). If a body misbehaves, run this and attach
+the log from the output directory.
+
+Shortcuts: `F5` read all properties · `Space` capture · `Ctrl+L` live view · `Ctrl+D` dump properties ·
+`Ctrl+±` text size.
 
 ## Feature Matrix
 
@@ -89,7 +131,10 @@ CanonCamera              (public async API)
 
 ## Supported Cameras
 
-Tested with Canon EOS 6D. Should work with any Canon EOS body that supports PTP — the Canon vendor opcodes are shared across the EOS lineup.
+Tested with Canon EOS 6D. Should work with any Canon EOS body that supports PTP — the Canon vendor opcodes are
+shared across the EOS lineup. Reported on the EOS 200D II / 250D / Rebel SL3 (DIGIC 8) in
+[issue #1](https://github.com/SharpAstro/FC.SDK/issues/1); the protocol bugs behind that report are fixed but the
+fix is unverified on that body — please run the viewer and attach its log if anything still misbehaves.
 
 ## AOT Compatible
 
