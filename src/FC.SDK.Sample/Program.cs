@@ -23,6 +23,10 @@ if (err is not EdsError.OK) { await camera.DisposeAsync(); return 1; }
 Console.WriteLine($"Battery: {camera.BatteryLevelPercent}%");
 Console.WriteLine($"Model: {camera.Model}  Serial: {camera.SerialNumber}");
 
+// Start the event pump before touching properties. On EOS bodies the GetEvent stream is the only
+// source of property values, and leaving records queued makes the camera reject property writes.
+camera.StartEventPolling(TimeSpan.FromMilliseconds(200));
+
 // --- Camera status ---
 var (_, aeMode) = await camera.GetAEModeAsync();
 var (_, iso) = await camera.GetISOAsync();
@@ -54,8 +58,6 @@ camera.ObjectAdded += (_, e) =>
     Console.WriteLine($"  ObjectAdded: handle=0x{e.ObjectHandle:X8}");
     objectTcs.TrySetResult(e.ObjectHandle);
 };
-
-camera.StartEventPolling(TimeSpan.FromMilliseconds(200));
 
 Console.WriteLine("Taking picture...");
 err = await camera.TakePictureAsync();

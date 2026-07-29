@@ -56,12 +56,23 @@ public sealed class CanonCamera : IAsyncDisposable
     /// <summary>Camera model name from PTP GetDeviceInfo. Available after session open.</summary>
     public string? Model => _canon.Model;
 
+    /// <summary>
+    /// PTP operation codes the camera advertises. Empty until the session is open. Handy when
+    /// diagnosing "not supported" errors: EOS bodies omit GetDevicePropValue (0x1015) entirely.
+    /// </summary>
+    public IReadOnlySet<ushort> SupportedOperations => _canon.SupportedOperations;
+
     internal CanonCamera(IPtpTransport transport, ILogger<CanonCamera> logger)
     {
         _transport = transport;
         _ptp = new PtpSession(transport);
         _canon = new CanonPtpSession(_ptp);
         _logger = logger;
+
+        // Subscribed for the whole lifetime, not just while the poller runs: the initial session
+        // drain and property reads also pull events, and dropping those on the floor would hide
+        // ObjectAdded notifications that arrive outside a polling window.
+        _canon.EventReceived += OnCanonEvent;
     }
 
     public static CanonCamera ConnectUsb(UsbDeviceInfo device) =>
@@ -205,8 +216,90 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<EdsError> SetApertureAsync(EdsAv av, CancellationToken ct = default) =>
         SetPropertyAsync(EdsPropertyId.Av, (uint)av, ct);
 
-    public Task<EdsError> SetSaveToAsync(EdsSaveTo target, CancellationToken ct = default) =>
-        SetPropertyAsync(EdsPropertyId.SaveTo, (uint)target, ct);
+    /// <summary>
+    /// Sets where captured images go, translating the EDSDK <see cref="EdsSaveTo"/> value to the
+    /// Canon PTP CaptureDestination numbering the camera actually expects.
+    /// </summary>
+    /// <remarks>
+    /// Selecting <see cref="EdsSaveTo.Host"/> also reports host free space via PCHDDCapacity
+    /// (0x911A). Without that the camera keeps AvailableShots at zero and refuses to release.
+    /// </remarks>
+    public async Task<EdsError> SetSaveToAsync(EdsSaveTo target, CancellationToken ct = default)
+    {
+        var (resolveErr, destination) = await ResolveCaptureDestinationAsync(target, ct);
+        if (resolveErr is not EdsError.OK) return resolveErr;
+
+        return await SetCaptureDestinationAsync(destination, ct);
+    }
+
+    /// <summary>
+    /// Sets the Canon PTP CaptureDestination property (0xD11C) directly, using wire values rather
+    /// than EDSDK's numbering.
+    /// </summary>
+    public async Task<EdsError> SetCaptureDestinationAsync(CanonCaptureDestination destination, CancellationToken ct = default)
+    {
+        var err = await SetPropertyAsync(EdsPropertyId.SaveTo, (uint)destination, ct);
+        if (err is not EdsError.OK) return err;
+
+        if (destination is CanonCaptureDestination.Host or CanonCaptureDestination.Both)
+        {
+            var capacityErr = await _canon.PcHddCapacityAsync(ct: ct);
+            if (capacityErr is not EdsError.OK)
+                _logger.LogWarning("PCHDDCapacity failed: {Error} — camera may report zero available shots", capacityErr);
+        }
+
+        return EdsError.OK;
+    }
+
+    /// <summary>
+    /// Maps an EDSDK save target onto a wire value, preferring what the camera says it accepts
+    /// over a hard-coded number. Only "host" is fixed by the protocol.
+    /// </summary>
+    private async Task<(EdsError Error, CanonCaptureDestination Destination)> ResolveCaptureDestinationAsync(
+        EdsSaveTo target, CancellationToken ct)
+    {
+        if (target is EdsSaveTo.Host)
+            return (EdsError.OK, CanonCaptureDestination.Host);
+
+        var allowed = await GetAllowedValuesAsync(EdsPropertyId.SaveTo, ct);
+
+        if (target is EdsSaveTo.Camera)
+        {
+            // Anything the body offers that is not "host" is the card slot.
+            var cardValue = allowed?.FirstOrDefault(v => v != (uint)CanonCaptureDestination.Host, 0u) ?? 0u;
+            return (EdsError.OK, cardValue is 0
+                ? CanonCaptureDestination.Card
+                : (CanonCaptureDestination)cardValue);
+        }
+
+        // Both: no body has been confirmed to accept it, so only use it if this one lists it.
+        if (allowed is not null && !allowed.Contains((uint)CanonCaptureDestination.Both))
+        {
+            _logger.LogWarning(
+                "SaveTo=Both is not in the camera's allowed values [{Allowed}] — refusing to guess",
+                string.Join(", ", allowed));
+            return (EdsError.InvalidParameter, default);
+        }
+        return (EdsError.OK, CanonCaptureDestination.Both);
+    }
+
+    /// <summary>
+    /// The values the camera currently accepts for a property, as reported by its
+    /// AllowedValuesChanged events. Null when the camera has not described the property — for a
+    /// read-only property (AvailableShots, TempStatus) that is normal.
+    /// </summary>
+    public async Task<uint[]?> GetAllowedValuesAsync(EdsPropertyId id, CancellationToken ct = default)
+    {
+        if (!CanonPropertyMap.TryGetPtpCode(id, out ushort ptpCode, out _))
+            return null;
+
+        var allowed = _canon.Properties.GetAllowedValues(ptpCode);
+        if (allowed is not null) return allowed;
+
+        // The description arrives on the event stream like everything else.
+        await _canon.DrainEventsAsync(ct);
+        return _canon.Properties.GetAllowedValues(ptpCode);
+    }
 
     public Task<EdsError> SetWhiteBalanceAsync(EdsWhiteBalance wb, CancellationToken ct = default) =>
         SetPropertyAsync(EdsPropertyId.WhiteBalance, (uint)wb, ct);
@@ -272,6 +365,10 @@ public sealed class CanonCamera : IAsyncDisposable
     public async Task<EdsError> TakePictureAsync(CancellationToken ct = default)
     {
         _logger.LogDebug("Taking picture");
+
+        // Clear the event queue first — the camera reports busy and can drop the release if it
+        // still has records waiting to be read.
+        await _canon.DrainEventsAsync(ct);
 
         // Half-press AF
         var err = await _canon.RemoteReleaseOnAsync(0x01, ct);
@@ -401,22 +498,32 @@ public sealed class CanonCamera : IAsyncDisposable
         return err;
     }
 
+    /// <summary>
+    /// Starts the background GetEvent pump. Strongly recommended for the whole session on EOS
+    /// bodies: property values only ever arrive through this stream, and an undrained event queue
+    /// makes the camera answer <see cref="EdsError.DeviceBusy"/> to property writes.
+    /// </summary>
     public void StartEventPolling(TimeSpan? interval = null)
     {
         if (_poller is not null) return;
 
         _poller = new EventPoller(_canon, interval ?? DefaultPollInterval);
-        _poller.EventReceived += OnCanonEvent;
         _poller.Start();
     }
 
     public async Task StopEventPollingAsync()
     {
         if (_poller is null) return;
-        _poller.EventReceived -= OnCanonEvent;
         await _poller.DisposeAsync();
         _poller = null;
     }
+
+    /// <summary>
+    /// Polls GetEvent until the camera has nothing queued, refreshing the property mirror and
+    /// firing the corresponding events. Returns the number of records processed. Call this before
+    /// a property write if the background poller is not running.
+    /// </summary>
+    public Task<int> DrainEventsAsync(CancellationToken ct = default) => _canon.DrainEventsAsync(ct);
 
     private void OnCanonEvent(CanonPtpEvent evt)
     {
@@ -436,6 +543,80 @@ public sealed class CanonCamera : IAsyncDisposable
                 break;
         }
     }
+
+    /// <summary>
+    /// Cancels a running autofocus operation. Useful after a half-press that never resolved.
+    /// </summary>
+    public Task<EdsError> CancelAutoFocusAsync(CancellationToken ct = default) => _canon.AfCancelAsync(ct);
+
+    /// <summary>
+    /// Resets a stuck mirror-lockup state (Canon 0x9130), e.g. after an aborted MLU exposure.
+    /// </summary>
+    public Task<EdsError> ResetMirrorLockupStateAsync(CancellationToken ct = default) =>
+        _canon.ResetMirrorLockupStateAsync(ct);
+
+    /// <summary>
+    /// Resets the camera's auto-power-off countdown without changing any setting. Cheaper and less
+    /// invasive than <see cref="SetAutoPowerOffAsync"/> for keeping a body awake between exposures.
+    /// </summary>
+    public Task<EdsError> KeepDeviceOnAsync(CancellationToken ct = default) => _canon.KeepDeviceOnAsync(ct);
+
+    /// <summary>
+    /// Locks or unlocks the camera's physical controls. Some bodies need the UI locked before they
+    /// accept certain property writes.
+    /// </summary>
+    public Task<EdsError> SetUILockAsync(bool locked, CancellationToken ct = default) =>
+        _canon.SetUILockAsync(locked, ct);
+
+    /// <summary>
+    /// Reports host free space to the camera (Canon 0x911A). Sent automatically when the capture
+    /// destination is set to host; call it again if a long session drives AvailableShots to zero.
+    /// </summary>
+    public Task<EdsError> ReportHostCapacityAsync(CancellationToken ct = default) => _canon.PcHddCapacityAsync(ct: ct);
+
+    // --- Diagnostics ---
+
+    /// <summary>
+    /// Everything the camera has told us about itself through the event stream: PTP property code,
+    /// current value, the mapped <see cref="EdsPropertyId"/> when one exists, and the accepted
+    /// values when the camera described them.
+    /// </summary>
+    /// <remarks>
+    /// This is the authoritative view of an EOS body's state — richer than
+    /// <see cref="EdsPropertyId"/> covers, because the camera reports many codes the SDK has no
+    /// name for yet. Drains pending events first so the snapshot is current.
+    /// </remarks>
+    public async Task<IReadOnlyList<CanonPropertySnapshot>> DumpPropertiesAsync(CancellationToken ct = default)
+    {
+        await _canon.DrainEventsAsync(ct);
+
+        return [.. _canon.Properties.Snapshot()
+            .Select(p => new CanonPropertySnapshot(
+                p.PtpCode,
+                CanonPropertyMap.TryGetPropertyId(p.PtpCode),
+                p.Value,
+                p.AllowedValues))];
+    }
+
+    /// <summary>
+    /// Reads a raw Canon PTP property code, bypassing the <see cref="EdsPropertyId"/> mapping.
+    /// For probing codes the SDK does not map yet.
+    /// </summary>
+    public Task<(EdsError Error, uint Value)> GetRawPropertyAsync(ushort ptpPropertyCode, CancellationToken ct = default) =>
+        _canon.GetPropertyUInt32Async(ptpPropertyCode, ct);
+
+    /// <summary>
+    /// Writes a raw Canon PTP property code, bypassing the <see cref="EdsPropertyId"/> mapping.
+    /// </summary>
+    public Task<EdsError> SetRawPropertyAsync(ushort ptpPropertyCode, uint value, CancellationToken ct = default) =>
+        _canon.SetPropertyUInt32Async(ptpPropertyCode, value, ct);
+
+    /// <summary>
+    /// Asks the camera to push a property value into the event stream (Canon 0x9127) without
+    /// waiting for it. Reads do this on demand; use it directly to pre-warm a batch.
+    /// </summary>
+    public Task<EdsError> RequestPropertyPushAsync(ushort ptpPropertyCode, CancellationToken ct = default) =>
+        _canon.RequestDevicePropValueAsync(ptpPropertyCode, ct);
 
     /// <summary>Connects the transport without opening a PTP session.</summary>
     public Task ConnectTransportAsync(CancellationToken ct = default) => _transport.ConnectAsync(ct);
@@ -554,6 +735,30 @@ public sealed class CanonCamera : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (_poller is not null) await _poller.DisposeAsync();
+        _canon.EventReceived -= OnCanonEvent;
         await _canon.DisposeAsync();
+    }
+}
+
+/// <summary>
+/// One entry from the camera's device-property state, as reported through the event stream.
+/// </summary>
+/// <param name="PtpCode">Canon PTP property code, e.g. 0xD103 for ISO.</param>
+/// <param name="PropertyId">The mapped EDSDK property ID, or null if the SDK has no name for this code.</param>
+/// <param name="Value">Current value. Composite properties (strings, structs) report their first word.</param>
+/// <param name="AllowedValues">Values the camera accepts, or null if it never described them.</param>
+public sealed record CanonPropertySnapshot(
+    ushort PtpCode,
+    EdsPropertyId? PropertyId,
+    uint Value,
+    uint[]? AllowedValues)
+{
+    public override string ToString()
+    {
+        var name = PropertyId?.ToString() ?? "(unmapped)";
+        var allowed = AllowedValues is null
+            ? ""
+            : $" allowed=[{string.Join(", ", AllowedValues.Select(v => $"0x{v:X}"))}]";
+        return $"0x{PtpCode:X4} {name} = 0x{Value:X8} ({Value}){allowed}";
     }
 }
