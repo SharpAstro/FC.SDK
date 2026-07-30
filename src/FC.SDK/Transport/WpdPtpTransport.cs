@@ -100,20 +100,32 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         return ExtractResponse(results);
     }
 
+    /// <summary>
+    /// Per-phase tracing of the three-phase data-read to stderr (`FCSDK_WPD_TRACE=1`). The deadline
+    /// wraps the whole read, so when a command wedges only this can say WHICH phase never returned —
+    /// initiate (camera ignored the operation) vs read (driver blocked mid-data-phase).
+    /// </summary>
+    private static readonly bool TraceReads = Environment.GetEnvironmentVariable("FCSDK_WPD_TRACE") is "1";
+
     private (ushort, uint[], byte[]) ExecuteReadData(ushort opCode, uint[] @params)
     {
+        // GetEvent polls every 200 ms; tracing it would drown the interesting commands.
+        var trace = TraceReads && opCode != (ushort)Protocol.PtpOperationCode.CanonGetEvent;
+
         // Step 1: Initiate read
         var cmd = CreateValues();
         SetCommandKey(cmd, WpdInterop.PID_EXECUTE_DATA_READ);
         cmd.SetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_OPERATION_CODE), opCode);
         SetOperationParams(cmd, @params);
 
+        if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} initiate…");
         var results = SendWpdCommand(cmd);
         CheckHResult(results);
 
         // Get transfer context — if absent, WPD handled the command internally with no data
         int ctxHr = results.GetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), out string context);
         results.GetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_TOTAL_SIZE), out uint totalSize);
+        if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} initiated: ctxHr=0x{ctxHr:X8} totalSize={totalSize}");
 
         if (ctxHr < 0 || string.IsNullOrEmpty(context))
         {
@@ -138,12 +150,15 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
             readCmd.SetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_NUM_BYTES_TO_READ), totalSize);
             readCmd.SetBufferValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_DATA), new byte[totalSize], totalSize);
 
+            if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} reading {totalSize} bytes…");
             var readResults = SendWpdCommand(readCmd);
             CheckHResult(readResults);
             byte[] data = ExtractBuffer(readResults, totalSize);
 
             // Step 3: End transfer
+            if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} read {data.Length} bytes, ending transfer…");
             var endResponse = EndTransfer(context);
+            if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} done, response 0x{endResponse.ResponseCode:X4}");
             return (endResponse.ResponseCode, endResponse.ResponseParams, data);
         }
         catch

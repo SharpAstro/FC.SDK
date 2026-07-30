@@ -135,6 +135,8 @@ Long exposure noise reduction has NO direct PTP property on Canon — it is alwa
   returns `OperationRefused` when the camera kept its old value.
 - **Mirror lockup on the 450D is C.Fn 0x060F** (no 0xD13A/0xD1BF properties). The mapping is per-body:
   `CanonCustomFunctionId.MirrorLockupIdFor(model)` — never guess ids for unverified bodies.
+- **High-ISO NR on the 450D is C.Fn 0x0202** (no 0xD178 property), and it is two-state Off/On rather than the
+  four-level `EdsHighIsoNR` scheme. The SDK translates by meaning: Off ↔ `Disable`, On ↔ `Standard`.
 - **A 450D silently ignores RemoteRelease (0x910F) while MLU is enabled**: the command answers OK, no mirror moves,
   no event is emitted, no exposure ever arrives. Remote MLU capture is not possible on this body — the viewer warns
   instead of pretending a second press will expose. MLU state on such bodies is Enable/Disable derived from the
