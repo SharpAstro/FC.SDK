@@ -9,15 +9,22 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
 {
     private readonly string _deviceId;
     private IWpdDevice? _device;
-    private readonly SemaphoreSlim _lock = new(1, 1);
+
+    /// <summary>One command at a time, each bounded by a deadline. See <see cref="CommandTimeout"/>.</summary>
+    private readonly Protocol.CommandGate _gate;
 
     public bool IsConnected => _device is not null;
 
     public string DeviceId => _deviceId;
 
-    internal WpdPtpTransport(string deviceId)
+    /// <param name="timeProvider">
+    /// Drives the command deadline. Defaults to <see cref="TimeProvider.System"/>; a test can pass a
+    /// fake one to expire a command without waiting.
+    /// </param>
+    internal WpdPtpTransport(string deviceId, TimeProvider? timeProvider = null)
     {
         _deviceId = deviceId;
+        _gate = new Protocol.CommandGate(timeProvider ?? TimeProvider.System, TimeSpan.FromSeconds(15));
     }
 
     public Task ConnectAsync(CancellationToken ct = default)
@@ -50,29 +57,37 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     public ValueTask<int> ReceiveEventAsync(Memory<byte> buffer, CancellationToken ct = default) =>
         ValueTask.FromResult(0);
 
-    internal async Task<(ushort ResponseCode, uint[] ResponseParams)> ExecuteCommandAsync(
-        ushort opCode, uint[] @params, CancellationToken ct = default)
+    /// <summary>
+    /// Deadline for a single MTP extension command. The USB transport gets this from LibUsbDotNet
+    /// (5 s on the bulk endpoints) and PTP/IP from its socket timeouts; WPD had none, so a camera
+    /// that accepted a request and never answered — or an unplugged cable — hung the caller forever.
+    /// </summary>
+    /// <remarks>
+    /// Generous by default: a full-resolution GetObject over USB 2.0 legitimately takes seconds.
+    /// </remarks>
+    internal TimeSpan CommandTimeout
     {
-        await _lock.WaitAsync(ct);
-        try { return ExecuteNoData(opCode, @params); }
-        finally { _lock.Release(); }
+        get => _gate.Timeout;
+        set => _gate.Timeout = value;
     }
 
-    internal async Task<(ushort ResponseCode, uint[] ResponseParams, byte[] Data)> ExecuteCommandReadDataAsync(
-        ushort opCode, uint[] @params, CancellationToken ct = default)
-    {
-        await _lock.WaitAsync(ct);
-        try { return ExecuteReadData(opCode, @params); }
-        finally { _lock.Release(); }
-    }
+    private const ushort TimedOutCode = (ushort)Protocol.PtpResponseCode.LocalTimeout;
 
-    internal async Task<(ushort ResponseCode, uint[] ResponseParams)> ExecuteCommandWriteDataAsync(
-        ushort opCode, uint[] @params, byte[] data, CancellationToken ct = default)
-    {
-        await _lock.WaitAsync(ct);
-        try { return ExecuteWriteData(opCode, @params, data); }
-        finally { _lock.Release(); }
-    }
+    // All three phases go through the same gate: one command at a time, each with a deadline. The
+    // mechanics (thread hop, who releases the lock, bounding the wait for the lock itself) live in
+    // CommandGate so they can be tested against a FakeTimeProvider without COM or a camera.
+    internal Task<(ushort ResponseCode, uint[] ResponseParams)> ExecuteCommandAsync(
+        ushort opCode, uint[] @params, CancellationToken ct = default) =>
+        _gate.RunAsync(() => ExecuteNoData(opCode, @params), (TimedOutCode, Array.Empty<uint>()), ct);
+
+    internal Task<(ushort ResponseCode, uint[] ResponseParams, byte[] Data)> ExecuteCommandReadDataAsync(
+        ushort opCode, uint[] @params, CancellationToken ct = default) =>
+        _gate.RunAsync(() => ExecuteReadData(opCode, @params),
+            (TimedOutCode, Array.Empty<uint>(), Array.Empty<byte>()), ct);
+
+    internal Task<(ushort ResponseCode, uint[] ResponseParams)> ExecuteCommandWriteDataAsync(
+        ushort opCode, uint[] @params, byte[] data, CancellationToken ct = default) =>
+        _gate.RunAsync(() => ExecuteWriteData(opCode, @params, data), (TimedOutCode, Array.Empty<uint>()), ct);
 
     private (ushort, uint[]) ExecuteNoData(ushort opCode, uint[] @params)
     {
@@ -627,7 +642,6 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
             _device = null;
         }
 
-        _lock.Dispose();
         return ValueTask.CompletedTask;
     }
 }

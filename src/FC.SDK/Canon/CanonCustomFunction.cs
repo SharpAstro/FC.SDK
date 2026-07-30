@@ -8,21 +8,47 @@ namespace FC.SDK.Canon;
 /// rather than as direct PTP properties (0xD1xx).
 /// </summary>
 /// <remarks>
-/// Canon C.Fn block format (as sent/received via GetDevicePropValue/SetPropValue on 0xD1A0..0xD1AF):
+/// <para>
+/// libgphoto2 does not decode this block — <c>ptp_unpack_EOS_CustomFuncEx</c> reads the leading size
+/// word and renders the rest as comma-separated hex uint32s — so the layout below was derived from a
+/// real EOS 450D dump rather than taken from upstream:
+/// </para>
 /// <code>
-/// [total_size:u32]
-/// For each function (12 bytes each):
-///   [fn_size:u32]        — always 12
-///   [fn_id:u32]          — C.Fn identifier (camera-specific numbering)
-///   [current_value:u32]  — current setting
+/// [total_size:u32]           whole block, including this word
+/// [group_count:u32]
+/// per group:
+///   [group_id:u32]           1..4, matching the camera menu's C.Fn I..IV groups
+///   [group_size:u32]         bytes of the group EXCLUDING this word (= 8 + Σ entry sizes)
+///   [entry_count:u32]
+///   per entry:
+///     [func_id:u32]          e.g. 0x0201 = Long exposure NR on a 450D
+///     [value_count:u32]      1 for every entry seen so far
+///     [value:u32 × value_count]
 /// </code>
+/// <para>
+/// The group layer is what an earlier flat reading missed, which is why it produced nonsense ids such
+/// as 0x2000000. Confirmed on a 450D: group entry counts came out 2/4/3/4, exactly matching that
+/// body's C.Fn menu (I has 2 items, II has 4, III has 3, IV has 4), and two values cross-checked
+/// against the on-camera menu — C.Fn 3 "Long exposure noise reduction" = Off = <c>0x0201 → 0</c>, and
+/// C.Fn 9 "Mirror lockup" = disabled = <c>0x060F → 0</c>.
+/// </para>
+/// <para>
+/// <see cref="RawData"/> remains the authoritative record; dump it when a body disagrees.
+/// </para>
 /// </remarks>
 public sealed class CanonCustomFunctionBlock
 {
     private readonly Dictionary<uint, uint> _functions = new();
+    private readonly Dictionary<uint, uint> _groupOfFunction = new();
+    private readonly Dictionary<uint, int> _valueOffset = new();
 
     /// <summary>All C.Fn entries: function ID → current value.</summary>
     public IReadOnlyDictionary<uint, uint> Functions => _functions;
+
+    /// <summary>
+    /// Function ID → the C.Fn group it belongs to (1..4, matching the camera menu's C.Fn I..IV).
+    /// </summary>
+    public IReadOnlyDictionary<uint, uint> FunctionGroups => _groupOfFunction;
 
     /// <summary>The raw data as received from the camera.</summary>
     public byte[] RawData { get; private set; } = [];
@@ -35,46 +61,60 @@ public sealed class CanonCustomFunctionBlock
     /// <returns>True if the function was found and updated.</returns>
     public bool SetValue(uint functionId, uint value)
     {
-        if (!_functions.ContainsKey(functionId))
+        // Offsets are recorded during Parse, so writing back does not re-walk (and cannot re-derive)
+        // the structure. Sizes never change: every entry seen carries exactly one uint32 value.
+        if (!_valueOffset.TryGetValue(functionId, out var offset))
             return false;
 
         _functions[functionId] = value;
-
-        // Patch the raw data in-place so it can be written back
-        int offset = 4; // skip total_size
-        while (offset + 12 <= RawData.Length)
-        {
-            uint fnSize = BinaryPrimitives.ReadUInt32LittleEndian(RawData.AsSpan(offset));
-            uint fnId = BinaryPrimitives.ReadUInt32LittleEndian(RawData.AsSpan(offset + 4));
-            if (fnId == functionId)
-            {
-                BinaryPrimitives.WriteUInt32LittleEndian(RawData.AsSpan(offset + 8), value);
-                return true;
-            }
-            offset += (int)(fnSize > 0 ? fnSize : 12);
-        }
-        return false;
+        BinaryPrimitives.WriteUInt32LittleEndian(RawData.AsSpan(offset), value);
+        return true;
     }
 
-    /// <summary>Parses a C.Fn data block received from the camera.</summary>
+    /// <summary>Parses a C.Fn data block received from the camera. See the type remarks for the layout.</summary>
     internal static CanonCustomFunctionBlock Parse(byte[] data)
     {
         var block = new CanonCustomFunctionBlock { RawData = (byte[])data.Clone() };
 
-        if (data.Length < 4)
+        if (data.Length < 8)
             return block;
 
         uint totalSize = BinaryPrimitives.ReadUInt32LittleEndian(data);
-        int offset = 4;
+        int limit = Math.Min(data.Length, totalSize > 0 ? (int)totalSize : data.Length);
+        uint groupCount = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(4));
 
-        while (offset + 12 <= data.Length && offset < (int)totalSize)
+        int offset = 8;
+        for (uint g = 0; g < groupCount; g++)
         {
-            uint fnSize = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset));
-            uint fnId = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset + 4));
-            uint fnValue = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset + 8));
+            // group header: [group_id][group_size][entry_count]
+            if (offset + 12 > limit) break;
 
-            block._functions[fnId] = fnValue;
-            offset += (int)(fnSize > 0 ? fnSize : 12);
+            uint groupId = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset));
+            uint groupSize = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset + 4));
+            uint entryCount = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset + 8));
+
+            // group_size excludes its own word, so the next group starts 4 bytes further on.
+            int nextGroup = offset + 4 + (int)groupSize;
+            int entry = offset + 12;
+
+            for (uint e = 0; e < entryCount; e++)
+            {
+                if (entry + 12 > limit) break;
+
+                uint funcId = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry));
+                uint valueCount = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 4));
+
+                block._functions[funcId] = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 8));
+                block._groupOfFunction[funcId] = groupId;
+                block._valueOffset[funcId] = entry + 8;
+
+                // Honour value_count even though every entry observed so far carries exactly one.
+                entry += 8 + (int)Math.Max(1u, valueCount) * 4;
+            }
+
+            // Trust group_size for the stride when it is sane, so one malformed entry cannot
+            // desynchronise the whole walk; fall back to where the entries actually ended.
+            offset = nextGroup > offset && nextGroup <= limit ? nextGroup : entry;
         }
 
         return block;
@@ -94,13 +134,24 @@ public static class CanonCustomFunctionId
     /// <summary>C.Fn II-2: High ISO speed noise reduction. 0=Standard, 1=Low, 2=Strong, 3=Disable.</summary>
     public const uint HighIsoNR_6D = 0x0103;
 
-    // --- EOS 450D / 1000D / Rebel-era C.Fn IDs ---
-    /// <summary>C.Fn II-1: Long exposure noise reduction. 0=Off, 1=Auto, 2=On.</summary>
-    public const uint LongExposureNR_Rebel = 1;
+    // --- EOS 450D C.Fn IDs — read off a real body, cross-checked against its on-camera menu ---
+    //
+    // The menu numbers items 1..13 continuously while grouping them as C.Fn I..IV; the block's
+    // group_id matches that grouping, and entry order within a group matches menu order. Earlier
+    // values here (1, 2, 7) were the menu's item numbers, which are NOT the wire ids.
 
-    /// <summary>C.Fn II-2: High ISO speed noise reduction. 0=Standard, 1=Low, 2=Strong, 3=Disable.</summary>
-    public const uint HighIsoNR_Rebel = 2;
+    /// <summary>Menu C.Fn 3 (group II, "Image"): long exposure noise reduction. 0=Off, 1=Auto, 2=On.</summary>
+    public const uint LongExposureNR_450D = 0x0201;
 
-    /// <summary>C.Fn III-6 / III-7: Mirror lockup. 0=Disable, 1=Enable.</summary>
-    public const uint MirrorLockup_Rebel = 7;
+    /// <summary>Menu C.Fn 4 (group II): high ISO speed noise reduction. 0=Standard, 1=Low, 2=Strong, 3=Disable.</summary>
+    public const uint HighIsoNR_450D = 0x0202;
+
+    /// <summary>Menu C.Fn 5 (group II): highlight tone priority. 0=Disable, 1=Enable.</summary>
+    public const uint HighlightTonePriority_450D = 0x0203;
+
+    /// <summary>Menu C.Fn 6 (group II): Auto Lighting Optimizer.</summary>
+    public const uint AutoLightingOptimizer_450D = 0x0204;
+
+    /// <summary>Menu C.Fn 9 (group III, "Autofocus/Drive"): mirror lockup. 0=Disable, 1=Enable.</summary>
+    public const uint MirrorLockup_450D = 0x060F;
 }

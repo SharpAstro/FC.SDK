@@ -370,6 +370,18 @@ public sealed class CanonCamera : IAsyncDisposable
         // still has records waiting to be read.
         await _canon.DrainEventsAsync(ct);
 
+        // DIGIC III bodies (450D, 40D, 1000D era) have no RemoteReleaseOn/Off pair — only the
+        // single-shot RemoteRelease (0x910F), which fires outright with no half-press stage. Verified
+        // on a 450D, whose operation list carries 0x910F and omits 0x9128/0x9129.
+        if (!_canon.SupportsRemoteReleasePair)
+        {
+            _logger.LogDebug("Body has no RemoteReleaseOn (0x9128); using single-shot RemoteRelease (0x910F)");
+            var singleShot = await _canon.RemoteReleaseAsync(ct);
+            if (singleShot is not EdsError.OK)
+                _logger.LogWarning("RemoteRelease failed: {Error}", singleShot);
+            return singleShot;
+        }
+
         // Half-press AF
         var err = await _canon.RemoteReleaseOnAsync(0x01, ct);
         if (err is not EdsError.OK) return err;

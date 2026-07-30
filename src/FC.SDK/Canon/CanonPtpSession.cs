@@ -355,6 +355,23 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         return resp.ToEdsError();
     }
 
+    /// <summary>
+    /// True when the body implements the RemoteReleaseOn/Off press-and-hold pair (0x9128/0x9129).
+    /// DIGIC III bodies do not; they offer only the single-shot RemoteRelease (0x910F).
+    /// </summary>
+    internal bool SupportsRemoteReleasePair =>
+        SupportedOperations.Count == 0 || SupportedOperations.Contains((ushort)PtpOperationCode.CanonRemoteReleaseOn);
+
+    /// <summary>
+    /// Single-shot release (0x910F) for bodies without the press/hold pair. One command fires the
+    /// shutter outright, so there is no half-press stage to model.
+    /// </summary>
+    internal async Task<EdsError> RemoteReleaseAsync(CancellationToken ct = default)
+    {
+        var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonRemoteRelease, ct);
+        return resp.ToEdsError();
+    }
+
     internal async Task<EdsError> RemoteReleaseOnAsync(uint mode, CancellationToken ct = default)
     {
         var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonRemoteReleaseOn, ct, mode);
@@ -406,8 +423,18 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         return resp.ToEdsError();
     }
 
+    /// <summary>
+    /// True when the body has the explicit viewfinder start/stop pair (0x9151/0x9152). DIGIC III
+    /// bodies expose GetViewFinderData (0x9153) but not these — for them, setting EVFOutputDevice
+    /// to PC is the entire start sequence.
+    /// </summary>
+    internal bool SupportsViewfinderStartStop =>
+        SupportedOperations.Count == 0 || SupportedOperations.Contains((ushort)PtpOperationCode.CanonInitiateViewfinder);
+
     internal async Task<EdsError> InitiateViewfinderAsync(CancellationToken ct = default)
     {
+        if (!SupportsViewfinderStartStop) return EdsError.OK;
+
         var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonInitiateViewfinder, ct);
         return resp.ToEdsError();
     }
@@ -422,6 +449,10 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
 
     internal async Task<EdsError> TerminateViewfinderAsync(CancellationToken ct = default)
     {
+        // Symmetric with InitiateViewfinderAsync: on a body without the pair, resetting
+        // EVFOutputDevice (which the caller does next) is what actually stops live view.
+        if (!SupportsViewfinderStartStop) return EdsError.OK;
+
         var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonTerminateViewfinder, ct);
         return resp.ToEdsError();
     }

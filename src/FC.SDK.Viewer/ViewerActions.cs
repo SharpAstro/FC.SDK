@@ -13,8 +13,44 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 {
     private static readonly TimeSpan LiveViewFrameInterval = TimeSpan.FromMilliseconds(100);
 
+    /// <summary>
+    /// Consecutive empty frames before live view stops itself. At ~100 ms a frame this is about
+    /// 10 seconds — long enough for a body that is genuinely still waking up, short enough that a
+    /// body which will never deliver does not sit there occupying the camera.
+    /// </summary>
+    private const int MaxLiveViewFailures = 100;
+
+    /// <summary>
+    /// Consecutive <see cref="EdsError.WaitTimeoutError"/> frames before giving up — far lower than
+    /// <see cref="MaxLiveViewFailures"/> because the two failures mean different things. ObjectNotReady
+    /// comes back instantly and is normal between frames; a timeout means the transport itself is
+    /// wedged and already cost a full command deadline, so retrying it a hundred times would spin for
+    /// tens of minutes rather than ten seconds.
+    /// </summary>
+    private const int MaxLiveViewTimeouts = 2;
+
+    /// <summary>
+    /// Whole-sweep budget for reading every mapped property. Each cache miss costs a request plus an
+    /// event drain, and against a wedged transport each can cost a full command deadline — a 68-entry
+    /// sweep then runs for minutes with the action gate held, which is what made Disconnect look dead.
+    /// </summary>
+    private static readonly TimeSpan PropertySweepBudget = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Consecutive timeouts before abandoning the sweep. Once the transport stops answering, the
+    /// remaining properties will not answer either; continuing just burns the budget.
+    /// </summary>
+    private const int MaxSweepTimeouts = 2;
+
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly CancellationTokenSource _shutdown = new();
+
+    /// <summary>
+    /// Cancels whatever operation currently holds <see cref="_gate"/>. Teardown uses it so a stuck
+    /// command cannot make Disconnect look like a dead button: a property sweep against a wedged
+    /// transport can run for minutes, and everything clicked meanwhile just queues behind it.
+    /// </summary>
+    private CancellationTokenSource? _running;
     private readonly ILogger _logger = loggerFactory.CreateLogger("Viewer");
     private Task? _liveViewLoop;
 
@@ -31,12 +67,17 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         _ = Task.Run(async () =>
         {
             await _gate.WaitAsync(_shutdown.Token);
+
+            // Published so teardown can cancel this operation instead of queueing behind it.
+            using var running = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
+            _running = running;
+
             state.BusyOperation = name;
             state.Invalidate();
             try
             {
                 _logger.LogDebug("▶ {Operation}", name);
-                await body(_shutdown.Token);
+                await body(running.Token);
             }
             catch (OperationCanceledException)
             {
@@ -49,11 +90,25 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             }
             finally
             {
+                _running = null;
                 state.BusyOperation = null;
                 state.Invalidate();
                 _gate.Release();
             }
         });
+    }
+
+    /// <summary>
+    /// Cancels the running operation so a teardown can proceed. Without this, Disconnect sat behind
+    /// whatever was stuck — a property sweep across a wedged transport takes minutes — and read as a
+    /// button that does nothing.
+    /// </summary>
+    private void CancelRunning(string reason)
+    {
+        if (_running is not { } running || running.IsCancellationRequested) return;
+
+        _logger.LogInformation("Cancelling '{Operation}' — {Reason}", state.BusyOperation ?? "?", reason);
+        try { running.Cancel(); } catch (ObjectDisposedException) { /* already finished */ }
     }
 
     // --- Discovery and connection ---
@@ -129,7 +184,13 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         await camera.ConnectTransportAsync(ct);
     });
 
-    public void Disconnect() => Enqueue("Disconnect", async _ => await DisconnectCoreAsync());
+    public void Disconnect()
+    {
+        // Cancel first, then queue: the gate frees as soon as the running op observes cancellation,
+        // so the teardown starts in about a round trip rather than after a stuck sweep finishes.
+        CancelRunning("disconnect requested");
+        Enqueue("Disconnect", async _ => await DisconnectCoreAsync());
+    }
 
     private async Task DisconnectCoreAsync()
     {
@@ -233,7 +294,13 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         }
     }
 
-    public void CloseSession() => Enqueue("Close session", async ct =>
+    public void CloseSession()
+    {
+        CancelRunning("close session requested");
+        CloseSessionQueued();
+    }
+
+    private void CloseSessionQueued() => Enqueue("Close session", async ct =>
     {
         if (state.Camera is not { } camera) return;
 
@@ -265,15 +332,35 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 
     private async Task ReadAllCoreAsync(CanonCamera camera, CancellationToken ct)
     {
+        // Bounded as a whole, not just per property: see PropertySweepBudget.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(PropertySweepBudget);
+        ct = budget.Token;
+
         // One drain up front means the per-property reads mostly hit the cache instead of each
         // paying for a request/drain round trip.
         var drained = await camera.DrainEventsAsync(ct);
         _logger.LogDebug("Drained {Count} pending events before property sweep", drained);
 
-        int ok = 0, failed = 0;
+        int ok = 0, failed = 0, timeouts = 0;
         foreach (var control in CameraControls.All)
         {
+            if (ct.IsCancellationRequested)
+            {
+                _logger.LogWarning("Property sweep stopped after {Budget}s ({Ok} read, {Failed} unavailable)",
+                    PropertySweepBudget.TotalSeconds, ok, failed);
+                break;
+            }
+
+            if (timeouts >= MaxSweepTimeouts)
+            {
+                _logger.LogError("Property sweep abandoned: the transport stopped answering after {Ok} properties", ok);
+                state.StatusMessage = "Property sweep abandoned — the camera stopped answering.";
+                break;
+            }
+
             var (err, value) = await camera.GetPropertyAsync(control.PropertyId, ct);
+            timeouts = err is EdsError.WaitTimeoutError ? timeouts + 1 : 0;
             var allowed = err is EdsError.OK ? await camera.GetAllowedValuesAsync(control.PropertyId, ct) : null;
 
             state.Readings[control.PropertyId] = new ControlReading(err, value, allowed);
@@ -461,15 +548,31 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             return;
         }
 
-        // Dump every function the block carries, not just the handful with named constants — the
-        // IDs are model-specific and an unnamed one is still useful evidence.
-        _logger.LogInformation("Custom-function block: {Bytes} bytes, {Count} functions",
-            block.RawData.Length, block.Functions.Count);
+        // The raw uint32 words are the primary record. libgphoto2 does not decode this block either
+        // (ptp_unpack_EOS_CustomFuncEx just renders it as comma-separated hex), so the structured
+        // parse below is a hypothesis, not a spec — dump the words so a reading can be diffed against
+        // the same camera with one setting toggled. That diff is how a C.Fn offset gets identified.
+        _logger.LogInformation("Custom-function block: {Bytes} bytes ({Words} words)",
+            block.RawData.Length, block.RawData.Length / 4);
+
+        for (int offset = 0; offset < block.RawData.Length; offset += 32)
+        {
+            var words = new List<string>();
+            for (int w = offset; w < Math.Min(offset + 32, block.RawData.Length & ~3); w += 4)
+            {
+                words.Add($"{System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(block.RawData.AsSpan(w)):x8}");
+            }
+            if (words.Count > 0)
+                _logger.LogInformation("  raw[{Index,3}] {Words}", offset / 4, string.Join(" ", words));
+        }
+
+        _logger.LogInformation("Structured parse (UNVERIFIED layout — {Count} entries):", block.Functions.Count);
         foreach (var (functionId, value) in block.Functions.OrderBy(f => f.Key))
         {
             _logger.LogInformation("  C.Fn 0x{Id:X4} = {Value}", functionId, value);
         }
-        state.StatusMessage = $"C.Fn block: {block.Functions.Count} functions — see log.";
+
+        state.StatusMessage = $"C.Fn block: {block.RawData.Length} bytes dumped to the log.";
     });
 
     // --- Download ---
@@ -575,6 +678,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
     private async Task LiveViewLoopAsync(CanonCamera camera, CancellationToken ct)
     {
         int consecutiveFailures = 0;
+        int consecutiveTimeouts = 0;
 
         while (state.LiveViewActive && !ct.IsCancellationRequested)
         {
@@ -595,6 +699,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                 if (err is EdsError.OK && jpeg.Length > 0)
                 {
                     consecutiveFailures = 0;
+                    consecutiveTimeouts = 0;
                     if (TryDecodeJpeg(jpeg, "live view") is { } raster)
                     {
                         state.LiveViewFrame = raster;
@@ -602,10 +707,40 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                         state.Invalidate();
                     }
                 }
-                else if (++consecutiveFailures is 1 or 10 or 50)
+                else
                 {
+                    consecutiveFailures++;
+                    if (err is EdsError.WaitTimeoutError) consecutiveTimeouts++;
+
                     // Objects-not-ready is normal between frames; only shout when it persists.
-                    _logger.LogWarning("Live view frame {Error} ({Count} consecutive)", err, consecutiveFailures);
+                    if (consecutiveFailures is 1 or 10 or 50)
+                        _logger.LogWarning("Live view frame {Error} ({Count} consecutive)", err, consecutiveFailures);
+                }
+
+                // Give up rather than hold the camera hostage. A body that advertises
+                // GetViewFinderData but never delivers (450D with Live View disabled in its menu, for
+                // one) would otherwise keep this loop taking the gate forever, so every button in the
+                // UI goes inert while the window still looks perfectly healthy — the worst kind of
+                // failure to diagnose from a screenshot.
+                //
+                // Timeouts get a much lower bound than empty frames: each one already cost a full
+                // command deadline, so retrying a hundred of them would spin for tens of minutes
+                // instead of the ten seconds MaxLiveViewFailures is scaled for.
+                var timedOut = consecutiveTimeouts >= MaxLiveViewTimeouts;
+                if (timedOut || consecutiveFailures >= MaxLiveViewFailures)
+                {
+                    _logger.LogError(
+                        "Live view produced no frame in {Count} attempts ({Timeouts} timed out, last: {Error}). " +
+                        "Stopping. If the body is a 450D-era Rebel, check " +
+                        "Set-up 2 > Live View function settings > LV func. setting > Enable.",
+                        consecutiveFailures, consecutiveTimeouts, err);
+
+                    state.LiveViewActive = false;
+                    state.StatusMessage = timedOut
+                        ? $"Live view stopped: the camera stopped answering ({err})."
+                        : $"Live view gave up after {consecutiveFailures} empty frames ({err}).";
+                    state.Invalidate();
+                    break;
                 }
             }
             catch (OperationCanceledException)

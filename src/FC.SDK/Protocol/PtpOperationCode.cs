@@ -27,6 +27,12 @@ internal enum PtpOperationCode : ushort
     CanonGetPartialObject = 0x9107,
     CanonGetDeviceInfoEx = 0x9108,
     CanonGetObjectInfoEx = 0x9109,
+
+    /// <summary>
+    /// Single-shot release used by DIGIC III bodies (450D, 40D, 1000D era), which do NOT implement the
+    /// RemoteReleaseOn/Off pair. libgphoto2 accepts either one as proof the body supports EOS capture.
+    /// </summary>
+    CanonRemoteRelease = 0x910F,
     CanonSetPropValue = 0x9110,
     CanonGetRemoteMode = 0x9113,
     CanonSetRemoteMode = 0x9114,
