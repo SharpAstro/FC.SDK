@@ -13,14 +13,14 @@ on:
 
 env:
   # The release line, and the only number a human picks. The viewer, the release tag and anything we
-  # quote to a user are ALWAYS just major.minor — 1.5, then 1.6. The libraries append the run number
+  # quote to a user are ALWAYS just major.minor — 1.6, then 1.7. The libraries append the run number
   # and attempt so every push to main is a distinct NuGet version.
   #
   # Deliberately NOT a composite VERSION_PREFIX here: a workflow-level env value cannot reference
   # another (the `env` context is not in scope yet), so a composite would have to restate the line and
   # could drift from it. The parts are assembled in the shell at each point of use, where they are
   # ordinary environment variables.
-  VERSION_LINE: '1.5'
+  VERSION_LINE: '1.6'
   VERSION_BUILD: ${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_SUFFIX: +${{ github.sha }}
@@ -131,7 +131,7 @@ jobs:
         dotnet-version: 10.0.x
     - name: Publish FC.SDK.Viewer
       shell: bash
-      # Version is the release line (1.5) because that is what the viewer is called everywhere;
+      # Version is the release line (1.6) because that is what the viewer is called everywhere;
       # FileVersion carries the exact build so a binary in the wild can still be traced to a run.
       # GeneratePackageOnBuild=false: the two library projects in the graph pack by default, and a
       # publish has no business emitting nupkgs that the `publish` job might then pick up.
@@ -173,8 +173,8 @@ jobs:
           fi
         done
     - name: Create GitHub Release
-      # One release per line: v1.5, then v1.6. The action creates the tag if it does not exist and
-      # updates the release in place if it does, so re-publishing binaries into 1.5 keeps the same
+      # One release per line: v1.6, then v1.7. The action creates the tag if it does not exist and
+      # updates the release in place if it does, so re-publishing binaries into 1.6 keeps the same
       # URL — which matters because those download links get quoted in issues and stay there.
       uses: SharpAstro/action-gh-release@v3
       with:
