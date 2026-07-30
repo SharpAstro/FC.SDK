@@ -123,6 +123,15 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     /// </summary>
     private static readonly TimeSpan ViewfinderEndTransferProbe = TimeSpan.FromMilliseconds(750);
 
+    /// <summary>
+    /// How many unanswered viewfinder end-transfers may be in flight before streaming is declared
+    /// broken. Each holds a dedicated thread, so this is the bound that keeps a body which never
+    /// answers from bleeding threads for as long as live view is left running.
+    /// </summary>
+    private const int MaxOutstandingViewfinderEnds = 8;
+
+    private int _outstandingViewfinderEnds;
+
     /// <summary>Chunk size for draining a data phase whose full length the driver did not report.</summary>
     private const uint DrainChunkSize = 1u << 20;
 
@@ -216,6 +225,15 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         var end = Task.Factory.StartNew(() => EndTransfer(context),
             CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
+        Interlocked.Increment(ref _outstandingViewfinderEnds);
+        _ = end.ContinueWith(
+            static (t, state) =>
+            {
+                _ = t.Exception; // observed, so an abandoned phase is never an unhandled exception
+                Interlocked.Decrement(ref ((WpdPtpTransport)state!)._outstandingViewfinderEnds);
+            },
+            this, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
         try
         {
             // Awaited, not waited: the deadline costs no thread of its own, and it runs on the
@@ -226,10 +244,18 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         }
         catch (TimeoutException)
         {
-            // Observe the eventual exception so the abandoned phase is never an unhandled one.
-            _ = end.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
-            if (trace) Console.Error.WriteLine("[wpd] 0x9153 end-transfer did not answer; reporting a timeout");
-            return TimedOutCode;
+            // The frame is COMPLETE — the read phase returned every byte the driver declared. Only
+            // the acknowledgement is missing, so report success and let the caller keep the image;
+            // discarding a good frame because the ack was late is what stopped live view dead.
+            // The call is still issued for every frame (never skipped): not issuing it is what left
+            // the driver's contexts dangling and jammed every later initiate at totalSize=0.
+            var outstanding = Volatile.Read(ref _outstandingViewfinderEnds);
+            if (trace) Console.Error.WriteLine(
+                $"[wpd] 0x9153 end-transfer still pending ({outstanding} outstanding); keeping {frameBytes} bytes");
+
+            // Each pending call holds its own thread, so this cannot grow without bound. Past the cap,
+            // report the timeout and let the caller stop streaming rather than bleed threads.
+            return outstanding > MaxOutstandingViewfinderEnds ? TimedOutCode : (ushort)Protocol.PtpResponseCode.OK;
         }
         catch (Exception ex)
         {
