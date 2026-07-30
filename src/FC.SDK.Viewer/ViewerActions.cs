@@ -404,7 +404,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             }
         }
 
-        await ApplyMirrorLockupFallbackAsync(camera, ct);
+        await ApplyCustomFunctionFallbacksAsync(camera, ct);
 
         state.RawProperties = await camera.DumpPropertiesAsync(ct);
         state.BatteryPercent = camera.BatteryLevelPercent;
@@ -415,29 +415,45 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
     }
 
     /// <summary>
-    /// Mirror lockup on older bodies is a Custom Function, not a property — the 450D answers
-    /// DevicePropNotSupported to both 0xD13A (setting) and 0xD1BF (state). The SDK's MLU accessors
-    /// fall back to the C.Fn block where the body's id is known, so when the plain sweep failed,
-    /// re-ask through them and overwrite the two readings.
+    /// Several settings on older bodies are Custom Functions, not properties — the 450D answers
+    /// DevicePropNotSupported to 0xD13A/0xD1BF (mirror lockup) and 0xD178 (high-ISO NR). The SDK's
+    /// accessors fall back to the C.Fn block where the body's id is known, so when the plain sweep
+    /// failed, re-ask through them and overwrite the readings.
     /// </summary>
-    private async Task ApplyMirrorLockupFallbackAsync(CanonCamera camera, CancellationToken ct)
+    private async Task ApplyCustomFunctionFallbacksAsync(CanonCamera camera, CancellationToken ct)
     {
         if (ct.IsCancellationRequested) return;
-        if (state.Reading(EdsPropertyId.MirrorUpSetting) is not { Ok: false }) return;
 
-        var (err, setting) = await camera.GetMirrorUpSettingAsync(ct);
-        if (err is not EdsError.OK) return; // this body has no known C.Fn id either — keep the honest error
-
-        state.Readings[EdsPropertyId.MirrorUpSetting] =
-            new ControlReading(EdsError.OK, (uint)setting, [0u, 1u]);
-
-        var (stateErr, mluState) = await camera.GetMirrorLockupStateAsync(ct);
-        if (stateErr is EdsError.OK)
+        if (state.Reading(EdsPropertyId.MirrorUpSetting) is { Ok: false })
         {
-            state.Readings[EdsPropertyId.MirrorLockUpState] = new ControlReading(EdsError.OK, (uint)mluState, null);
+            var (err, setting) = await camera.GetMirrorUpSettingAsync(ct);
+            if (err is EdsError.OK) // otherwise this body has no known C.Fn id — keep the honest error
+            {
+                state.Readings[EdsPropertyId.MirrorUpSetting] =
+                    new ControlReading(EdsError.OK, (uint)setting, [0u, 1u]);
+
+                var (stateErr, mluState) = await camera.GetMirrorLockupStateAsync(ct);
+                if (stateErr is EdsError.OK)
+                {
+                    state.Readings[EdsPropertyId.MirrorLockUpState] =
+                        new ControlReading(EdsError.OK, (uint)mluState, null);
+                }
+
+                _logger.LogInformation("Mirror lockup via C.Fn block: {Setting} (state {State})", setting, mluState);
+            }
         }
 
-        _logger.LogInformation("Mirror lockup via C.Fn block: {Setting} (state {State})", setting, mluState);
+        if (state.Reading(EdsPropertyId.NoiseReduction) is { Ok: false } && !ct.IsCancellationRequested)
+        {
+            var (err, nr) = await camera.GetHighIsoNRAsync(ct);
+            if (err is EdsError.OK)
+            {
+                // The 450D's C.Fn is two-state; the SDK translates Off → Disable, On → Standard.
+                state.Readings[EdsPropertyId.NoiseReduction] = new ControlReading(EdsError.OK, (uint)nr,
+                    [(uint)EdsHighIsoNR.Standard, (uint)EdsHighIsoNR.Disable]);
+                _logger.LogInformation("High ISO NR via C.Fn block: {Value}", nr);
+            }
+        }
     }
 
     /// <summary>
@@ -470,6 +486,11 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                 // C.Fn-aware path: falls back to the block write on bodies without the property.
                 err = await camera.SetMirrorLockupAsync((EdsMirrorUpSetting)value, ct);
             }
+            else if (control.PropertyId is EdsPropertyId.NoiseReduction)
+            {
+                // Same C.Fn fallback as mirror lockup.
+                err = await camera.SetHighIsoNRAsync((EdsHighIsoNR)value, ct);
+            }
             else
             {
                 err = await camera.SetPropertyAsync(control.PropertyId, value, ct);
@@ -487,12 +508,21 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                 readValue = (uint)setting;
                 RefreshInferredMirrorState(camera);
             }
+            else if (control.PropertyId is EdsPropertyId.NoiseReduction)
+            {
+                (readErr, var nr) = await camera.GetHighIsoNRAsync(ct);
+                readValue = (uint)nr;
+            }
             else
             {
                 (readErr, readValue) = await camera.GetPropertyAsync(control.PropertyId, ct);
             }
-            var allowed = await camera.GetAllowedValuesAsync(control.PropertyId, ct)
-                ?? (control.PropertyId is EdsPropertyId.MirrorUpSetting ? [0u, 1u] : null);
+            var allowed = await camera.GetAllowedValuesAsync(control.PropertyId, ct) ?? control.PropertyId switch
+            {
+                EdsPropertyId.MirrorUpSetting => [0u, 1u],
+                EdsPropertyId.NoiseReduction => [(uint)EdsHighIsoNR.Standard, (uint)EdsHighIsoNR.Disable],
+                _ => null,
+            };
             state.Readings[control.PropertyId] = new ControlReading(readErr, readValue, allowed);
 
             state.StatusMessage = err switch
@@ -779,6 +809,13 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
     {
         int consecutiveFailures = 0;
         int consecutiveTimeouts = 0;
+        int framesSinceKeepAlive = 0;
+
+        // Half the 450D's shortest metering timer (16 s): libgphoto2 sends KeepDeviceOn with every
+        // preview frame because a body whose live-view subsystem times out stops answering
+        // GetViewFinderData entirely. Every frame is overkill on a half-duplex link; every few
+        // seconds keeps the timer fed at 1% of the traffic.
+        const int KeepAliveEveryFrames = 80; // ~8 s at the 100 ms cadence
 
         while (state.LiveViewActive && !ct.IsCancellationRequested)
         {
@@ -789,6 +826,11 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                 byte[] jpeg;
                 try
                 {
+                    if (++framesSinceKeepAlive >= KeepAliveEveryFrames)
+                    {
+                        framesSinceKeepAlive = 0;
+                        await camera.KeepDeviceOnAsync(ct);
+                    }
                     (err, jpeg) = await camera.GetLiveViewFrameAsync(ct);
                 }
                 finally

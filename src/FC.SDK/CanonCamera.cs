@@ -319,23 +319,13 @@ public sealed class CanonCamera : IAsyncDisposable
     public async Task<EdsError> SetMirrorLockupAsync(EdsMirrorUpSetting setting, CancellationToken ct = default)
     {
         EdsError err;
-        if (_canon.Properties.TryGetValue(CanonPropertyMap.GetPtpCodeOrThrow(EdsPropertyId.MirrorUpSetting), out _))
+        if (IsPropertyAnnounced(EdsPropertyId.MirrorUpSetting))
         {
             err = await SetPropertyAsync(EdsPropertyId.MirrorUpSetting, (uint)setting, ct);
         }
         else if (CanonCustomFunctionId.MirrorLockupIdFor(Model) is { } cfnId)
         {
-            var (blockErr, block) = await GetCustomFunctionBlockAsync(ct);
-            if (blockErr is not EdsError.OK || block is null || !block.SetValue(cfnId, (uint)setting))
-                return blockErr is EdsError.OK ? EdsError.DevicePropNotSupported : blockErr;
-
-            err = await SetCustomFunctionBlockAsync(block, ct);
-            _logger.LogDebug("Mirror lockup via C.Fn 0x{Id:X4} = {Setting}: {Error}", cfnId, setting, err);
-
-            if (err is EdsError.OK)
-            {
-                err = await VerifyCustomFunctionWriteAsync(cfnId, (uint)setting, ct);
-            }
+            err = await SetCustomFunctionValueAsync(cfnId, (uint)setting, ct);
         }
         else
         {
@@ -345,6 +335,38 @@ public sealed class CanonCamera : IAsyncDisposable
         if (err is EdsError.OK)
         {
             MirrorLockupEnabled = setting is EdsMirrorUpSetting.On;
+        }
+        return err;
+    }
+
+    /// <summary>
+    /// Whether the camera itself has announced this property on the event stream. The write path
+    /// must branch on this rather than on a write's response code — a 450D ACKs writes of properties
+    /// it does not have.
+    /// </summary>
+    private bool IsPropertyAnnounced(EdsPropertyId id) =>
+        _canon.Properties.TryGetValue(CanonPropertyMap.GetPtpCodeOrThrow(id), out _);
+
+    private async Task<(EdsError Error, uint Value)> GetCustomFunctionValueAsync(uint cfnId, CancellationToken ct)
+    {
+        var (blockErr, block) = await GetCustomFunctionBlockAsync(ct);
+        if (blockErr is not EdsError.OK) return (blockErr, 0);
+        return block?.GetValue(cfnId) is { } value ? (EdsError.OK, value) : (EdsError.DevicePropNotSupported, 0);
+    }
+
+    /// <summary>Read-modify-write of the whole C.Fn block, verified — see <see cref="VerifyCustomFunctionWriteAsync"/>.</summary>
+    private async Task<EdsError> SetCustomFunctionValueAsync(uint cfnId, uint value, CancellationToken ct)
+    {
+        var (blockErr, block) = await GetCustomFunctionBlockAsync(ct);
+        if (blockErr is not EdsError.OK || block is null || !block.SetValue(cfnId, value))
+            return blockErr is EdsError.OK ? EdsError.DevicePropNotSupported : blockErr;
+
+        var err = await SetCustomFunctionBlockAsync(block, ct);
+        _logger.LogDebug("C.Fn 0x{Id:X4} = {Value}: {Error}", cfnId, value, err);
+
+        if (err is EdsError.OK)
+        {
+            err = await VerifyCustomFunctionWriteAsync(cfnId, value, ct);
         }
         return err;
     }
@@ -378,8 +400,21 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<EdsError> SetAFModeAsync(EdsAFMode mode, CancellationToken ct = default) =>
         SetPropertyAsync(EdsPropertyId.AFMode, (uint)mode, ct);
 
-    public Task<EdsError> SetHighIsoNRAsync(EdsHighIsoNR nr, CancellationToken ct = default) =>
-        SetPropertyAsync(EdsPropertyId.NoiseReduction, (uint)nr, ct);
+    /// <summary>
+    /// Sets high-ISO noise reduction. Bodies without the 0xD178 property (450D) keep it in the C.Fn
+    /// block as a two-state Off/On, so the four-level value is translated by meaning:
+    /// <see cref="EdsHighIsoNR.Disable"/> → Off, anything else → On.
+    /// </summary>
+    public async Task<EdsError> SetHighIsoNRAsync(EdsHighIsoNR nr, CancellationToken ct = default)
+    {
+        if (IsPropertyAnnounced(EdsPropertyId.NoiseReduction))
+            return await SetPropertyAsync(EdsPropertyId.NoiseReduction, (uint)nr, ct);
+
+        if (CanonCustomFunctionId.HighIsoNrIdFor(Model) is { } cfnId)
+            return await SetCustomFunctionValueAsync(cfnId, nr is EdsHighIsoNR.Disable ? 0u : 1u, ct);
+
+        return EdsError.DevicePropNotSupported;
+    }
 
     public Task<EdsError> SetColorTemperatureAsync(uint kelvin, CancellationToken ct = default) =>
         SetPropertyAsync(EdsPropertyId.ColorTemperature, kelvin, ct);
@@ -405,8 +440,18 @@ public sealed class CanonCamera : IAsyncDisposable
     public async Task<(EdsError Error, EdsAEMode Value)> GetAEModeAsync(CancellationToken ct = default)
     { var (e, v) = await GetPropertyAsync(EdsPropertyId.AEMode, ct); return (e, (EdsAEMode)v); }
 
+    /// <summary>See <see cref="SetHighIsoNRAsync"/> for the C.Fn translation on 450D-class bodies.</summary>
     public async Task<(EdsError Error, EdsHighIsoNR Value)> GetHighIsoNRAsync(CancellationToken ct = default)
-    { var (e, v) = await GetPropertyAsync(EdsPropertyId.NoiseReduction, ct); return (e, (EdsHighIsoNR)v); }
+    {
+        var (e, v) = await GetPropertyAsync(EdsPropertyId.NoiseReduction, ct);
+        if (e is EdsError.OK || CanonCustomFunctionId.HighIsoNrIdFor(Model) is not { } cfnId)
+            return (e, (EdsHighIsoNR)v);
+
+        var (cfnErr, cfnValue) = await GetCustomFunctionValueAsync(cfnId, ct);
+        return cfnErr is EdsError.OK
+            ? (EdsError.OK, cfnValue == 0 ? EdsHighIsoNR.Disable : EdsHighIsoNR.Standard)
+            : (e, (EdsHighIsoNR)v);
+    }
 
     public async Task<(EdsError Error, uint Kelvin)> GetColorTemperatureAsync(CancellationToken ct = default) =>
         await GetPropertyAsync(EdsPropertyId.ColorTemperature, ct);
@@ -536,8 +581,8 @@ public sealed class CanonCamera : IAsyncDisposable
 
         if (err is not EdsError.OK && CanonCustomFunctionId.MirrorLockupIdFor(Model) is { } cfnId)
         {
-            var (blockErr, block) = await GetCustomFunctionBlockAsync(ct);
-            if (blockErr is EdsError.OK && block?.GetValue(cfnId) is { } cfnValue)
+            var (cfnErr, cfnValue) = await GetCustomFunctionValueAsync(cfnId, ct);
+            if (cfnErr is EdsError.OK)
             {
                 (err, val) = (EdsError.OK, cfnValue);
             }
@@ -598,9 +643,24 @@ public sealed class CanonCamera : IAsyncDisposable
 
     public async Task<EdsError> StartLiveViewAsync(CancellationToken ct = default)
     {
-        // Set live view output to PC
+        // Mirrors libgphoto2's camera_capture_preview order for EOS bodies. Two steps beyond just
+        // "output to PC":
+        // - EVF mode must be 1 first, set only when it is not already (a redundant set costs a
+        //   DeviceBusy round trip).
+        // - KeepDeviceOn afterwards — gphoto2: "Otherwise the camera will auto-shutdown". A body
+        //   whose live-view subsystem powers down mid-stream does not answer GetViewFinderData with
+        //   an error, it stops answering entirely and takes the USB session with it.
+        var (modeErr, mode) = await GetPropertyAsync(EdsPropertyId.Evf_Mode, ct);
+        if (modeErr is EdsError.OK && mode != 1)
+        {
+            var setMode = await SetPropertyAsync(EdsPropertyId.Evf_Mode, 1, ct);
+            if (setMode is not EdsError.OK and not EdsError.DeviceBusy) return setMode;
+        }
+
         var err = await SetPropertyAsync(EdsPropertyId.Evf_OutputDevice, (uint)EdsEvfOutputDevice.PC, ct);
         if (err is not EdsError.OK) return err;
+
+        await _canon.KeepDeviceOnAsync(ct);
 
         return await _canon.InitiateViewfinderAsync(ct);
     }

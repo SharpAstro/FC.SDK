@@ -163,8 +163,21 @@ public static class CanonCustomFunctionId
     /// </summary>
     public static uint? MirrorLockupIdFor(string? model) => model switch
     {
-        not null when model.Contains("450D") || model.Contains("XSi") || model.Contains("Kiss X2")
-            => MirrorLockup_450D,
+        not null when Is450DFamily(model) => MirrorLockup_450D,
         _ => null,
     };
+
+    /// <summary>
+    /// The C.Fn id for high-ISO noise reduction, or null when the body has the 0xD178 property.
+    /// Same verified-bodies-only rule as <see cref="MirrorLockupIdFor"/>. Note the 450D's C.Fn is a
+    /// two-state Off/On, not the four-level scheme newer bodies use.
+    /// </summary>
+    public static uint? HighIsoNrIdFor(string? model) => model switch
+    {
+        not null when Is450DFamily(model) => HighIsoNR_450D,
+        _ => null,
+    };
+
+    private static bool Is450DFamily(string model) =>
+        model.Contains("450D") || model.Contains("XSi") || model.Contains("Kiss X2");
 }
