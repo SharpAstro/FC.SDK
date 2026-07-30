@@ -51,6 +51,40 @@ internal sealed class CommandGate(TimeProvider time, TimeSpan timeout)
     }
 
     /// <summary>
+    /// Runs a multi-phase <paramref name="work"/> sequence exclusively under one deadline. Each phase
+    /// inside offloads its own blocking call with <see cref="Offload"/> and awaits it, so no thread
+    /// ever sits in a blocking <c>Wait</c> — the only thread parked is the one the native call itself
+    /// is holding, which nothing can avoid.
+    /// </summary>
+    internal async Task<T> RunAsync<T>(Func<Task<T>> work, T onTimeout, CancellationToken ct = default)
+    {
+        if (!await TryEnterAsync(ct).ConfigureAwait(false))
+            return onTimeout;
+
+        var running = Task.Run(work, CancellationToken.None);
+
+        // The gate is released by the sequence FINISHING, not by us still caring about it — same
+        // invariant the single-call path gets from its finally block, so abandoning the wait can
+        // never let a second caller in against the same device.
+        _ = running.ContinueWith(
+            static (t, state) =>
+            {
+                _ = t.Exception;
+                ((SemaphoreSlim)state!).Release();
+            },
+            _lock, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
+        return await AwaitWithDeadlineAsync(running, onTimeout, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Moves one blocking native call off the awaiting thread. The thread hop is the whole point: a
+    /// synchronous COM call cannot be cancelled, so the only way to bound it is to wait on it from
+    /// somewhere else.
+    /// </summary>
+    internal static Task<T> Offload<T>(Func<T> syncCall) => Task.Run(syncCall, CancellationToken.None);
+
+    /// <summary>
     /// Takes the gate, giving up after <see cref="Timeout"/>. False means a previous command is still
     /// holding it — i.e. the transport is wedged, not merely busy.
     /// </summary>

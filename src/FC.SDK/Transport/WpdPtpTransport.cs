@@ -24,8 +24,14 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     internal WpdPtpTransport(string deviceId, TimeProvider? timeProvider = null)
     {
         _deviceId = deviceId;
-        _gate = new Protocol.CommandGate(timeProvider ?? TimeProvider.System, TimeSpan.FromSeconds(15));
+        _time = timeProvider ?? TimeProvider.System;
+        _gate = new Protocol.CommandGate(_time, TimeSpan.FromSeconds(15));
     }
+
+    private readonly TimeProvider _time;
+
+    /// <summary>Shorthand for <see cref="Protocol.CommandGate.Offload{T}"/> — one blocking call, off-thread.</summary>
+    private static Task<T> Offload<T>(Func<T> syncCall) => Protocol.CommandGate.Offload(syncCall);
 
     public Task ConnectAsync(CancellationToken ct = default)
     {
@@ -80,9 +86,12 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         ushort opCode, uint[] @params, CancellationToken ct = default) =>
         _gate.RunAsync(() => ExecuteNoData(opCode, @params), (TimedOutCode, Array.Empty<uint>()), ct);
 
+    // The read path is a SEQUENCE of blocking calls (initiate → read → end), so it takes the
+    // async gate overload: each phase is awaited off-thread individually, which is what lets the
+    // end phase carry its own deadline without anybody blocking on a Wait.
     internal Task<(ushort ResponseCode, uint[] ResponseParams, byte[] Data)> ExecuteCommandReadDataAsync(
         ushort opCode, uint[] @params, CancellationToken ct = default) =>
-        _gate.RunAsync(() => ExecuteReadData(opCode, @params),
+        _gate.RunAsync(() => ExecuteReadDataAsync(opCode, @params),
             (TimedOutCode, Array.Empty<uint>(), Array.Empty<byte>()), ct);
 
     internal Task<(ushort ResponseCode, uint[] ResponseParams)> ExecuteCommandWriteDataAsync(
@@ -107,7 +116,129 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     /// </summary>
     private static readonly bool TraceReads = Environment.GetEnvironmentVariable("FCSDK_WPD_TRACE") is "1";
 
-    private (ushort, uint[], byte[]) ExecuteReadData(ushort opCode, uint[] @params)
+    /// <summary>
+    /// How long the end-of-transfer phase of the FIRST viewfinder read may take before this body is
+    /// judged to hang there. Short on purpose: live view runs at ~10 fps, so a phase that has not
+    /// answered in this long is the known hang rather than a slow link.
+    /// </summary>
+    private static readonly TimeSpan ViewfinderEndTransferProbe = TimeSpan.FromMilliseconds(750);
+
+    /// <summary>Chunk size for draining a data phase whose full length the driver did not report.</summary>
+    private const uint DrainChunkSize = 1u << 20;
+
+    /// <summary>Safety bound on drain iterations, so a driver that never returns 0 cannot spin forever.</summary>
+    private const int MaxDrainChunks = 16;
+
+    /// <summary>
+    /// Keeps reading until the driver stops handing bytes back, appending to what the first read got.
+    /// </summary>
+    /// <remarks>
+    /// WPD's TRANSFER_TOTAL_SIZE is exact for an object read (the driver knows the object's size) but
+    /// on a vendor read it can describe only the first chunk. Leaving the rest in the pipe is what
+    /// made ENDDATATRANSFER hang on a 450D viewfinder frame: the driver was still waiting for data
+    /// nobody collected. Draining first lets the end phase complete normally, which is what keeps the
+    /// session usable for the NEXT frame — skipping the end phase instead bought two frames and then
+    /// jammed every later initiate at totalSize=0.
+    /// </remarks>
+    private async Task<byte[]> DrainRemainderAsync(string context, byte[] first, bool trace)
+    {
+        var chunks = new List<byte[]> { first };
+        var total = first.Length;
+
+        for (var i = 0; i < MaxDrainChunks; i++)
+        {
+            byte[] chunk;
+            try
+            {
+                chunk = await Offload(() => ReadChunk(context, DrainChunkSize)).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // A refused extra read means there was nothing left — normal, not a failure.
+                if (trace) Console.Error.WriteLine($"[wpd] drain stopped: {ex.Message}");
+                break;
+            }
+
+            if (chunk.Length == 0) break;
+
+            chunks.Add(chunk);
+            total += chunk.Length;
+            if (trace) Console.Error.WriteLine($"[wpd] drained {chunk.Length} more bytes (total {total})");
+        }
+
+        if (chunks.Count == 1) return first;
+
+        var joined = new byte[total];
+        var offset = 0;
+        foreach (var chunk in chunks)
+        {
+            chunk.CopyTo(joined, offset);
+            offset += chunk.Length;
+        }
+        return joined;
+    }
+
+    private byte[] ReadChunk(string context, uint want)
+    {
+        var cmd = CreateValues();
+        SetCommandKey(cmd, WpdInterop.PID_READ_DATA);
+        cmd.SetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), context);
+        cmd.SetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_NUM_BYTES_TO_READ), want);
+        cmd.SetBufferValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_DATA), new byte[want], want);
+
+        var results = SendWpdCommand(cmd);
+        CheckHResult(results);
+        return ExtractBuffer(results, want);
+    }
+
+    /// <summary>
+    /// Finishes a viewfinder read, bounded so a body that never answers cannot wedge the transport.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Reports <see cref="Protocol.PtpResponseCode.LocalTimeout"/> when the phase does not come back,
+    /// which surfaces as <c>WaitTimeoutError</c> and lets the caller's timeout counter stop live view
+    /// cleanly. Deliberately NOT "skip the end phase and keep going": that bought two frames and then
+    /// jammed every later initiate at <c>totalSize=0</c>, and left the session unusable until
+    /// reconnect — the original "always end transfer to avoid jamming the pipe" note was right.
+    /// The real cure is draining the data phase first (see <see cref="DrainRemainder"/>).
+    /// </para>
+    /// <para>
+    /// Frida-tracing EDSDK on the same body shows the structural difference: it bypasses the WPD COM
+    /// API entirely and drives the MTP device through overlapped <c>DeviceIoControl</c> calls, one
+    /// ~2 MiB request per frame, with no separate end phase to hang in.
+    /// </para>
+    /// </remarks>
+    private async Task<ushort> EndViewfinderTransferAsync(string context, int frameBytes, bool trace)
+    {
+        // A dedicated thread, not a pool one: if this call never returns the thread is lost, and at
+        // ~10 fps burning pool threads starves everything — that is what made the UI go sluggish.
+        var end = Task.Factory.StartNew(() => EndTransfer(context),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        try
+        {
+            // Awaited, not waited: the deadline costs no thread of its own, and it runs on the
+            // transport's TimeProvider so a test can expire it without real elapsed time.
+            var response = (await end.WaitAsync(ViewfinderEndTransferProbe, _time).ConfigureAwait(false)).ResponseCode;
+            if (trace) Console.Error.WriteLine($"[wpd] 0x9153 done ({frameBytes} bytes), response 0x{response:X4}");
+            return response;
+        }
+        catch (TimeoutException)
+        {
+            // Observe the eventual exception so the abandoned phase is never an unhandled one.
+            _ = end.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
+            if (trace) Console.Error.WriteLine("[wpd] 0x9153 end-transfer did not answer; reporting a timeout");
+            return TimedOutCode;
+        }
+        catch (Exception ex)
+        {
+            if (trace) Console.Error.WriteLine($"[wpd] 0x9153 end-transfer failed: {ex.Message}");
+            return TimedOutCode;
+        }
+    }
+
+    private async Task<(ushort, uint[], byte[])> ExecuteReadDataAsync(ushort opCode, uint[] @params)
     {
         // GetEvent polls every 200 ms; tracing it would drown the interesting commands.
         var trace = TraceReads && opCode != (ushort)Protocol.PtpOperationCode.CanonGetEvent;
@@ -119,7 +250,7 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         SetOperationParams(cmd, @params);
 
         if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} initiate…");
-        var results = SendWpdCommand(cmd);
+        var results = await Offload(() => SendWpdCommand(cmd)).ConfigureAwait(false);
         CheckHResult(results);
 
         // Get transfer context — if absent, WPD handled the command internally with no data
@@ -137,33 +268,37 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         if (totalSize == 0)
         {
             // Transfer context allocated but zero data — must end transfer to avoid jamming the pipe
-            var endResp = EndTransfer(context);
+            var endResp = await Offload(() => EndTransfer(context)).ConfigureAwait(false);
             return (endResp.ResponseCode, endResp.ResponseParams, []);
         }
 
         // Step 2: Read data — always end transfer even on failure to avoid jamming the pipe
         try
         {
-            var readCmd = CreateValues();
-            SetCommandKey(readCmd, WpdInterop.PID_READ_DATA);
-            readCmd.SetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), context);
-            readCmd.SetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_NUM_BYTES_TO_READ), totalSize);
-            readCmd.SetBufferValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_DATA), new byte[totalSize], totalSize);
-
             if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} reading {totalSize} bytes…");
-            var readResults = SendWpdCommand(readCmd);
-            CheckHResult(readResults);
-            byte[] data = ExtractBuffer(readResults, totalSize);
+            byte[] data = await Offload(() => ReadChunk(context, totalSize)).ConfigureAwait(false);
+
+            var isViewfinder = opCode == (ushort)Protocol.PtpOperationCode.CanonGetViewfinderData;
+            if (isViewfinder)
+            {
+                data = await DrainRemainderAsync(context, data, trace).ConfigureAwait(false);
+            }
 
             // Step 3: End transfer
             if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} read {data.Length} bytes, ending transfer…");
-            var endResponse = EndTransfer(context);
+
+            if (isViewfinder)
+            {
+                return (await EndViewfinderTransferAsync(context, data.Length, trace).ConfigureAwait(false), [], data);
+            }
+
+            var endResponse = await Offload(() => EndTransfer(context)).ConfigureAwait(false);
             if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} done, response 0x{endResponse.ResponseCode:X4}");
             return (endResponse.ResponseCode, endResponse.ResponseParams, data);
         }
         catch
         {
-            try { EndTransfer(context); } catch { /* best effort */ }
+            try { await Offload(() => EndTransfer(context)).ConfigureAwait(false); } catch { /* best effort */ }
             throw;
         }
     }
