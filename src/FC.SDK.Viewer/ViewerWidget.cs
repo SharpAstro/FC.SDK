@@ -42,9 +42,12 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     // frame in Render(), and only ever appended to, so an index stays valid for the frame that made it.
     private readonly List<(string Glyph, RGBAColor32 Color, float FontSize)> _glyphSlots = [];
 
-    private readonly ListScrollController _actionScroll = new();
-    private readonly ListScrollController _controlScroll = new();
-    private readonly ListScrollController _logScroll = new() { Anchor = ScrollAnchor.Bottom };
+    // SnapToAtom everywhere: rows are painted individually into the controller's atom rects, and
+    // without clipping in the painter a sub-atom scroll shift would draw partial rows outside the
+    // panel. Snapped mode yields only fully-visible atoms, so nothing can escape the viewport.
+    private readonly ListScrollController _actionScroll = new() { SnapToAtom = true };
+    private readonly ListScrollController _controlScroll = new() { SnapToAtom = true };
+    private readonly ListScrollController _logScroll = new() { Anchor = ScrollAnchor.Bottom, SnapToAtom = true };
 
     // Deferred GPU uploads, following the renderer's documented pattern: pixels captured on the
     // action thread, texture created and recorded during OnPreRenderPass, previous texture disposed
@@ -175,9 +178,9 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     {
         switch (fill.Key)
         {
-            case "actions": PaintScrolledRows(rect, _actionScroll, BuildActionRows(), ViewerTheme.Metrics.ButtonHeight + 2f); break;
-            case "controls": PaintScrolledRows(rect, _controlScroll, BuildControlRows(), ViewerTheme.Metrics.ItemHeight + 2f); break;
-            case "log": PaintScrolledRows(rect, _logScroll, BuildLogRows(), SmallFontSize + 4f); break;
+            case "actions": PaintScrolledRows(rect, _actionScroll, BuildActionRows(), ViewerTheme.Metrics.ButtonHeight + RowGap); break;
+            case "controls": PaintScrolledRows(rect, _controlScroll, BuildControlRows(), ViewerTheme.Metrics.ItemHeight + RowGap); break;
+            case "log": PaintScrolledRows(rect, _logScroll, BuildLogRows(), SmallFontSize + 2f + RowGap); break;
             case "preview": PaintPreview(rect); break;
             case { } key when key.StartsWith("glyph:", StringComparison.Ordinal): PaintGlyph(key, rect); break;
         }
@@ -210,32 +213,44 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             fontSize * DpiScale, color, TextAlign.Center, TextAlign.Center);
     }
 
+    /// <summary>Visual gap between virtualized rows, in design units. Part of the atom extent.</summary>
+    private const float RowGap = 2f;
+
     /// <summary>
     /// Paints a virtualized row list. <see cref="ListScrollController"/> owns the "how many rows fit"
-    /// arithmetic; the visible slice is then handed back to the layout engine as an ordinary VStack,
-    /// so rows keep draw==hit and DPI scaling for free.
+    /// arithmetic; each visible row is then handed back to the layout engine individually, so rows
+    /// keep draw==hit and DPI scaling for free.
     /// </summary>
+    /// <remarks>
+    /// The controller models the list as UNIFORM atoms, and this method is what upholds that contract:
+    /// the viewport it registers is the padded content rect (not the raw panel rect), and every row is
+    /// painted into the atom rect the controller hands back — <c>RenderLayout</c> places a root at its
+    /// bounds verbatim, so a row's own <c>RowH</c> never argues with the atom extent. The previous
+    /// shape (one VStack of rows with their own heterogeneous heights + an outer pad the controller
+    /// never heard about) made the drawn extent disagree with the scroll math: the list's bottom edge
+    /// wandered as the visible mix of row heights changed, and overflow painted over the panel below —
+    /// the layout engine deliberately never clips a stack.
+    /// </remarks>
     private void PaintScrolledRows(RectF32 rect, ListScrollController scroll, List<Layout.Node> rows, float rowHeight)
     {
-        scroll.SetExtent(rect, rowHeight * DpiScale, rows.Count, DpiScale);
+        var pad = ViewerTheme.Metrics.Padding * DpiScale;
+        var inner = new RectF32(rect.X + pad, rect.Y + pad,
+            MathF.Max(0f, rect.Width - pad - pad), MathF.Max(0f, rect.Height - pad - pad));
 
-        var first = Math.Min(scroll.FirstVisibleAtom, Math.Max(0, rows.Count - 1));
-        var take = Math.Min(scroll.VisibleAtoms, Math.Max(0, rows.Count - first));
+        scroll.SetExtent(inner, rowHeight * DpiScale, rows.Count, DpiScale);
 
-        if (take > 0)
+        var gap = RowGap * DpiScale;
+        foreach (var (index, atomRect) in scroll.VisibleRows())
         {
-            var slice = Layout.Builder.VStack([.. rows.GetRange(first, take)])
-                .WithGap(2f)
-                .Pad(ViewerTheme.Metrics.Padding)
-                .Stretch();
-
             // Forward drawFill: rows contain Glyph() Fill leaves, and a nested RenderLayout without
             // the callback drops them silently — the leaf arranges and reserves space, then nothing
             // paints it.
-            RenderLayout(slice, scroll.ContentArea, drawFill: PaintFill);
+            RenderLayout(rows[index],
+                new RectF32(atomRect.X, atomRect.Y, atomRect.Width, atomRect.Height - gap),
+                drawFill: PaintFill);
         }
 
-        scroll.DrawScrollBar(FillRect);
+        scroll.DrawScrollBar(FillRect, ViewerTheme.ScrollTrack, ViewerTheme.ScrollThumb);
     }
 
     // ---------------------------------------------------------------- left panel
