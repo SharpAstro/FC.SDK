@@ -188,12 +188,28 @@ combination the `SIBLING_DEBUG_INSPECTORS` guard exists for.
 and the constant silently goes missing on a plain `dotnet build`. Any other Configuration-dependent
 property in this repo belongs in `.targets` for the same reason.
 
-## Releasing the viewer
+## Versioning and releasing
 
-Push a `v*` tag. `.github/workflows/dotnet.yml` then runs `publish-viewer` (NativeAOT, six RIDs) and
-`release`, which attaches `.zip` for Windows RIDs and `.tar.gz` for the rest. A `workflow_dispatch` run
-does the same as a dry run, tagged `build-<n>` and marked pre-release. The NuGet `publish` job is
-excluded on both so cutting a viewer release does not push a second set of packages.
+Two schemes, because they answer to different audiences:
+
+- **Libraries** (NuGet) are `major.minor.<run_number>` — every push to main publishes a distinct
+  version, so the run number rides along as the revision.
+- **The viewer, the release tag, and anything quoted to a user** are *only* `major.minor`: `1.5`, then
+  `1.6`. `VERSION_LINE` in the workflow is the one number a human picks.
+
+To release: run the workflow manually (`gh workflow run dotnet.yml`, or the Actions UI). That triggers
+`publish-viewer` (NativeAOT, six RIDs) and `release`, which attaches `.zip` for Windows RIDs and
+`.tar.gz` for the rest, and creates or **updates** the `v$VERSION_LINE` release. Updating in place is
+deliberate: the download URLs get quoted in issues, so re-publishing binaries into `1.5` has to keep
+the same links working.
+
+Do **not** push a release tag by hand — the tag comes from `VERSION_LINE`, so a hand-pushed `v1.6`
+against `VERSION_LINE: '1.5'` would trigger a run that creates a release called `v1.5`. Bump
+`VERSION_LINE` (and the `VERSION_PREFIX` stem alongside it) instead.
+
+The NuGet `publish` job is gated to `push` on `main` only. It used to have no condition at all, so every
+pull request published a package from unreviewed code and consumed the version number the merge would
+have used — that cost `1.5.531`. NuGet versions can be unlisted but never replaced, so keep that gate.
 
 Two things to know about the AOT build:
 
