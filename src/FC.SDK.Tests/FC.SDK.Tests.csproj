@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FC.SDK\FC.SDK.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
+    <PackageReference Include="Shouldly" Version="4.3.0" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <!-- FakeTimeProvider: lets the command-deadline tests expire a timeout on demand instead of
+         waiting out a real interval, which is the only way this logic is testable without a camera
+         that hangs on cue. -->
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="9.10.0" />
+  </ItemGroup>
+
+</Project>

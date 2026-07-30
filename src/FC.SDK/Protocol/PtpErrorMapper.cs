@@ -25,6 +25,7 @@ internal static class PtpErrorMapper
         PtpResponseCode.CanonLensCoverClosed => EdsError.LensCoverClose,
         PtpResponseCode.CanonLowBattery => EdsError.LowBattery,
         PtpResponseCode.CanonObjectNotReady => EdsError.ObjectNotReady,
+        PtpResponseCode.LocalTimeout => EdsError.WaitTimeoutError,
         _ => EdsError.UnexpectedException,
     };
 }

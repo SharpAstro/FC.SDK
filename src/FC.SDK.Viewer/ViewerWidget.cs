@@ -569,29 +569,39 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
 
     public override bool HandleInput(InputEvent evt)
     {
-        // Scroll controllers claim wheel/drag inside their own viewports; whichever owns the pointer
-        // consumes the event, so no coordinate testing happens here.
-        if (_actionScroll.HandleInput(evt) || _controlScroll.HandleInput(evt) || _logScroll.HandleInput(evt))
-        {
-            _state.Invalidate();
-            return true;
-        }
-
         switch (evt)
         {
+            // A widget click has to beat list interaction. ListScrollController claims ANY left
+            // mouse-down inside its viewport — it arms a tap/drag gesture and returns true — so
+            // giving the scroll controllers first look swallowed every button in a panel before it
+            // could dispatch. Both panels are scroll viewports, so that was every button in the app.
             case InputEvent.MouseDown { Button: MouseButton.Left } down:
                 if (HitTestAndDispatch(down.X, down.Y, down.Modifiers) is not null)
                 {
                     _state.Invalidate();
                     return true;
                 }
-                return false;
+                // Nothing clickable under the pointer: let the lists have it, so dragging empty space
+                // and grabbing a scrollbar thumb still work.
+                return ScrollHandled(evt);
 
             case InputEvent.KeyDown key:
                 return HandleKey(key);
-        }
 
-        return false;
+            // Wheel, plus the move/up that carry an in-progress thumb drag to completion. The
+            // controllers ignore these unless the pointer is theirs or a drag is already armed.
+            default:
+                return ScrollHandled(evt);
+        }
+    }
+
+    private bool ScrollHandled(InputEvent evt)
+    {
+        if (!_actionScroll.HandleInput(evt) && !_controlScroll.HandleInput(evt) && !_logScroll.HandleInput(evt))
+            return false;
+
+        _state.Invalidate();
+        return true;
     }
 
     private bool HandleKey(InputEvent.KeyDown key)

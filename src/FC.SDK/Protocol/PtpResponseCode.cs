@@ -38,6 +38,13 @@ internal enum PtpResponseCode : ushort
     TransactionCancelled = 0x201F,
     DestinationUnsupported = 0x2020,
 
+    /// <summary>
+    /// Not a wire code. Synthesised locally when a command does not come back within its deadline —
+    /// a camera that accepted a request and never answered, or a cable pulled mid-transaction.
+    /// 0xFFFF is safe as a sentinel: PTP response codes are allocated from 0x2000/0xA000 upwards.
+    /// </summary>
+    LocalTimeout = 0xFFFF,
+
     // Canon vendor extensions
     CanonUnknownCommand = 0xA001,
     CanonOperationRefused = 0xA005,
