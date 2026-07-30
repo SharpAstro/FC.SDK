@@ -404,11 +404,53 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             }
         }
 
+        await ApplyMirrorLockupFallbackAsync(camera, ct);
+
         state.RawProperties = await camera.DumpPropertiesAsync(ct);
         state.BatteryPercent = camera.BatteryLevelPercent;
         state.StatusMessage = $"Read {ok} properties, {failed} unavailable; {state.RawProperties.Count} in the event cache.";
         _logger.LogInformation("Property sweep: {Ok} readable, {Failed} unavailable, {Cached} codes in cache",
             ok, failed, state.RawProperties.Count);
+        state.Invalidate();
+    }
+
+    /// <summary>
+    /// Mirror lockup on older bodies is a Custom Function, not a property — the 450D answers
+    /// DevicePropNotSupported to both 0xD13A (setting) and 0xD1BF (state). The SDK's MLU accessors
+    /// fall back to the C.Fn block where the body's id is known, so when the plain sweep failed,
+    /// re-ask through them and overwrite the two readings.
+    /// </summary>
+    private async Task ApplyMirrorLockupFallbackAsync(CanonCamera camera, CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested) return;
+        if (state.Reading(EdsPropertyId.MirrorUpSetting) is not { Ok: false }) return;
+
+        var (err, setting) = await camera.GetMirrorUpSettingAsync(ct);
+        if (err is not EdsError.OK) return; // this body has no known C.Fn id either — keep the honest error
+
+        state.Readings[EdsPropertyId.MirrorUpSetting] =
+            new ControlReading(EdsError.OK, (uint)setting, [0u, 1u]);
+
+        var (stateErr, mluState) = await camera.GetMirrorLockupStateAsync(ct);
+        if (stateErr is EdsError.OK)
+        {
+            state.Readings[EdsPropertyId.MirrorLockUpState] = new ControlReading(EdsError.OK, (uint)mluState, null);
+        }
+
+        _logger.LogInformation("Mirror lockup via C.Fn block: {Setting} (state {State})", setting, mluState);
+    }
+
+    /// <summary>
+    /// Keeps the "MLU state" reading current on bodies where it is derived from the setting rather
+    /// than reported by the camera — no event will ever push it there.
+    /// </summary>
+    private void RefreshInferredMirrorState(CanonCamera camera)
+    {
+        if (camera.MirrorLockupEnabled is not { } enabled) return;
+        if (state.Reading(EdsPropertyId.MirrorLockUpState) is null or { Ok: false }) return;
+
+        var mluState = enabled ? EdsMirrorLockupState.Enable : EdsMirrorLockupState.Disable;
+        state.Readings[EdsPropertyId.MirrorLockUpState] = new ControlReading(EdsError.OK, (uint)mluState, null);
         state.Invalidate();
     }
 
@@ -423,6 +465,11 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                 // Goes through the dedicated path so the host-capacity handshake happens too.
                 err = await camera.SetCaptureDestinationAsync((CanonCaptureDestination)value, ct);
             }
+            else if (control.PropertyId is EdsPropertyId.MirrorUpSetting)
+            {
+                // C.Fn-aware path: falls back to the block write on bodies without the property.
+                err = await camera.SetMirrorLockupAsync((EdsMirrorUpSetting)value, ct);
+            }
             else
             {
                 err = await camera.SetPropertyAsync(control.PropertyId, value, ct);
@@ -432,13 +479,29 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                 control.Label, control.Format(value), value, err);
 
             // Re-read either way: on failure to show what the camera kept, on success to confirm.
-            var (readErr, readValue) = await camera.GetPropertyAsync(control.PropertyId, ct);
-            var allowed = await camera.GetAllowedValuesAsync(control.PropertyId, ct);
+            EdsError readErr;
+            uint readValue;
+            if (control.PropertyId is EdsPropertyId.MirrorUpSetting)
+            {
+                (readErr, var setting) = await camera.GetMirrorUpSettingAsync(ct);
+                readValue = (uint)setting;
+                RefreshInferredMirrorState(camera);
+            }
+            else
+            {
+                (readErr, readValue) = await camera.GetPropertyAsync(control.PropertyId, ct);
+            }
+            var allowed = await camera.GetAllowedValuesAsync(control.PropertyId, ct)
+                ?? (control.PropertyId is EdsPropertyId.MirrorUpSetting ? [0u, 1u] : null);
             state.Readings[control.PropertyId] = new ControlReading(readErr, readValue, allowed);
 
-            state.StatusMessage = err is EdsError.OK
-                ? $"{control.Label} → {control.Format(readValue)}"
-                : $"{control.Label} failed: {err}";
+            state.StatusMessage = err switch
+            {
+                EdsError.OK => $"{control.Label} → {control.Format(readValue)}",
+                EdsError.OperationRefused when control.PropertyId is EdsPropertyId.MirrorUpSetting =>
+                    "Mirror lockup: this body reverts remote changes — set C.Fn 9 in the camera menu instead.",
+                _ => $"{control.Label} failed: {err}",
+            };
             state.Invalidate();
         });
 
@@ -484,7 +547,15 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 
         var err = await camera.TakePictureAsync(ct);
         _logger.LogInformation("TakePicture = {Error}", err);
-        state.StatusMessage = err is EdsError.OK ? "Shutter released; waiting for the image…" : $"TakePicture failed: {err}";
+        state.StatusMessage = err switch
+        {
+            not EdsError.OK => $"TakePicture failed: {err}",
+            // Verified on a 450D: with MLU on, RemoteRelease answers OK and then nothing happens —
+            // no mirror, no events, no image. Say so instead of "waiting" forever.
+            EdsError.OK when camera.MirrorLockupEnabled == true =>
+                "Released, but MLU is enabled — this body ignores remote releases in MLU mode; disable MLU to shoot remotely.",
+            _ => "Shutter released; waiting for the image…",
+        };
     });
 
     public void InitiateCapture() => Enqueue("InitiateCapture (standard PTP)", async ct =>
@@ -824,6 +895,8 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
     {
         _logger.LogInformation("ObjectAdded: handle=0x{Handle:X8}", e.ObjectHandle);
         state.LastObjectHandle = e.ObjectHandle;
+        // The exposure completed, so the SDK just cleared its inferred mirror-up flag.
+        if (state.Camera is { } eventCamera) RefreshInferredMirrorState(eventCamera);
         state.Invalidate();
 
         if (AutoDownload && state.Camera is { } camera)
