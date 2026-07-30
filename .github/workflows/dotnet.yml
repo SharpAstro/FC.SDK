@@ -14,10 +14,14 @@ on:
 env:
   # The release line, and the only number a human picks. The viewer, the release tag and anything we
   # quote to a user are ALWAYS just major.minor — 1.5, then 1.6. The libraries append the run number
-  # as a revision because every push to main publishes a distinct NuGet version.
-  # Keep VERSION_LINE and the VERSION_PREFIX stem in sync (a workflow env cannot reference another).
+  # and attempt so every push to main is a distinct NuGet version.
+  #
+  # Deliberately NOT a composite VERSION_PREFIX here: a workflow-level env value cannot reference
+  # another (the `env` context is not in scope yet), so a composite would have to restate the line and
+  # could drift from it. The parts are assembled in the shell at each point of use, where they are
+  # ordinary environment variables.
   VERSION_LINE: '1.5'
-  VERSION_PREFIX: 1.5.${{ github.run_number }}
+  VERSION_BUILD: ${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_SUFFIX: +${{ github.sha }}
   BUILD_CONF: Release
@@ -57,7 +61,10 @@ jobs:
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
-      run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
+      # Version assembled here rather than in env, so the release line is stated exactly once.
+      # Concatenating VERSION_REV (not dotting it) preserves the existing scheme: run 53 attempt 1
+      # is 1.5.531, matching the 1.4.4xx/1.4.5xx packages already on nuget.org.
+      run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_LINE}.${VERSION_BUILD}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_LINE}.${VERSION_BUILD}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
     - name: Test
       run: dotnet test -c $BUILD_CONF --no-build --verbosity normal
     - name: Upload Artifact
@@ -132,7 +139,7 @@ jobs:
         dotnet publish src/FC.SDK.Viewer/FC.SDK.Viewer.csproj
         -r ${{ matrix.rid }} -c Release
         -p:Version=${VERSION_LINE}
-        -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV}
+        -p:FileVersion=${VERSION_LINE}.${VERSION_BUILD}.${VERSION_REV}
         -p:ContinuousIntegrationBuild=true
         -p:GeneratePackageOnBuild=false
     - uses: actions/upload-artifact@v4
