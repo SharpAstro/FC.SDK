@@ -78,19 +78,59 @@ The **436/436 pairing is the live-view signature**: per frame, one `in=2097548` 
 "end transfer" round trip*. The small ones (270/294/340) dominate outside live view and are ordinary
 commands plus their response reads.
 
-Two things follow, and they matter for our bug:
+One thing follows immediately: **there is no separate end-of-transfer phase for EDSDK to hang in.**
+Our `ENDDATATRANSFER` (MTP ext PID 17) never returns for `0x9153` on this body, while it works fine
+for `GetObject` (0x9104) — 12 MB CR2 downloads complete through the very same code path.
 
-1. **EDSDK asks for ~2 MiB per frame regardless of any declared size.** It does not ask the driver
-   how big the frame is and then read exactly that. Our WPD path reads exactly
-   `WPD_PROPERTY_MTP_EXT_TRANSFER_TOTAL_SIZE` (~267 KB on this body).
-2. **There is no separate end-of-transfer phase to hang in.** Our `ENDDATATRANSFER` (MTP ext PID 17)
-   never returns for `0x9153` on this body, while it works fine for `GetObject` (0x9104) — 12 MB CR2
-   downloads complete through the very same code path.
+The 2 MiB request per frame looks like the other clue, but it is not what it seems — see below.
 
-Hence the leading hypothesis for the live-view hang: WPD's `TOTAL_SIZE` is only an estimate for a
-vendor read, we consume exactly that, WPD then believes the transfer is finished (a further
-`READ_DATA` returns 0 bytes — measured), but the *device* still has bytes queued, so it never sends
-the PTP response container and the end phase waits forever.
+## What the same probe said about *our* process, and three dead hypotheses
+
+The probe hooks `DeviceIoControl` on any handle to `vid_04a9`, so it can be pointed at `fc-viewer`
+too, showing what `PortableDeviceApi.dll` issues underneath our COM calls. Doing that, plus two code
+experiments, killed every remaining WPD-level explanation:
+
+1. **"We send a bogus input buffer."** Our per-frame ioctl input was the size of the frame, because
+   `READ_DATA` marshals a caller-allocated `byte[]` in via `WPD_PROPERTY_MTP_EXT_TRANSFER_DATA` —
+   which the docs list as a *result*. Removing it broke even a 341-byte `GetDeviceInfo` read, so that
+   property is really an in/out: the caller allocates the landing buffer, the driver fills it.
+   **This also explains EDSDK's `in=2097548`:** same pre-allocated buffer one layer down. EDSDK is not
+   told the frame size and reading exactly that — it over-requests 2 MiB and takes a short read.
+2. **"`TOTAL_SIZE` is only an estimate for a vendor read, so the driver still holds bytes."** Tested by
+   asking for `max(totalSize, 2 MiB)` per frame the way EDSDK does. The driver returned *exactly* the
+   declared size every frame (265879, 266890, 268101, …). `TOTAL_SIZE` is exact, the data phase is
+   exhausted, nothing is left in the pipe. An earlier drain loop of extra `READ_DATA` calls had
+   already returned 0 bytes; both are now gone from the code.
+3. **"The end phase is merely slow, so live view could run at a lower frame rate."** Instrumented to
+   log a phase that settles *late*, then left running 80 s after streaming stopped. **Not one of 20
+   pending end phases ever completed.** It does not return, at all.
+
+Against the documentation, our end phase is exactly to spec: `END_DATA_TRANSFER` takes only
+`WPD_PROPERTY_MTP_EXT_TRANSFER_CONTEXT` as input, which is what we send. There is no missing
+parameter to find, and passing an empty operation-params collection (which vendor *read* commands do
+require — see `CLAUDE.md`) changes nothing here.
+
+Two further attempts, both measured, both negative:
+
+4. **"One context streams many frames, and the drain simply asked too early."** A source producing ~10
+   frames a second would return 0 bytes to a read issued microseconds after the previous frame. Tested
+   by re-reading the same context after 100, 250 and 500 ms: **0 bytes every time.** One initiate
+   yields exactly one frame; the camera does not keep feeding an open context.
+5. **`IPortableDevice::Cancel` to reclaim the parked thread.** Returns `S_OK` and does *not* release a
+   `SendCommand` already blocked in the driver — the phase never settles afterwards either.
+
+The most useful way to think about the whole thing: **`END_DATA_TRANSFER` is the response phase of a
+PTP transaction, and a viewfinder pull on this body has no response phase.** It is meaningful for
+`GetObject` (finite object, response container, done) and semantically empty for `0x9153` — which is
+why EDSDK issues nothing of the kind per frame and why libgphoto2, talking raw PTP, has no such phase
+to begin with. WPD's misfortune is that it *books* transfer contexts and will only recycle one when
+asked to end it, so it forces us to make a call whose reply is never coming.
+
+What *is* known to work around it is unappealing: issuing the end phase and abandoning the wait keeps
+the driver accepting new initiates, so frames keep arriving complete and decodable — but each
+abandoned phase holds a thread forever, so streaming stops at a fixed frame count (20 on the current
+bound) rather than at anything the camera did. Skipping the end phase entirely is worse: two frames,
+then every later initiate reports `totalSize=0`.
 
 ## What is still unknown
 
@@ -130,14 +170,21 @@ Two gotchas cost real time:
 Also: the hook must be attached **before** the camera is connected in the host app, because the
 device handle is opened at connect time — reconnect the camera if you attached late.
 
-## Why this is not the first thing to try
+## Where this leaves live view on a 450D
 
-The same probe can be pointed at **our own** process: it hooks `DeviceIoControl` on any handle to
-`vid_04a9`, so attaching it to `fc-viewer` shows what `PortableDeviceApi.dll` issues underneath our
-COM calls — how many bytes our `READ_DATA` really asks the driver for, and whether `END_TRANSFER`
-reaches the device at all. That measurement decides the cheap fix (oversize the read) without writing
-a new transport, and both traces are directly comparable since it is the same hook on the same driver.
+Stills capture over WPD is unaffected and reliable — 19 MB CR2 downloads run through the same
+three-phase read, end phase and all. Only `0x9153` hangs the end phase, and only on this body.
 
-A full ioctl transport is the last resort: Windows-only, undocumented, and a bigger surface to own
-than the MTP extension commands we already reverse-engineered. Its one clear advantage over
-`UsbPtpTransport` is that it needs no driver swap.
+Three options remain, in increasing cost:
+
+1. **`UsbPtpTransport`** (LibUsbDotNet, bulk endpoints). Textbook PTP with no end-of-transfer phase at
+   all, so it is structurally immune to this bug — which is also why libgphoto2 streams from these
+   bodies. The price is a driver swap: WinUSB has to be bound with Zadig, which takes the camera away
+   from the stock MTP driver, and therefore from Explorer, EDSDK and our own WPD transport, until it is
+   reverted. Also unverified against real hardware and not AOT-annotated (see `CLAUDE.md`).
+2. **A `DeviceIoControl` transport**, i.e. what EDSDK does. No driver swap, works alongside everything
+   else, and the ioctl shape is already measured — but the input-buffer layout is undocumented and
+   would have to be recovered by diffing (see "What is still unknown"). Windows-only, and a much bigger
+   surface to own than the MTP extension commands we already reverse-engineered.
+3. **Leave it unsupported on DIGIC III bodies** and say so plainly in the viewer, which is what the
+   code currently does.

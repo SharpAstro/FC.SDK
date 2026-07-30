@@ -132,61 +132,37 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
 
     private int _outstandingViewfinderEnds;
 
-    /// <summary>Chunk size for draining a data phase whose full length the driver did not report.</summary>
-    private const uint DrainChunkSize = 1u << 20;
-
-    /// <summary>Safety bound on drain iterations, so a driver that never returns 0 cannot spin forever.</summary>
-    private const int MaxDrainChunks = 16;
-
     /// <summary>
-    /// Keeps reading until the driver stops handing bytes back, appending to what the first read got.
+    /// How much of a viewfinder frame to ask for in one read, regardless of the size the driver
+    /// declared. Matches the 2 MiB EDSDK requests per frame on the same body.
     /// </summary>
     /// <remarks>
-    /// WPD's TRANSFER_TOTAL_SIZE is exact for an object read (the driver knows the object's size) but
-    /// on a vendor read it can describe only the first chunk. Leaving the rest in the pipe is what
-    /// made ENDDATATRANSFER hang on a 450D viewfinder frame: the driver was still waiting for data
-    /// nobody collected. Draining first lets the end phase complete normally, which is what keeps the
-    /// session usable for the NEXT frame — skipping the end phase instead bought two frames and then
-    /// jammed every later initiate at totalSize=0.
+    /// Over-requesting is how we PROVED the data phase is exhausted rather than merely believed it:
+    /// asking for 2 MiB returns exactly TRANSFER_TOTAL_SIZE (~266 KB on a 450D), every frame. So
+    /// TOTAL_SIZE is exact even for a vendor read, no bytes are left in the pipe, and the hung end
+    /// phase is not the driver waiting for data nobody claimed. An earlier version chased that
+    /// hypothesis with a drain loop of extra READ_DATA calls; they returned 0 bytes and changed
+    /// nothing, so the loop is gone.
     /// </remarks>
-    private async Task<byte[]> DrainRemainderAsync(string context, byte[] first, bool trace)
-    {
-        var chunks = new List<byte[]> { first };
-        var total = first.Length;
+    private const uint ViewfinderReadSize = 2u << 20;
 
-        for (var i = 0; i < MaxDrainChunks; i++)
-        {
-            byte[] chunk;
-            try
-            {
-                chunk = await Offload(() => ReadChunk(context, DrainChunkSize)).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                // A refused extra read means there was nothing left — normal, not a failure.
-                if (trace) Console.Error.WriteLine($"[wpd] drain stopped: {ex.Message}");
-                break;
-            }
-
-            if (chunk.Length == 0) break;
-
-            chunks.Add(chunk);
-            total += chunk.Length;
-            if (trace) Console.Error.WriteLine($"[wpd] drained {chunk.Length} more bytes (total {total})");
-        }
-
-        if (chunks.Count == 1) return first;
-
-        var joined = new byte[total];
-        var offset = 0;
-        foreach (var chunk in chunks)
-        {
-            chunk.CopyTo(joined, offset);
-            offset += chunk.Length;
-        }
-        return joined;
-    }
-
+    /// <summary>
+    /// Reads up to <paramref name="want"/> bytes of an open data phase.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// TRANSFER_DATA is listed as a <em>result</em> of READ_DATA, but it is really an in/out: the
+    /// caller allocates the landing buffer and the driver fills it. Sending only the context and the
+    /// byte count — as the documented input list suggests — makes even a 341-byte GetDeviceInfo read
+    /// fail, so this is required, not redundant.
+    /// </para>
+    /// <para>
+    /// That also explains EDSDK's ioctl trace, where every live-view frame carries a 2 MiB input
+    /// buffer: same pre-allocated buffer, one layer down. It is not asking for 2 MiB because it knows
+    /// the frame size — it over-requests and accepts a short read, which is why
+    /// <see cref="ExtractBuffer"/> trusts the driver's length rather than <paramref name="want"/>.
+    /// </para>
+    /// </remarks>
     private byte[] ReadChunk(string context, uint want)
     {
         var cmd = CreateValues();
@@ -197,7 +173,7 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
 
         var results = SendWpdCommand(cmd);
         CheckHResult(results);
-        return ExtractBuffer(results, want);
+        return ExtractBuffer(results);
     }
 
     /// <summary>
@@ -226,11 +202,21 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
             CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         Interlocked.Increment(ref _outstandingViewfinderEnds);
+
+        // Report a phase that answers LATE, not just one that answers inside the probe window. Whether
+        // an abandoned end phase eventually completes is the difference between "live view is possible
+        // at a lower frame rate" and "this driver path can never stream", and silently discarding the
+        // outcome is what kept that question open.
+        var started = _time.GetTimestamp();
         _ = end.ContinueWith(
-            static (t, state) =>
+            (t, state) =>
             {
                 _ = t.Exception; // observed, so an abandoned phase is never an unhandled exception
-                Interlocked.Decrement(ref ((WpdPtpTransport)state!)._outstandingViewfinderEnds);
+                var self = (WpdPtpTransport)state!;
+                var left = Interlocked.Decrement(ref self._outstandingViewfinderEnds);
+                if (trace) Console.Error.WriteLine(
+                    $"[wpd] end-transfer settled after {self._time.GetElapsedTime(started).TotalMilliseconds:F0} ms " +
+                    $"({(t.IsCompletedSuccessfully ? $"0x{t.Result.ResponseCode:X4}" : "faulted")}, {left} still out)");
             },
             this, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
 
@@ -249,6 +235,12 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
             // discarding a good frame because the ack was late is what stopped live view dead.
             // The call is still issued for every frame (never skipped): not issuing it is what left
             // the driver's contexts dangling and jammed every later initiate at totalSize=0.
+            //
+            // There is nothing to be gained by waiting longer, and no way to take the thread back:
+            // the phase is waiting for a PTP response container this body never sends for 0x9153, and
+            // IPortableDevice::Cancel returns S_OK without releasing a SendCommand already parked in
+            // the driver (measured). So the thread is spent, and the frame count is bounded by how
+            // many of them we are willing to spend.
             var outstanding = Volatile.Read(ref _outstandingViewfinderEnds);
             if (trace) Console.Error.WriteLine(
                 $"[wpd] 0x9153 end-transfer still pending ({outstanding} outstanding); keeping {frameBytes} bytes");
@@ -299,16 +291,20 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         }
 
         // Step 2: Read data — always end transfer even on failure to avoid jamming the pipe
+        var isViewfinder = opCode == (ushort)Protocol.PtpOperationCode.CanonGetViewfinderData;
+
+        // Ask for more than the driver declared on a viewfinder frame. TOTAL_SIZE is authoritative for
+        // an object read but only an estimate for a vendor read, and EDSDK does not trust it either —
+        // its ioctl trace shows one ~2 MiB request per frame on a body whose frames are ~267 KB. If the
+        // hung end phase is the driver still holding bytes we never asked for, this is what collects
+        // them; a short read is legal and ExtractBuffer takes the length the driver reports.
+        var want = isViewfinder ? Math.Max(totalSize, ViewfinderReadSize) : totalSize;
+
         try
         {
-            if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} reading {totalSize} bytes…");
-            byte[] data = await Offload(() => ReadChunk(context, totalSize)).ConfigureAwait(false);
-
-            var isViewfinder = opCode == (ushort)Protocol.PtpOperationCode.CanonGetViewfinderData;
-            if (isViewfinder)
-            {
-                data = await DrainRemainderAsync(context, data, trace).ConfigureAwait(false);
-            }
+            if (trace) Console.Error.WriteLine(
+                $"[wpd] 0x{opCode:X4} reading {want} bytes (declared {totalSize})…");
+            byte[] data = await Offload(() => ReadChunk(context, want)).ConfigureAwait(false);
 
             // Step 3: End transfer
             if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} read {data.Length} bytes, ending transfer…");
@@ -474,7 +470,11 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         return ((ushort)respCode, respParams);
     }
 
-    private static byte[] ExtractBuffer(IWpdValues results, uint size)
+    /// <summary>
+    /// Takes the data buffer the driver allocated for a READ_DATA result. The length comes from the
+    /// driver, not from what we asked for — a short read is legal and says the phase is exhausted.
+    /// </summary>
+    private static byte[] ExtractBuffer(IWpdValues results)
     {
         int hr = results.GetBufferValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_DATA), out nint ptr, out uint readSize);
         Marshal.ThrowExceptionForHR(hr);
