@@ -878,8 +878,13 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                         consecutiveFailures, consecutiveTimeouts, err);
 
                     state.LiveViewActive = false;
+                    // Not "the camera stopped answering": on a 450D it answers every frame, in full.
+                    // What never answers is the WPD driver's end-of-transfer phase for 0x9153, and
+                    // each unanswered one costs a thread — so streaming stops at a fixed frame count
+                    // rather than on anything the camera did. Say so, or the next person re-debugs it.
                     state.StatusMessage = timedOut
-                        ? $"Live view stopped: the camera stopped answering ({err})."
+                        ? $"Live view stopped after {state.LiveViewFrameCount} frames — this body's WPD driver never "
+                          + $"completes a frame's end-of-transfer phase ({err})."
                         : $"Live view gave up after {consecutiveFailures} empty frames ({err}).";
                     state.Invalidate();
                     break;
