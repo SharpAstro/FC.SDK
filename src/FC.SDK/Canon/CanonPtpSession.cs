@@ -447,7 +447,10 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         var (resp, data) = await ptp.SendCommandReceiveDataAsync(
             PtpOperationCode.CanonGetViewfinderData, ct, 0x00200000, 0, 0);
 
-        return (resp.ToEdsError(), data);
+        if (!resp.IsSuccess) return (resp.ToEdsError(), []);
+
+        // The payload is a record envelope, not a bare JPEG — see CanonViewfinderFrame.
+        return (EdsError.OK, CanonViewfinderFrame.ExtractJpeg(data));
     }
 
     internal async Task<EdsError> TerminateViewfinderAsync(CancellationToken ct = default)
