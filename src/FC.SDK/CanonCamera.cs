@@ -33,6 +33,7 @@ public sealed class CanonCamera : IAsyncDisposable
     private readonly CanonPtpSession _canon;
     private readonly ILogger<CanonCamera> _logger;
     private EventPoller? _poller;
+    private int _disposed;
 
     public event EventHandler<CanonPropertyChangedEventArgs>? PropertyChanged;
     public event EventHandler<CanonObjectAddedEventArgs>? ObjectAdded;
@@ -746,6 +747,10 @@ public sealed class CanonCamera : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Idempotent: a consumer's own disconnect action and its process-exit cleanup can both get
+        // here, and the second pass would stop a poller and close a transport that are already gone.
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
         if (_poller is not null) await _poller.DisposeAsync();
         _canon.EventReceived -= OnCanonEvent;
         await _canon.DisposeAsync();

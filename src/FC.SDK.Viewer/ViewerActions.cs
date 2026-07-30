@@ -54,6 +54,10 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
     private readonly ILogger _logger = loggerFactory.CreateLogger("Viewer");
     private Task? _liveViewLoop;
 
+    // Single-flight guard for DisconnectCoreAsync — see its doc comment.
+    private readonly Lock _teardownLock = new();
+    private Task? _teardown;
+
     /// <summary>Download an image to <see cref="ViewerState.OutputDirectory"/> as soon as it appears.</summary>
     public bool AutoDownload { get; set; } = true;
 
@@ -93,7 +97,9 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                 _running = null;
                 state.BusyOperation = null;
                 state.Invalidate();
-                _gate.Release();
+                // DisposeAsync can dispose the gate while a cancelled operation is still unwinding
+                // on the pool; its release must be a no-op then, not an unobserved crash.
+                try { _gate.Release(); } catch (ObjectDisposedException) { }
             }
         });
     }
@@ -192,7 +198,26 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         Enqueue("Disconnect", async _ => await DisconnectCoreAsync());
     }
 
-    private async Task DisconnectCoreAsync()
+    /// <summary>
+    /// Single-flight teardown. The Disconnect button runs inside the action gate, but Connect's
+    /// pre-clean and window-close (<see cref="DisposeAsync"/>) run outside it, so two teardowns
+    /// could race over the same camera — the loser's CloseSession then landed on a COM device the
+    /// winner had already shut down, which is where the WPD 0x802A0002 ("Shutdown was already
+    /// called") warnings at exit came from. A racer now awaits the teardown already in flight.
+    /// </summary>
+    private Task DisconnectCoreAsync()
+    {
+        lock (_teardownLock)
+        {
+            if (_teardown is not { IsCompleted: false })
+            {
+                _teardown = TearDownAsync();
+            }
+            return _teardown;
+        }
+    }
+
+    private async Task TearDownAsync()
     {
         await StopLiveViewLoopAsync();
 

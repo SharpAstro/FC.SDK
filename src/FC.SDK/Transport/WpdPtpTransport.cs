@@ -630,18 +630,25 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
         }
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         UnregisterObjectAddedCallback();
 
         _content = null;
 
-        if (_device is not null)
+        // Exchange first, so a concurrent second dispose finds nothing left to close — Close on a
+        // device another teardown already shut down is where the 0x802A0002 ("Shutdown was already
+        // called") warnings at exit came from. Then close through the command gate, so an in-flight
+        // command finishes before the device goes away underneath it. A wedged command times out
+        // the gate and the close proceeds anyway: failing that command is the point of tearing down.
+        if (Interlocked.Exchange(ref _device, null) is { } device)
         {
-            _device.Close();
-            _device = null;
+            var closed = await _gate.RunAsync(() => { device.Close(); return true; }, onTimeout: false)
+                .ConfigureAwait(false);
+            if (!closed)
+            {
+                device.Close();
+            }
         }
-
-        return ValueTask.CompletedTask;
     }
 }
