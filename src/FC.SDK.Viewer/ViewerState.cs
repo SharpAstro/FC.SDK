@@ -24,6 +24,12 @@ public sealed record ControlReading(EdsError Error, uint Value, uint[]? AllowedV
 public sealed record Raster(int Width, int Height, byte[] Rgba);
 
 /// <summary>
+/// Which image the preview pane shows. One at a time on purpose: stacked panes halved both images
+/// and made a dark live-view frame indistinguishable from "no frame yet".
+/// </summary>
+public enum PreviewPane { LiveView, Capture }
+
+/// <summary>
 /// Everything the UI draws. Mutated only from the render thread or from the action queue's
 /// completion callbacks, both of which set <see cref="NeedsRedraw"/>.
 /// </summary>
@@ -50,6 +56,13 @@ public sealed class ViewerState
     public bool LiveViewActive { get; set; }
     public Raster? LiveViewFrame { get; set; }
     public int LiveViewFrameCount { get; set; }
+
+    /// <summary>
+    /// The pane the preview area shows. The tabs set it directly; actions auto-switch it — starting
+    /// live view selects <see cref="PreviewPane.LiveView"/>, a downloaded capture selects
+    /// <see cref="PreviewPane.Capture"/> — so the image that just changed is the one on screen.
+    /// </summary>
+    public PreviewPane PreviewMode { get; set; } = PreviewPane.LiveView;
 
     public uint? LastObjectHandle { get; set; }
     public string? LastFileName { get; set; }

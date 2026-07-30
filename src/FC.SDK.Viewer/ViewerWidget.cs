@@ -461,24 +461,35 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
 
     // ---------------------------------------------------------------- preview
 
+    /// <summary>
+    /// One pane at a time, selected by tabs: stacked live-view + capture panes halved both images
+    /// and made a dark live-view frame indistinguishable from "no frame yet". Actions auto-switch
+    /// <see cref="ViewerState.PreviewMode"/> to whichever image just changed; the tabs override.
+    /// </summary>
     private void PaintPreview(RectF32 rect)
     {
-        var liveLabel = _state.LiveViewActive
-            ? $"Live view — frame {_state.LiveViewFrameCount}"
-            : "Live view (stopped)";
+        var live = _state.PreviewMode == PreviewPane.LiveView;
 
-        var captureLabel = _state.LastSavedPath is { } path
-            ? $"{Path.GetFileName(path)} — {_state.LastSavedBytes:N0} bytes"
-            : _state.LastFileName is { } name ? $"{name} — not downloaded" : "No capture yet";
+        var label = live
+            ? _state.LiveViewActive
+                ? $"Live view — frame {_state.LiveViewFrameCount}"
+                : "Live view (stopped)"
+            : _state.LastSavedPath is { } path
+                ? $"{Path.GetFileName(path)} — {_state.LastSavedBytes:N0} bytes"
+                : _state.LastFileName is { } name ? $"{name} — not downloaded" : "No capture yet";
+        var labelColor = live
+            ? _state.LiveViewActive ? ViewerTheme.Ok : ViewerTheme.Palette.DimText
+            : ViewerTheme.Palette.BodyText;
 
         var tree = Layout.Builder.VStack(
-                Layout.Builder.Text(liveLabel, SmallFontSize,
-                    _state.LiveViewActive ? ViewerTheme.Ok : ViewerTheme.Palette.DimText)
-                    .RowH(ViewerTheme.Metrics.ItemHeight),
-                Layout.Builder.Fill(key: "liveimage").Stretch().Bg(ViewerTheme.Palette.PanelBg),
-                Layout.Builder.Text(captureLabel, SmallFontSize, ViewerTheme.Palette.BodyText)
-                    .RowH(ViewerTheme.Metrics.ItemHeight),
-                Layout.Builder.Fill(key: "thumbimage").HStar(0.55f).WStar().Bg(ViewerTheme.Palette.PanelBg))
+                Layout.Builder.HStack(
+                        PreviewTab("Live view", PreviewPane.LiveView),
+                        PreviewTab("Last capture", PreviewPane.Capture),
+                        Layout.Builder.Text(label, SmallFontSize, labelColor).WStar().HStar().Pad(3f))
+                    .WithGap(ViewerTheme.Metrics.Padding)
+                    .RowH(ViewerTheme.Metrics.ButtonHeight),
+                Layout.Builder.Fill(key: live ? "liveimage" : "thumbimage")
+                    .Stretch().Bg(ViewerTheme.Palette.PanelBg))
             .WithGap(ViewerTheme.Metrics.Padding)
             .Pad(ViewerTheme.Metrics.Padding)
             .Stretch();
@@ -497,6 +508,21 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
                     break;
             }
         });
+    }
+
+    private Layout.Node PreviewTab(string label, PreviewPane pane)
+    {
+        var selected = _state.PreviewMode == pane;
+        return Layout.Builder.Text(label, SmallFontSize,
+                selected ? ViewerTheme.Palette.HeaderText : ViewerTheme.Palette.DimText, TextAlign.Center)
+            .W(Layout.Sizing.Fixed(110f)).HStar()
+            .Bg(selected ? ViewerTheme.Palette.Selection : ViewerTheme.ButtonBg)
+            .Radius(4f)
+            .Clickable(new HitResult.ButtonHit($"preview-{pane}"), _ =>
+            {
+                _state.PreviewMode = pane;
+                _state.Invalidate();
+            });
     }
 
     /// <summary>

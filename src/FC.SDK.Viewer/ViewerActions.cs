@@ -624,6 +624,9 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         if (thumbErr is EdsError.OK && thumbData.Length > 0)
         {
             state.LastThumbnail = TryDecodeJpeg(thumbData, "thumbnail");
+            // The image that just changed is the one to show — but never yank the pane away from a
+            // running live view (auto-download fires mid-stream when the camera also saves to card).
+            if (!state.LiveViewActive) state.PreviewMode = PreviewPane.Capture;
             _logger.LogInformation("Thumbnail: {Bytes:N0} bytes JPEG", thumbData.Length);
             state.Invalidate();
         }
@@ -672,6 +675,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 
         state.LiveViewActive = true;
         state.LiveViewFrameCount = 0;
+        state.PreviewMode = PreviewPane.LiveView;
         state.StatusMessage = "Live view running.";
         _liveViewLoop = Task.Run(() => LiveViewLoopAsync(camera, _shutdown.Token));
     });
