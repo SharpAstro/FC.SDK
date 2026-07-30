@@ -267,9 +267,12 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
             if (err is not EdsError.DeviceBusy) break;
         }
 
-        if (err is EdsError.OK)
+        if (err is EdsError.OK && Properties.TryGetValue(ptpPropCode, out _))
         {
-            // Mirror the write immediately; the camera also echoes it back as a PropertyChanged event.
+            // Mirror the write immediately; the camera also echoes it back as a PropertyChanged
+            // event. Only for properties the camera itself has announced, though: a 450D answers OK
+            // to a write of a property it does not have, and mirroring that phantom would make every
+            // later read answer the value we invented rather than fail honestly.
             Properties.SetValue(ptpPropCode, value);
         }
         return err;
@@ -537,14 +540,21 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
     /// then read out of the cache's raw bytes. Older non-EOS-vendor bodies that answer 0x1015 are
     /// still probed as a fallback across the 0xD1A0..0xD1A2 range.
     /// </remarks>
-    internal async Task<(EdsError Error, CanonCustomFunctionBlock? Block)> GetCustomFunctionBlockAsync(CancellationToken ct = default)
+    /// <param name="refresh">
+    /// Bypass the cache and ask the camera to re-emit the block first. Needed to verify a write:
+    /// the camera echoes a written value on the event stream before deciding whether to keep it,
+    /// so right after a set the cache can hold a value the camera is about to revert.
+    /// </param>
+    internal async Task<(EdsError Error, CanonCustomFunctionBlock? Block)> GetCustomFunctionBlockAsync(
+        bool refresh = false, CancellationToken ct = default)
     {
-        if (Properties.GetRawValue(CustomFuncExPropertyCode) is not { Length: >= 16 } cached)
+        if (refresh || Properties.GetRawValue(CustomFuncExPropertyCode) is not { Length: >= 16 })
         {
             await RequestDevicePropValueAsync(CustomFuncExPropertyCode, ct);
             await DrainEventsAsync(ct);
-            cached = Properties.GetRawValue(CustomFuncExPropertyCode) ?? [];
         }
+
+        var cached = Properties.GetRawValue(CustomFuncExPropertyCode) ?? [];
 
         if (cached.Length >= 16)
             return (EdsError.OK, CanonCustomFunctionBlock.Parse(cached));

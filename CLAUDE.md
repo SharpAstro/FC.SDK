@@ -65,6 +65,11 @@ Consequences worth remembering:
   Omitting the size word is what made every property write fail with `DeviceBusy`.
 - **Setting a property to the value it already holds returns `DeviceBusy`** on at least CaptureDestination, so writes
   are skipped when the cache already agrees.
+- **A body answers `OK` to writes of properties it does not have.** A 450D ACKs `SetDevicePropValueEx` for 0xD13A
+  (MirrorUpSetting) — a property it never announces — and does nothing. A write's response code therefore proves
+  nothing; `SetPropertyUInt32Async` only mirrors a write into the cache when the camera has previously announced the
+  property, otherwise the phantom value answers every later read. This masked the C.Fn fallback for a whole debugging
+  session: the "property write" path reported success, so the block write below never even ran.
 - **`SaveTo` is not passed through.** EDSDK numbers it Camera=1/Host=2/Both=3; the PTP CaptureDestination property
   (0xD11C) uses Host=4 and takes the card value from the body's own allowed-value list (2 in practice). Sending EDSDK's
   Host=2 selects the *card*. `CanonCaptureDestination` holds the wire values and `SetSaveToAsync` translates.
@@ -120,6 +125,20 @@ All PTP property codes MUST be verified against [libgphoto2 ptp.h](https://githu
 | 0xD1BF | MirrorLockUpState | MLU state |
 
 Long exposure noise reduction has NO direct PTP property on Canon — it is always a Custom Function. Use the `CanonCustomFunctionBlock` API.
+
+### Custom Function block, verified on a 450D
+
+- **Reads and writes both work** via 0xD1A0 (`CustomFuncEx`): the write is 0x9110 with the whole modified block as
+  payload (`[8+total_size][0xD1A0][block]`), same as EDSDK. No UILock needed.
+- **Verify writes with a fresh read-back** (request 0xD1A0 → drain, bypassing the cache) after a ~2.5 s window —
+  a response code alone proves nothing on a body that also ACKs phantom property writes. `SetMirrorLockupAsync`
+  returns `OperationRefused` when the camera kept its old value.
+- **Mirror lockup on the 450D is C.Fn 0x060F** (no 0xD13A/0xD1BF properties). The mapping is per-body:
+  `CanonCustomFunctionId.MirrorLockupIdFor(model)` — never guess ids for unverified bodies.
+- **A 450D silently ignores RemoteRelease (0x910F) while MLU is enabled**: the command answers OK, no mirror moves,
+  no event is emitted, no exposure ever arrives. Remote MLU capture is not possible on this body — the viewer warns
+  instead of pretending a second press will expose. MLU state on such bodies is Enable/Disable derived from the
+  setting; there is no way to know the mirror's actual position.
 
 ## WPD transport internals
 

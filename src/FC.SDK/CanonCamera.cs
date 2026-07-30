@@ -308,8 +308,72 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<EdsError> SetDriveModeAsync(EdsDriveMode mode, CancellationToken ct = default) =>
         SetPropertyAsync(EdsPropertyId.DriveMode, (uint)mode, ct);
 
-    public Task<EdsError> SetMirrorLockupAsync(EdsMirrorUpSetting setting, CancellationToken ct = default) =>
-        SetPropertyAsync(EdsPropertyId.MirrorUpSetting, (uint)setting, ct);
+    /// <summary>
+    /// Enables or disables mirror lockup. Uses the 0xD13A property only when the camera has actually
+    /// announced it on the event stream — a 450D answers OK to writes of properties it does not
+    /// have, so a bare "try the property, fall back on error" never falls back. Bodies without the
+    /// property keep MLU in the Custom Function block; when the body's C.Fn id is known
+    /// (<see cref="CanonCustomFunctionId.MirrorLockupIdFor"/>), the setting is written there via
+    /// read-modify-write of the whole block, then verified with a fresh read-back.
+    /// </summary>
+    public async Task<EdsError> SetMirrorLockupAsync(EdsMirrorUpSetting setting, CancellationToken ct = default)
+    {
+        EdsError err;
+        if (_canon.Properties.TryGetValue(CanonPropertyMap.GetPtpCodeOrThrow(EdsPropertyId.MirrorUpSetting), out _))
+        {
+            err = await SetPropertyAsync(EdsPropertyId.MirrorUpSetting, (uint)setting, ct);
+        }
+        else if (CanonCustomFunctionId.MirrorLockupIdFor(Model) is { } cfnId)
+        {
+            var (blockErr, block) = await GetCustomFunctionBlockAsync(ct);
+            if (blockErr is not EdsError.OK || block is null || !block.SetValue(cfnId, (uint)setting))
+                return blockErr is EdsError.OK ? EdsError.DevicePropNotSupported : blockErr;
+
+            err = await SetCustomFunctionBlockAsync(block, ct);
+            _logger.LogDebug("Mirror lockup via C.Fn 0x{Id:X4} = {Setting}: {Error}", cfnId, setting, err);
+
+            if (err is EdsError.OK)
+            {
+                err = await VerifyCustomFunctionWriteAsync(cfnId, (uint)setting, ct);
+            }
+        }
+        else
+        {
+            return EdsError.DevicePropNotSupported;
+        }
+
+        if (err is EdsError.OK)
+        {
+            MirrorLockupEnabled = setting is EdsMirrorUpSetting.On;
+        }
+        return err;
+    }
+
+    /// <summary>
+    /// A C.Fn block write cannot be trusted from its response code alone — the same body answers OK
+    /// even to property writes it ignores outright, and gphoto2 has no C.Fn write path to compare
+    /// against. So give the camera a moment to apply (or discard) the change and read the block back
+    /// fresh, bypassing the cache; a value the camera kept is a real success, anything else is
+    /// <see cref="EdsError.OperationRefused"/> (change it in the camera menu instead).
+    /// </summary>
+    private async Task<EdsError> VerifyCustomFunctionWriteAsync(uint cfnId, uint expected, CancellationToken ct)
+    {
+        await Task.Delay(CfnRevertWindow, ct);
+
+        var (verifyErr, block) = await _canon.GetCustomFunctionBlockAsync(refresh: true, ct);
+        if (verifyErr is not EdsError.OK || block?.GetValue(cfnId) is not { } applied)
+            return verifyErr is EdsError.OK ? EdsError.OperationRefused : verifyErr;
+
+        if (applied == expected) return EdsError.OK;
+
+        _logger.LogWarning(
+            "C.Fn 0x{Id:X4} write did not stick — the camera reverted to {Value}. This body only changes it via the menu.",
+            cfnId, applied);
+        return EdsError.OperationRefused;
+    }
+
+    /// <summary>How long the camera gets to revert an unaccepted C.Fn write; ~2 s observed on a 450D.</summary>
+    private static readonly TimeSpan CfnRevertWindow = TimeSpan.FromSeconds(2.5);
 
     public Task<EdsError> SetAFModeAsync(EdsAFMode mode, CancellationToken ct = default) =>
         SetPropertyAsync(EdsPropertyId.AFMode, (uint)mode, ct);
@@ -377,6 +441,8 @@ public sealed class CanonCamera : IAsyncDisposable
         if (!_canon.SupportsRemoteReleasePair)
         {
             _logger.LogDebug("Body has no RemoteReleaseOn (0x9128); using single-shot RemoteRelease (0x910F)");
+            if (MirrorLockupEnabled == true)
+                _logger.LogWarning("Mirror lockup is enabled — a 450D silently ignores RemoteRelease in this mode; expect no exposure");
             var singleShot = await _canon.RemoteReleaseAsync(ct);
             if (singleShot is not EdsError.OK)
                 _logger.LogWarning("RemoteRelease failed: {Error}", singleShot);
@@ -423,20 +489,61 @@ public sealed class CanonCamera : IAsyncDisposable
     }
 
     public Task<EdsError> EnableMirrorLockupAsync(CancellationToken ct = default) =>
-        SetPropertyAsync(EdsPropertyId.MirrorUpSetting, (uint)EdsMirrorUpSetting.On, ct);
+        SetMirrorLockupAsync(EdsMirrorUpSetting.On, ct);
 
     public Task<EdsError> DisableMirrorLockupAsync(CancellationToken ct = default) =>
-        SetPropertyAsync(EdsPropertyId.MirrorUpSetting, (uint)EdsMirrorUpSetting.Off, ct);
+        SetMirrorLockupAsync(EdsMirrorUpSetting.Off, ct);
 
+    /// <summary>
+    /// Last known mirror-lockup setting, from whichever source answered — the 0xD13A property or the
+    /// C.Fn block. Null until <see cref="GetMirrorUpSettingAsync"/> or a set has run.
+    /// </summary>
+    /// <remarks>
+    /// Also the "can I even shoot remotely?" signal on C.Fn bodies: a 450D silently ignores
+    /// RemoteRelease (0x910F) while mirror lockup is enabled — the command answers OK, no mirror
+    /// moves, no event is emitted, no exposure happens. Remote MLU capture is not possible there;
+    /// disable lockup for tethered shooting.
+    /// </remarks>
+    public bool? MirrorLockupEnabled { get; private set; }
+
+    /// <summary>
+    /// Current mirror-lockup state. Bodies without the 0xD1BF property cannot report the mirror's
+    /// actual position; once the setting itself is known they fall back to
+    /// <see cref="EdsMirrorLockupState.Enable"/>/<see cref="EdsMirrorLockupState.Disable"/> derived
+    /// from it. No press-counting inference: on a 450D remote releases do nothing at all while
+    /// lockup is on (see <see cref="MirrorLockupEnabled"/>), so a guessed "mirror up" would be wrong.
+    /// </summary>
     public async Task<(EdsError Error, EdsMirrorLockupState State)> GetMirrorLockupStateAsync(CancellationToken ct = default)
     {
         var (err, val) = await GetPropertyAsync(EdsPropertyId.MirrorLockUpState, ct);
-        return (err, (EdsMirrorLockupState)val);
+        if (err is EdsError.OK) return (err, (EdsMirrorLockupState)val);
+
+        return MirrorLockupEnabled switch
+        {
+            true => (EdsError.OK, EdsMirrorLockupState.Enable),
+            false => (EdsError.OK, EdsMirrorLockupState.Disable),
+            null => (err, (EdsMirrorLockupState)val),
+        };
     }
 
+    /// <summary>
+    /// Current mirror-lockup setting. Tries the 0xD13A property first, then the C.Fn block on bodies
+    /// whose id is known — see <see cref="SetMirrorLockupAsync"/>.
+    /// </summary>
     public async Task<(EdsError Error, EdsMirrorUpSetting Setting)> GetMirrorUpSettingAsync(CancellationToken ct = default)
     {
         var (err, val) = await GetPropertyAsync(EdsPropertyId.MirrorUpSetting, ct);
+
+        if (err is not EdsError.OK && CanonCustomFunctionId.MirrorLockupIdFor(Model) is { } cfnId)
+        {
+            var (blockErr, block) = await GetCustomFunctionBlockAsync(ct);
+            if (blockErr is EdsError.OK && block?.GetValue(cfnId) is { } cfnValue)
+            {
+                (err, val) = (EdsError.OK, cfnValue);
+            }
+        }
+
+        if (err is EdsError.OK) MirrorLockupEnabled = val != 0;
         return (err, (EdsMirrorUpSetting)val);
     }
 
@@ -448,7 +555,7 @@ public sealed class CanonCamera : IAsyncDisposable
     /// Use <see cref="CanonCustomFunctionId"/> for well-known function IDs.
     /// </summary>
     public async Task<(EdsError Error, CanonCustomFunctionBlock? Block)> GetCustomFunctionBlockAsync(CancellationToken ct = default) =>
-        await _canon.GetCustomFunctionBlockAsync(ct);
+        await _canon.GetCustomFunctionBlockAsync(refresh: false, ct);
 
     /// <summary>
     /// Writes a modified Custom Function data block back to the camera.

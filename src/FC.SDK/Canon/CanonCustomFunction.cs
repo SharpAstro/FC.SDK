@@ -154,4 +154,17 @@ public static class CanonCustomFunctionId
 
     /// <summary>Menu C.Fn 9 (group III, "Autofocus/Drive"): mirror lockup. 0=Disable, 1=Enable.</summary>
     public const uint MirrorLockup_450D = 0x060F;
+
+    /// <summary>
+    /// The C.Fn id for mirror lockup on <paramref name="model"/>, or null when the body exposes MLU
+    /// as the 0xD13A property instead — or when its id here is simply unverified. Only bodies whose
+    /// block was read off real hardware are listed; ids must not be guessed (same rule as
+    /// <see cref="CanonPropertyMap"/>). The 450D's aliases are Rebel XSi (Americas) and Kiss X2 (Japan).
+    /// </summary>
+    public static uint? MirrorLockupIdFor(string? model) => model switch
+    {
+        not null when model.Contains("450D") || model.Contains("XSi") || model.Contains("Kiss X2")
+            => MirrorLockup_450D,
+        _ => null,
+    };
 }
