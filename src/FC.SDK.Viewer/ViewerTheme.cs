@@ -31,6 +31,11 @@ public static class ViewerTheme
     public static readonly RGBAColor32 DangerBg = new(0x5a, 0x2b, 0x2b, 0xff);
     public static readonly RGBAColor32 ActiveBg = new(0x27, 0x4b, 0x33, 0xff);
 
+    // The library defaults (0x22222a / 0x444455) disappear against PanelBg 0x1c2028 — the thumb read
+    // as a paint artifact. Track sits slightly below the panel, thumb clearly above it.
+    public static readonly RGBAColor32 ScrollTrack = new(0x16, 0x1a, 0x20, 0xff);
+    public static readonly RGBAColor32 ScrollThumb = new(0x5e, 0x68, 0x7c, 0xff);
+
     public static readonly RGBAColor32 Ok = new(0x6c, 0xc6, 0x77, 0xff);
     public static readonly RGBAColor32 Warn = new(0xd8, 0xa8, 0x3f, 0xff);
     public static readonly RGBAColor32 Error = new(0xe0, 0x6c, 0x6c, 0xff);
