@@ -126,11 +126,13 @@ why EDSDK issues nothing of the kind per frame and why libgphoto2, talking raw P
 to begin with. WPD's misfortune is that it *books* transfer contexts and will only recycle one when
 asked to end it, so it forces us to make a call whose reply is never coming.
 
-What *is* known to work around it is unappealing: issuing the end phase and abandoning the wait keeps
-the driver accepting new initiates, so frames keep arriving complete and decodable — but each
-abandoned phase holds a thread forever, so streaming stops at a fixed frame count (20 on the current
-bound) rather than at anything the camera did. Skipping the end phase entirely is worse: two frames,
-then every later initiate reports `totalSize=0`.
+On a long-lived device object neither choice works. Issuing the end phase and abandoning the wait keeps
+the driver accepting new initiates, so frames keep arriving complete and decodable — but each abandoned
+phase holds a thread forever, so streaming stops at a fixed frame count rather than at anything the
+camera did. Skipping the end phase instead **poisons the object**: the first unfinished transfer makes
+every later command on it fail, `CloseSession` included, until it is reopened.
+
+That pair of failures is what points at the fix — see below.
 
 ## What is still unknown
 
@@ -170,21 +172,36 @@ Two gotchas cost real time:
 Also: the hook must be attached **before** the camera is connected in the host app, because the
 device handle is opened at connect time — reconnect the camera if you attached late.
 
-## Where this leaves live view on a 450D
+## The fix: one device object per frame
 
-Stills capture over WPD is unaffected and reliable — 19 MB CR2 downloads run through the same
-three-phase read, end phase and all. Only `0x9153` hangs the end phase, and only on this body.
+Both failures above are properties of the *object*, not of the camera. The end phase cannot be waited
+on, and skipping it poisons the object that skipped it — but `IPortableDevice::Close` releases an
+unfinished transfer perfectly well, and a closed object cannot be poisoned for later. So:
 
-Three options remain, in increasing cost:
+**open a second device object, initiate, read short, close, discard — once per frame.** The main device
+object never sees `0x9153` and stays clean for events, properties and capture; WPD supports concurrent
+clients on one device by design, and sharing the transport's command gate keeps the camera half-duplex.
+Measured on a 450D: **475 frames in 90 s (~5 fps), 25–36 ms per frame**, indefinitely, with capture and
+clean teardown still working afterwards.
 
-1. **`UsbPtpTransport`** (LibUsbDotNet, bulk endpoints). Textbook PTP with no end-of-transfer phase at
-   all, so it is structurally immune to this bug — which is also why libgphoto2 streams from these
-   bodies. The price is a driver swap: WinUSB has to be bound with Zadig, which takes the camera away
-   from the stock MTP driver, and therefore from Explorer, EDSDK and our own WPD transport, until it is
-   reverted. Also unverified against real hardware and not AOT-annotated (see `CLAUDE.md`).
-2. **A `DeviceIoControl` transport**, i.e. what EDSDK does. No driver swap, works alongside everything
-   else, and the ioctl shape is already measured — but the input-buffer layout is undocumented and
-   would have to be recovered by diffing (see "What is still unknown"). Windows-only, and a much bigger
-   surface to own than the MTP extension commands we already reverse-engineered.
-3. **Leave it unsupported on DIGIC III bodies** and say so plainly in the viewer, which is what the
-   code currently does.
+Stills capture is unaffected either way — 19 MB CR2 downloads run through the ordinary three-phase read,
+end phase and all.
+
+Two details are load-bearing:
+
+* **Per frame, not once.** A dedicated object opened once and reused was measured too: it survives one
+  frame, fails the next, and self-heals into 204 opens for 200 frames with an error on every second
+  attempt. Left open past live view it also breaks the following capture. Open+close costs a couple of
+  ms out of a ~30 ms frame.
+* **Release the COM references deterministically.** `CoCreateInstance` returns a reference with a
+  refcount of 1 and `ComWrappers.GetOrCreateObjectForComInstance` takes its *own*, so failing to
+  `Marshal.Release` the original leaks the entire native object — invisibly, because the managed heap
+  only ever sees a small wrapper. The bug was latent for as long as COM objects were per-session; at
+  several per frame, each pinning a 2 MiB transfer buffer, it cost ~6 MiB per frame (1.7 GB private
+  bytes in two minutes, while the managed heap stayed under 90 MiB). Fixed, private bytes plateau near
+  300 MiB and fall back on their own.
+
+So an ioctl transport of the kind EDSDK uses is **not** needed for live view on this body. It remains
+interesting only for its other properties, and `UsbPtpTransport` (which has no end phase at all, but
+needs WinUSB bound via Zadig, taking the camera away from Explorer and EDSDK) stays a fallback rather
+than a requirement.

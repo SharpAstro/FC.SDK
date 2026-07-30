@@ -76,7 +76,20 @@ internal static partial class WpdInterop
         Guid iid = typeof(T).GUID;
         int hr = CoCreateInstance(in clsid, 0, CLSCTX_INPROC_SERVER, in iid, out nint ptr);
         Marshal.ThrowExceptionForHR(hr);
-        return (T)s_comWrappers.GetOrCreateObjectForComInstance(ptr, CreateObjectFlags.None);
+        try
+        {
+            return (T)s_comWrappers.GetOrCreateObjectForComInstance(ptr, CreateObjectFlags.None);
+        }
+        finally
+        {
+            // CoCreateInstance hands back a reference with a refcount of 1, and
+            // GetOrCreateObjectForComInstance takes its OWN reference rather than adopting ours — so
+            // ours has to go, or the native object outlives every wrapper that could free it. That
+            // leak is invisible to the GC (the managed heap sees a tiny wrapper) and stayed invisible
+            // here for as long as COM objects were per-session. Live view creates several per frame,
+            // each pinning a 2 MiB transfer buffer: ~6 MiB/frame, gigabytes in minutes.
+            Marshal.Release(ptr);
+        }
     }
 }
 

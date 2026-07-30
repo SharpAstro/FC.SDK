@@ -89,10 +89,17 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     // The read path is a SEQUENCE of blocking calls (initiate → read → end), so it takes the
     // async gate overload: each phase is awaited off-thread individually, which is what lets the
     // end phase carry its own deadline without anybody blocking on a Wait.
+    //
+    // Viewfinder reads take a different road entirely (one blocking sequence on an ephemeral device
+    // object — see ExecuteViewfinderRead), but the SAME gate: PTP is half-duplex, and the driver
+    // below both device objects talks to one camera.
     internal Task<(ushort ResponseCode, uint[] ResponseParams, byte[] Data)> ExecuteCommandReadDataAsync(
         ushort opCode, uint[] @params, CancellationToken ct = default) =>
-        _gate.RunAsync(() => ExecuteReadDataAsync(opCode, @params),
-            (TimedOutCode, Array.Empty<uint>(), Array.Empty<byte>()), ct);
+        opCode == (ushort)Protocol.PtpOperationCode.CanonGetViewfinderData
+            ? _gate.RunAsync(() => ExecuteViewfinderRead(@params),
+                (TimedOutCode, Array.Empty<uint>(), Array.Empty<byte>()), ct)
+            : _gate.RunAsync(() => ExecuteReadDataAsync(opCode, @params),
+                (TimedOutCode, Array.Empty<uint>(), Array.Empty<byte>()), ct);
 
     internal Task<(ushort ResponseCode, uint[] ResponseParams)> ExecuteCommandWriteDataAsync(
         ushort opCode, uint[] @params, byte[] data, CancellationToken ct = default) =>
@@ -117,34 +124,128 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     private static readonly bool TraceReads = Environment.GetEnvironmentVariable("FCSDK_WPD_TRACE") is "1";
 
     /// <summary>
-    /// How long the end-of-transfer phase of the FIRST viewfinder read may take before this body is
-    /// judged to hang there. Short on purpose: live view runs at ~10 fps, so a phase that has not
-    /// answered in this long is the known hang rather than a slow link.
-    /// </summary>
-    private static readonly TimeSpan ViewfinderEndTransferProbe = TimeSpan.FromMilliseconds(750);
-
-    /// <summary>
-    /// How many unanswered viewfinder end-transfers may be in flight before streaming is declared
-    /// broken. Each holds a dedicated thread, so this is the bound that keeps a body which never
-    /// answers from bleeding threads for as long as live view is left running.
-    /// </summary>
-    private const int MaxOutstandingViewfinderEnds = 8;
-
-    private int _outstandingViewfinderEnds;
-
-    /// <summary>
-    /// How much of a viewfinder frame to ask for in one read, regardless of the size the driver
-    /// declared. Matches the 2 MiB EDSDK requests per frame on the same body.
+    /// The floor for a viewfinder read request, regardless of the size the driver declared. Matches
+    /// the 2 MiB EDSDK requests per frame on the same body.
     /// </summary>
     /// <remarks>
-    /// Over-requesting is how we PROVED the data phase is exhausted rather than merely believed it:
-    /// asking for 2 MiB returns exactly TRANSFER_TOTAL_SIZE (~266 KB on a 450D), every frame. So
-    /// TOTAL_SIZE is exact even for a vendor read, no bytes are left in the pipe, and the hung end
-    /// phase is not the driver waiting for data nobody claimed. An earlier version chased that
-    /// hypothesis with a drain loop of extra READ_DATA calls; they returned 0 bytes and changed
-    /// nothing, so the loop is gone.
+    /// Over-requesting also PROVED the data phase is exhausted rather than merely believed it: asking
+    /// for 2 MiB returns exactly TRANSFER_TOTAL_SIZE (~266 KB on a 450D), every frame. TOTAL_SIZE is
+    /// exact even for a vendor read, and re-reading the same context — immediately or up to 500 ms
+    /// later — returns 0 bytes, so one initiate yields exactly one frame.
     /// </remarks>
     private const uint ViewfinderReadSize = 2u << 20;
+
+    /// <summary>
+    /// Pulls one viewfinder frame through a device object that exists only for this frame.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// GetViewFinderData (0x9153) has no response phase on this body: END_DATA_TRANSFER waits forever
+    /// for a response container that never comes (20 pending phases, 80 s, none settled), and
+    /// <c>IPortableDevice::Cancel</c> does not release a parked <c>SendCommand</c>. Skipping END
+    /// instead leaves the transfer "unfinished", after which the device object errors EVERY later
+    /// command — even CloseSession — until it is reopened. So on a long-lived object the choice per
+    /// frame is a spent thread or a poisoned object.
+    /// </para>
+    /// <para>
+    /// Hence the ephemeral object: open, initiate, read short, close, discard. Closing releases the
+    /// un-ended transfer without a single END, so nothing is spent and nothing durable is poisoned.
+    /// The main device object never sees 0x9153 and stays clean for events and capture; WPD supports
+    /// concurrent clients on one device by design, and the shared gate keeps the camera half-duplex.
+    /// EDSDK avoids the whole problem by speaking to the driver below this bookkeeping (raw
+    /// <c>IOCTL_WPD_MESSAGE_*</c>, no END, one long-lived handle) — this is the closest documented-API
+    /// equivalent, priced at one CoCreateInstance+Open per frame.
+    /// </para>
+    /// <para>
+    /// Per frame is not laziness: a dedicated object opened once and REUSED was measured, and the
+    /// poison is per-object — it took one frame, then failed the next, giving 204 opens for 200 frames
+    /// plus an error for every second attempt. Leaving that object open past live view also broke the
+    /// next capture. Open+close is a couple of milliseconds of a 26–34 ms frame.
+    /// </para>
+    /// </remarks>
+    private (ushort, uint[], byte[]) ExecuteViewfinderRead(uint[] @params)
+    {
+        var trace = TraceReads;
+        var started = _time.GetTimestamp();
+
+        IWpdValues? cmd = null, results = null;
+        var device = OpenViewfinderDevice();
+        try
+        {
+            cmd = CreateValues();
+            SetCommandKey(cmd, WpdInterop.PID_EXECUTE_DATA_READ);
+            cmd.SetUnsignedIntegerValue(
+                WpdInterop.MtpExtKey(WpdInterop.PID_OPERATION_CODE),
+                (ushort)Protocol.PtpOperationCode.CanonGetViewfinderData);
+            SetOperationParams(cmd, @params);
+
+            results = SendWpdCommandOn(device, cmd);
+            CheckHResult(results);
+
+            int ctxHr = results.GetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), out string context);
+            results.GetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_TOTAL_SIZE), out uint totalSize);
+
+            if (ctxHr < 0 || string.IsNullOrEmpty(context))
+            {
+                results.GetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_RESPONSE_CODE), out uint respCode);
+                return (respCode == 0 ? (ushort)0x2002 : (ushort)respCode, [], []);
+            }
+
+            // Zero bytes is the body settling into live view (~1 s worth after a cold start), not an
+            // error. No END here either — closing the object below releases the context.
+            if (totalSize == 0) return ((ushort)Protocol.PtpResponseCode.OK, [], []);
+
+            // Strictly more than declared, so the read is short and the driver knows we are done.
+            var data = ReadChunk(device, context, Math.Max(totalSize + 1, ViewfinderReadSize));
+
+            if (trace && ++_frameTraceCounter % TraceEveryFrames == 0) Console.Error.WriteLine(
+                $"[wpd] 0x9153 frame {_frameTraceCounter}: {data.Length} bytes in " +
+                $"{_time.GetElapsedTime(started).TotalMilliseconds:F0} ms, " +
+                $"managed {GC.GetTotalMemory(false) >> 20} MiB, private {Environment.WorkingSet >> 20} MiB");
+            return ((ushort)Protocol.PtpResponseCode.OK, [], data);
+        }
+        finally
+        {
+            // Deterministic, in reverse order of creation. These wrappers are otherwise reclaimed only
+            // when the GC runs their finalizers, and the GC cannot feel how much driver-side state each
+            // one pins — three per frame at ~5 fps outruns it badly.
+            try { device.Close(); } catch { /* releasing a spent object must never throw */ }
+            Release(results);
+            Release(cmd);
+            Release(device);
+        }
+    }
+
+    private int _frameTraceCounter;
+
+    /// <summary>Frames between trace lines — one line per frame at ~5 fps is unreadable.</summary>
+    private const int TraceEveryFrames = 25;
+
+    private IWpdDevice OpenViewfinderDevice()
+    {
+        var device = WpdInterop.CreateInstance<IWpdDevice>(WpdInterop.CLSID_PortableDevice);
+        var clientInfo = CreateClientInfo();
+        try
+        {
+            Marshal.ThrowExceptionForHR(device.Open(_deviceId, clientInfo));
+            return device;
+        }
+        catch
+        {
+            Release(device);
+            throw;
+        }
+        finally
+        {
+            Release(clientInfo);
+        }
+    }
+
+    /// <summary>Releases a COM wrapper's native reference now instead of at finalization.</summary>
+    private static void Release(object? com)
+    {
+        if (com is ComObject o) o.FinalRelease();
+    }
 
     /// <summary>
     /// Reads up to <paramref name="want"/> bytes of an open data phase.
@@ -163,96 +264,39 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     /// <see cref="ExtractBuffer"/> trusts the driver's length rather than <paramref name="want"/>.
     /// </para>
     /// </remarks>
-    private byte[] ReadChunk(string context, uint want)
-    {
-        var cmd = CreateValues();
-        SetCommandKey(cmd, WpdInterop.PID_READ_DATA);
-        cmd.SetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), context);
-        cmd.SetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_NUM_BYTES_TO_READ), want);
-        cmd.SetBufferValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_DATA), new byte[want], want);
-
-        var results = SendWpdCommand(cmd);
-        CheckHResult(results);
-        return ExtractBuffer(results);
-    }
-
     /// <summary>
-    /// Finishes a viewfinder read, bounded so a body that never answers cannot wedge the transport.
+    /// Reused landing buffer for reads up to <see cref="ViewfinderReadSize"/>. Its contents never
+    /// survive the call (the driver writes it, <see cref="ExtractBuffer"/> copies out of the results
+    /// bag), only the allocation does — and allocating 2 MiB per frame at ~5 fps was pure churn.
+    /// Serialized by the gate, so never used concurrently.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Reports <see cref="Protocol.PtpResponseCode.LocalTimeout"/> when the phase does not come back,
-    /// which surfaces as <c>WaitTimeoutError</c> and lets the caller's timeout counter stop live view
-    /// cleanly. Deliberately NOT "skip the end phase and keep going": that bought two frames and then
-    /// jammed every later initiate at <c>totalSize=0</c>, and left the session unusable until
-    /// reconnect — the original "always end transfer to avoid jamming the pipe" note was right.
-    /// The real cure is draining the data phase first (see <see cref="DrainRemainder"/>).
-    /// </para>
-    /// <para>
-    /// Frida-tracing EDSDK on the same body shows the structural difference: it bypasses the WPD COM
-    /// API entirely and drives the MTP device through overlapped <c>DeviceIoControl</c> calls, one
-    /// ~2 MiB request per frame, with no separate end phase to hang in.
-    /// </para>
-    /// </remarks>
-    private async Task<ushort> EndViewfinderTransferAsync(string context, int frameBytes, bool trace)
+    private byte[] _landing = [];
+
+    private byte[] ReadChunk(IWpdDevice device, string context, uint want)
     {
-        // A dedicated thread, not a pool one: if this call never returns the thread is lost, and at
-        // ~10 fps burning pool threads starves everything — that is what made the UI go sluggish.
-        var end = Task.Factory.StartNew(() => EndTransfer(context),
-            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        // Bigger reads (a CR2 download) get a one-off buffer rather than permanently growing the
+        // cached one to object size.
+        var landing = want > ViewfinderReadSize
+            ? new byte[want]
+            : _landing.Length >= want ? _landing : _landing = new byte[want];
 
-        Interlocked.Increment(ref _outstandingViewfinderEnds);
-
-        // Report a phase that answers LATE, not just one that answers inside the probe window. Whether
-        // an abandoned end phase eventually completes is the difference between "live view is possible
-        // at a lower frame rate" and "this driver path can never stream", and silently discarding the
-        // outcome is what kept that question open.
-        var started = _time.GetTimestamp();
-        _ = end.ContinueWith(
-            (t, state) =>
-            {
-                _ = t.Exception; // observed, so an abandoned phase is never an unhandled exception
-                var self = (WpdPtpTransport)state!;
-                var left = Interlocked.Decrement(ref self._outstandingViewfinderEnds);
-                if (trace) Console.Error.WriteLine(
-                    $"[wpd] end-transfer settled after {self._time.GetElapsedTime(started).TotalMilliseconds:F0} ms " +
-                    $"({(t.IsCompletedSuccessfully ? $"0x{t.Result.ResponseCode:X4}" : "faulted")}, {left} still out)");
-            },
-            this, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-
+        IWpdValues? cmd = null, results = null;
         try
         {
-            // Awaited, not waited: the deadline costs no thread of its own, and it runs on the
-            // transport's TimeProvider so a test can expire it without real elapsed time.
-            var response = (await end.WaitAsync(ViewfinderEndTransferProbe, _time).ConfigureAwait(false)).ResponseCode;
-            if (trace) Console.Error.WriteLine($"[wpd] 0x9153 done ({frameBytes} bytes), response 0x{response:X4}");
-            return response;
-        }
-        catch (TimeoutException)
-        {
-            // The frame is COMPLETE — the read phase returned every byte the driver declared. Only
-            // the acknowledgement is missing, so report success and let the caller keep the image;
-            // discarding a good frame because the ack was late is what stopped live view dead.
-            // The call is still issued for every frame (never skipped): not issuing it is what left
-            // the driver's contexts dangling and jammed every later initiate at totalSize=0.
-            //
-            // There is nothing to be gained by waiting longer, and no way to take the thread back:
-            // the phase is waiting for a PTP response container this body never sends for 0x9153, and
-            // IPortableDevice::Cancel returns S_OK without releasing a SendCommand already parked in
-            // the driver (measured). So the thread is spent, and the frame count is bounded by how
-            // many of them we are willing to spend.
-            var outstanding = Volatile.Read(ref _outstandingViewfinderEnds);
-            if (trace) Console.Error.WriteLine(
-                $"[wpd] 0x9153 end-transfer still pending ({outstanding} outstanding); keeping {frameBytes} bytes");
+            cmd = CreateValues();
+            SetCommandKey(cmd, WpdInterop.PID_READ_DATA);
+            cmd.SetStringValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_CONTEXT), context);
+            cmd.SetUnsignedIntegerValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_NUM_BYTES_TO_READ), want);
+            cmd.SetBufferValue(WpdInterop.MtpExtKey(WpdInterop.PID_TRANSFER_DATA), landing, want);
 
-            // Each pending call holds its own thread, so this cannot grow without bound. Past the cap,
-            // report the timeout and let the caller stop streaming rather than bleed threads.
-            return outstanding > MaxOutstandingViewfinderEnds ? TimedOutCode : (ushort)Protocol.PtpResponseCode.OK;
+            results = SendWpdCommandOn(device, cmd);
+            CheckHResult(results);
+            return ExtractBuffer(results);
         }
-        catch (Exception ex)
+        finally
         {
-            if (trace) Console.Error.WriteLine($"[wpd] 0x9153 end-transfer failed: {ex.Message}");
-            return TimedOutCode;
+            Release(results);
+            Release(cmd);
         }
     }
 
@@ -290,30 +334,16 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
             return (endResp.ResponseCode, endResp.ResponseParams, []);
         }
 
-        // Step 2: Read data — always end transfer even on failure to avoid jamming the pipe
-        var isViewfinder = opCode == (ushort)Protocol.PtpOperationCode.CanonGetViewfinderData;
-
-        // Ask for more than the driver declared on a viewfinder frame. TOTAL_SIZE is authoritative for
-        // an object read but only an estimate for a vendor read, and EDSDK does not trust it either —
-        // its ioctl trace shows one ~2 MiB request per frame on a body whose frames are ~267 KB. If the
-        // hung end phase is the driver still holding bytes we never asked for, this is what collects
-        // them; a short read is legal and ExtractBuffer takes the length the driver reports.
-        var want = isViewfinder ? Math.Max(totalSize, ViewfinderReadSize) : totalSize;
-
+        // Step 2: Read data — always end transfer even on failure to avoid jamming the pipe.
+        // (Viewfinder reads never come through here — they take ExecuteViewfinderRead, where both the
+        // exact-size read and the end phase below would be wrong.)
         try
         {
-            if (trace) Console.Error.WriteLine(
-                $"[wpd] 0x{opCode:X4} reading {want} bytes (declared {totalSize})…");
-            byte[] data = await Offload(() => ReadChunk(context, want)).ConfigureAwait(false);
+            if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} reading {totalSize} bytes…");
+            byte[] data = await Offload(() => ReadChunk(_device!, context, totalSize)).ConfigureAwait(false);
 
             // Step 3: End transfer
             if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} read {data.Length} bytes, ending transfer…");
-
-            if (isViewfinder)
-            {
-                return (await EndViewfinderTransferAsync(context, data.Length, trace).ConfigureAwait(false), [], data);
-            }
-
             var endResponse = await Offload(() => EndTransfer(context)).ConfigureAwait(false);
             if (trace) Console.Error.WriteLine($"[wpd] 0x{opCode:X4} done, response 0x{endResponse.ResponseCode:X4}");
             return (endResponse.ResponseCode, endResponse.ResponseParams, data);
@@ -395,7 +425,12 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     private IWpdValues SendWpdCommand(IWpdValues cmd)
     {
         if (_device is null) throw new InvalidOperationException("Transport not connected.");
-        int hr = _device.SendCommand(0, cmd, out var results);
+        return SendWpdCommandOn(_device, cmd);
+    }
+
+    private static IWpdValues SendWpdCommandOn(IWpdDevice device, IWpdValues cmd)
+    {
+        int hr = device.SendCommand(0, cmd, out var results);
 
         Marshal.ThrowExceptionForHR(hr);
         return results!;
