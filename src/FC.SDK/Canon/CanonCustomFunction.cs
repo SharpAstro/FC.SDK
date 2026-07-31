@@ -127,12 +127,12 @@ public sealed class CanonCustomFunctionBlock
 /// </summary>
 public static class CanonCustomFunctionId
 {
-    // --- EOS 6D C.Fn IDs (also common on 5D2, 5D3, 7D) ---
-    /// <summary>C.Fn II-1: Long exposure noise reduction. 0=Off, 1=Auto, 2=On.</summary>
-    public const uint LongExposureNR_6D = 0x0102;
-
-    /// <summary>C.Fn II-2: High ISO speed noise reduction. 0=Standard, 1=Low, 2=Strong, 3=Disable.</summary>
-    public const uint HighIsoNR_6D = 0x0103;
+    // No 6D constants here on purpose. Both noise-reduction settings and mirror lockup were checked
+    // against the EOS 6D manual (im7): "Long exp. noise reduction" and "High ISO speed NR" live under
+    // the [z4] shooting-menu tab (p.302), and "Mirror lockup" is under [z2] (p.164) — none of the
+    // three are listed in the manual's C.Fn I/II/III tables (p.302-303). On the 6D these are plain
+    // properties, not Custom Functions, so a wire id for them here would be guessing at something
+    // that does not exist. See docs/canon-custom-functions.md.
 
     // --- EOS 450D C.Fn IDs — read off a real body, cross-checked against its on-camera menu ---
     //
