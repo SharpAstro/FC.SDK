@@ -84,6 +84,7 @@ Consequences worth remembering:
 |--------|------|-----------|
 | 0x1002 | OpenSession | none |
 | 0x1003 | CloseSession | none |
+| 0x910F | RemoteRelease | none — single-shot release on bodies without 0x9128/0x9129 |
 | 0x9110 | SetDevicePropValueEx | write: [size:u32][propcode:u32][value:u32] — size covers the record (12 for a scalar) |
 | 0x9114 | SetRemoteMode | none, param=1 (EOS M / newer PowerShots want 0x15 — not implemented) |
 | 0x9115 | SetEventMode | none, param=1 |
@@ -102,8 +103,11 @@ Consequences worth remembering:
 | 0x9104 | GetObject | read: file data |
 | 0x9151 | InitiateViewfinder | none |
 | 0x9152 | TerminateViewfinder | none |
-| 0x9153 | GetViewfinderData | read: JPEG frame (~160KB) |
+| 0x9153 | GetViewfinderData | read: JPEG frame (~160KB), **params=(0x00200000, 0, 0)** — the first is the max payload size. An empty param list is accepted and answers OK forever with a zero-length frame; see `docs/wpd-ioctl-wire-format.md` |
 | 0x9160 | AfCancel | none |
+
+Seen on the wire from EDSDK but not yet identified: 0x100A, 0x100E, 0x9101, 0x9102, 0x9103,
+0x9107, 0x9109.
 
 ## Canon PTP property codes
 
@@ -128,8 +132,22 @@ Long exposure noise reduction has NO direct PTP property on Canon — it is alwa
 
 ### Custom Function block, verified on a 450D
 
+Full write-up in **`docs/canon-custom-functions.md`**: the wire layout confirmed against both a real
+450D dump and Canon's own manuals, and why EDSDK is no help for per-model ids (its C.Fn writer takes
+the id from its *caller* and linearly searches the block — there is no per-model table in the DLL,
+and the whole 0xD180–0xD1A0 range is absent from EDSDK's own property table).
+
 - **Reads and writes both work** via 0xD1A0 (`CustomFuncEx`): the write is 0x9110 with the whole modified block as
   payload (`[8+total_size][0xD1A0][block]`), same as EDSDK. No UILock needed.
+- **The group header is three words** — `[group_id][group_size][entry_count]`, entries at `+12`.
+  `group_size` excludes its own word and only balances under this reading. EDSDK's writer appears to
+  use two words, but it walks an already-parsed in-memory form, not the wire block.
+- **Which settings live here is per-model AND per-setting.** From the manuals: a 450D keeps long-exposure
+  NR, high-ISO NR and mirror lockup as C.Fn; a 6D has all three as ordinary properties; a 200D II has
+  the NR pair as properties but mirror lockup still as C.Fn-5. Do not assume they move together.
+- **Extending to a new body needs a menu number, not a raw id.** Group order and entry order match the
+  camera's own C.Fn menu (verified item-for-item on a 450D), so a reporter can dump the block — the
+  viewer's C.Fn action already logs it — and say which menu number does what.
 - **Verify writes with a fresh read-back** (request 0xD1A0 → drain, bypassing the cache) after a ~2.5 s window —
   a response code alone proves nothing on a body that also ACKs phantom property writes. `SetMirrorLockupAsync`
   returns `OperationRefused` when the camera kept its old value.
@@ -155,9 +173,38 @@ COM objects created via `CoCreateInstance` P/Invoke + `StrategyBasedComWrappers`
 
 The WPD MTP driver **requires** `WPD_PROPERTY_MTP_EXT_OPERATION_PARAMS` (an `IPortableDevicePropVariantCollection`) to be present in the command property bag for ALL MTP extension commands, **even when there are no PTP parameters**. Without the empty collection, vendor data-READ commands (GetEvent 0x9116, GetObject 0x9104, etc.) fail with `ELEMENT_NOT_FOUND (0x80070490)`. Vendor no-data and data-WRITE are unaffected.
 
-This was discovered by Frida-hooking `PortableDeviceApi.dll!SendCommand` and comparing EDSDK's property bags to ours. EDSDK always includes an empty `IPortableDevicePropVariantCollection` for the params property. No registry changes, no special drivers, no special client info needed — just the empty collection.
+This was discovered by tracing `PortableDeviceApi.dll!SendCommand` and comparing EDSDK's property bags to ours. EDSDK always includes an empty `IPortableDevicePropVariantCollection` for the params property. No registry changes, no special drivers, no special client info needed — just the empty collection.
 
 In `SetOperationParams`, the collection is always created and attached regardless of whether `params` is empty.
+
+### Below the COM API: the raw ioctl path
+
+EDSDK does not use the WPD COM API at all — it opens the same device-interface path with
+`CreateFileW` and drives the MTP driver with `DeviceIoControl`. Two docs cover this:
+
+- **`docs/canon-windows-transports.md`** — how EDSDK reaches the body (measured), the two
+  ioctl codes, the async I/O shape, and the six dead hypotheses behind the current per-frame
+  device-object fix in `ExecuteViewfinderRead`.
+- **`docs/wpd-ioctl-wire-format.md`** — the ioctl buffer format, decoded. It is *not* a Canon
+  format: it is Microsoft's own undocumented WPD property-bag serialization (a recursive
+  PROPVARIANT using real OLE VARTYPEs), confirmed by diffing our own COM traffic against EDSDK's
+  ioctls for identical calls. Every PROPERTYKEY involved is already a constant in `WpdInterop.cs`.
+
+**This is proven, not theoretical.** `rev/RawIoctlPoc` (git-ignored, needs the camera exclusively)
+drives a 450D end to end with zero COM — session setup, property writes via the three-phase
+data-WRITE, and live view at **11.4 fps sustained over one handle**, versus ~5 fps through COM.
+
+The payoff if it ever gets adopted: `ExecuteViewfinderRead` currently creates, opens, closes and
+releases a whole `IWpdDevice` **per live-view frame**, purely because an unfinished transfer
+poisons a COM device object while `END_DATA_TRANSFER` itself never returns. Neither happens over
+raw ioctl — the same end phase completes in 0–22 ms — so the poisoning is a COM-layer artifact, not
+a `wpdmtp.sys` one.
+
+If picked up, keep the scope narrow: session, properties, capture and events work fine over COM and
+should stay there; only the viewfinder read is worth moving, and `ExecuteCommandReadDataAsync`
+already special-cases `CanonGetViewfinderData` onto its own path as the seam. Two things are
+untested: whether a COM device object and a raw handle to the same node coexist, and whether any of
+this generalises beyond a DIGIC III 450D.
 
 ## Diagnostic viewer (`src/FC.SDK.Viewer`)
 
@@ -252,6 +299,27 @@ Automated tests cover `FC.SDK.Raw` only; the device layer needs a physical Canon
 5. Live view: `StartLiveViewAsync()` → `GetLiveViewFrameAsync()` → verify JPEG
 6. Bulb: `BulbStartAsync()` → delay → `BulbEndAsync()`
 
-Test targets so far: Canon EOS 6D (USB VID=0x04A9, PID=0x3215, WiFi AP at 192.168.0.1).
+Test targets so far: Canon EOS 6D (USB VID=0x04A9, PID=0x3215, WiFi AP at 192.168.0.1) and
+EOS 450D (USB PID=0x3145) — the 450D is the body most of the WPD, live-view, C.Fn and raw-ioctl
+findings were verified on, and being DIGIC III it is the strictest of the three.
 Reported working under EDSDK but previously failing here: EOS 200D II / 250D / Rebel SL3 (DIGIC 8) —
 see the property-read and property-write notes above; both symptoms in issue #1 trace back to them.
+
+**A device-layer result measured against an idle camera is worthless.** Two separate times this
+session a change looked confirmed over hundreds of iterations that were all no-ops — an empty
+parameter list made `GetViewfinderData` answer OK forever with zero-length frames, and
+`InitiateViewfinder` without `Evf_OutputDevice=PC` left the mirror down while every read "succeeded".
+Assert on real bytes (a JPEG SOI, a non-zero length, a plausible frame rate), never on a response
+code or an iteration count.
+
+## Reverse-engineering material (`rev/`, git-ignored)
+
+`rev/` holds decompiles, API-tracing probes, raw captures and throwaway test projects. It is in
+`.gitignore` on purpose — the *conclusions* belong in `docs/`, the raw material stays local. Notable
+tooling, all of which expects the camera to be present and not held by another app:
+
+- `extract_propid_map.py` — pulls EDSDK's PTP-code ↔ `EdsPropertyId` table out of `.rdata`
+  (234 pairs; corroborates `CanonPropertyMap`, 0 conflicts). Needs a local `EDSDK.dll`.
+- `edsdk_ioctl_bytes_probe.js` + `decode_wpd_ioctl.py` — capture and decode raw ioctl buffers.
+- `wpd_raw_ioctl_poc.py` / `RawIoctlPoc/` — the working raw-ioctl transport proof (see the WPD
+  section above). The C# one is the maintained one.
