@@ -90,24 +90,76 @@ Two implementations, agreeing on every field down to real operation codes and re
 values, mapped onto property keys this codebase already has names for — that's about as strong a
 confirmation as reverse-engineering gets without Microsoft's source.
 
+## Confirmed end-to-end: a working raw-ioctl transport, and live view at 2x the COM frame rate
+
+The format above is not just readable, it is *writable*: `rev/RawIoctlPoc` drives a real EOS 450D
+end to end with **zero COM involvement** — no `IPortableDevice`, no `PortableDeviceApi.dll`, just
+`CreateFileW` on the device-interface path plus `DeviceIoControl`. The full session works:
+
+```
+handshake -> OpenSession -> SetRemoteMode -> SetEventMode -> SetRequestOLCInfoGroup
+          -> GetEvent drain -> Evf_Mode=1 -> Evf_OutputDevice=PC -> KeepDeviceOn
+          -> InitiateViewfinder -> [ GetViewfinderData ] xN
+```
+
+Both property writes go through the complete three-phase data-WRITE
+(`EXECUTE_DATA_WRITE` -> `WRITE_DATA` -> `END_DATA_TRANSFER`) carrying the 12-byte
+`[size][propCode][value]` record CLAUDE.md documents, and both return PTP `0x2001` (OK). Live view
+physically engages — the mirror flips up on the body.
+
+**The headline measurement: 198 of 200 poll cycles carried a real frame, at 11.4 fps sustained,
+over ONE handle held open for the whole session, calling `END_DATA_TRANSFER` on every single
+cycle.** Each frame is ~140-150 KB with a valid JPEG SOI at offset 8 (the 8-byte Canon envelope
+header — the same envelope `CanonViewfinderFrame.ExtractJpeg` already strips). No poisoning, no
+hangs, no per-frame device-object churn.
+
+That settles the question this whole exercise existed to answer. `WpdPtpTransport` currently opens
+and closes a brand-new `IWpdDevice` **per live-view frame** (`ExecuteViewfinderRead` ->
+`OpenViewfinderDevice`), because at the COM layer an unfinished transfer poisons the device object
+while the end phase itself never returns. Neither failure mode exists here: the same
+`END_DATA_TRANSFER` that never returns through `IPortableDevice::SendCommand` completes in
+**0-22 ms** through a raw ioctl, every time. So the poisoning lives in the COM layer's own
+bookkeeping, not in `wpdmtp.sys`. And the payoff is not merely tidier: raw ioctl streams at ~11.4
+fps against the COM path's ~5 fps, while eliminating the per-frame allocation entirely.
+
+Two traps worth recording, both of which produced convincing-looking but meaningless results first:
+
+- **`GetViewfinderData` (0x9153) takes three parameters, `(0x00200000, 0, 0)`** — the first is the
+  2 MiB max payload size, matching the `in=2097548` buffers in EDSDK's own capture. Sending an
+  empty parameter list is accepted and answers *successfully* with `TRANSFER_TOTAL_SIZE=0` forever:
+  the camera has simply been asked for nothing. An early run of 1500 such cycles looked like a
+  triumphant "no poisoning over 1500 frames" and proved nothing at all, because empty no-op cycles
+  cannot poison a transfer context. Any test of this must assert on real bytes arriving.
+- **`InitiateViewfinder` (0x9151) alone does not start live view.** Without `Evf_Mode=1` and
+  `Evf_OutputDevice=PC` first, the body stays on its normal shooting screen with the mirror down
+  and every read returns empty. (On DIGIC III bodies like the 450D, `CanonPtpSession` notes 0x9151
+  is not even in the supported-operations set — setting `Evf_OutputDevice` to PC *is* the start
+  sequence.)
+
+`TRANSFER_TOTAL_SIZE` is reported as 0 on every viewfinder response even when a full frame follows,
+so the payload length must come from what `READ_DATA` actually returns, not from the declared size.
+
 ## What's still open
 
-- **The response/output side is unconfirmed.** The probe that produced these captures had a real
-  bug: it sized the output dump off `outSize` (`DeviceIoControl`'s *allocated capacity* argument),
-  which stays ~1–3 MiB for the whole session (the same preallocated buffer
-  `canon-windows-transports.md` already measured) — so it always hit the "large buffer, head only,
-  64 bytes" branch and never captured enough of a real response to decode. Fixed in
-  `rev/edsdk_ioctl_bytes_probe.js` (always dump from the front regardless of capacity); not
-  re-captured yet. The format is presumably symmetric — `PID_RESPONSE_CODE` (1003) and
-  `PID_RESPONSE_PARAMS` (1004) are already named in `WpdInterop.cs` — but that's an inference, not
-  something decoded from real bytes.
-- **`VT_VECTOR|VT_UI1`** (a raw byte buffer — needed for `PID_TRANSFER_DATA`, i.e. the actual JPEG
-  frame bytes) never appeared in a buffer that fully parsed. The decoder's case for it is written by
-  symmetry with the confirmed `VT_VECTOR|VT_UI4`, not verified.
 - **One property key recurs in every command envelope, still unnamed:** `(WPD_COMMAND_COMMON, pid
   1010)`, always a `VT_LPWSTR` GUID string, different per call and not the same value as the
   transfer context. Reads like a per-request correlation id the WPD stack assigns rather than
-  something a caller sets.
+  something a caller sets — `RawIoctlPoc` generates a fresh random one per call and the driver
+  accepts it, so it is evidently not validated against anything.
+- **`(WPD_COMMAND_MTP_EXT, pid 1013)` = 262144** appears on every viewfinder response (exactly
+  256 KiB). Not in `WpdInterop.cs`, purpose unknown; ignoring it causes no observable problem.
+- **`VT_ERROR` (vt=10)** carries the `PID_HRESULT` status and had to be added to the decoder after
+  the fact — worth noting because the response side uses VARTYPEs the request side never does, so
+  a decoder built only from request captures will not round-trip responses.
+- **Response-side decoding is now empirically confirmed** (`RawIoctlPoc` reads
+  `PID_TRANSFER_CONTEXT`, `PID_HRESULT` and the frame payload out of real responses), which
+  supersedes the earlier "presumably symmetric" caveat. The `rev/edsdk_ioctl_bytes_probe.js`
+  under-capture bug behind that uncertainty — it sized output dumps off `DeviceIoControl`'s
+  *allocated capacity* argument, which stays ~1–3 MiB all session, so it always took the
+  "large buffer, head only, 64 bytes" branch — is fixed but not re-captured.
+- **`VT_VECTOR|VT_UI1`** for `PID_TRANSFER_DATA` is now confirmed by use in both directions: it
+  carries the 12-byte property-write record *and* decodes ~145 KB viewfinder frames correctly.
+  `VT_VECTOR|VT_UI4` remains written-by-symmetry and unexercised.
 - **A handful of opcodes appeared that aren't in CLAUDE.md's table yet:** `0x100A`, `0x100E`,
   `0x9101`, `0x9102`, `0x9103`, `0x9107`, `0x9109`, `0x910F` — the last is `RemoteRelease`, already
   named in CLAUDE.md's Custom-Function section (a 450D "silently ignores `RemoteRelease` (0x910F)
@@ -127,12 +179,19 @@ them.
 
 ## Why this matters
 
-The original question this answered: *do we have enough information to, in principle, implement a
-transport that talks this ioctl protocol directly, the way EDSDK does?* Before this, the answer was
-no — we knew which ioctl codes and the async I/O shape, but not what to put in the buffer. Now the
-envelope, the command dispatch, the parameter encoding, and a working transfer-teardown call are all
-confirmed against two independent real implementations. What remains (the response side, byte
-buffers, one unnamed correlation field) is refinement, not an unknown wrapper format standing in the
-way. Per CLAUDE.md, reimplementing this is still explicitly a last resort — the WPD COM path already
-works, live view included — but the "we don't understand the format" reason not to is no longer
-true.
+The original question: *do we have enough information to implement a transport that talks this
+ioctl protocol directly, the way EDSDK does?* The answer is now demonstrably yes — `rev/RawIoctlPoc`
+does it, against real hardware, including the write path and sustained live view at double the COM
+frame rate.
+
+The motivating problem was the per-frame allocation in `WpdPtpTransport.ExecuteViewfinderRead`: a
+whole `IWpdDevice` created, opened, closed and released for **every single live-view frame**, purely
+to work around COM-layer transfer-context poisoning. A raw-ioctl viewfinder path removes that
+entirely — one handle for the session, no COM objects in the hot loop — and measured ~11.4 fps
+against the COM path's ~5.
+
+Scope note for whoever picks this up: the intended change is *narrow*. Session setup, properties,
+capture and event polling all work fine over COM today and should stay there; only the viewfinder
+read needs replacing. `IPtpTransport` already isolates this, and `ExecuteCommandReadDataAsync`
+already special-cases `CanonGetViewfinderData` onto its own path, which is exactly the seam a raw
+handle would slot into.
