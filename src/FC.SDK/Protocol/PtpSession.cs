@@ -21,9 +21,11 @@ internal sealed class PtpSession(IPtpTransport transport) : IAsyncDisposable
         CancellationToken ct,
         params uint[] @params)
     {
-        if (OperatingSystem.IsWindows() && transport is WpdPtpTransport wpd)
+        // Windows' MTP driver owns the PTP framing, so a WPD transport — COM or raw ioctl — takes
+        // the typed command phases instead of the container path below.
+        if (transport is IMtpExtTransport mtp)
         {
-            var (respCode, respParams) = await wpd.ExecuteCommandAsync((ushort)opCode, @params, ct);
+            var (respCode, respParams) = await mtp.ExecuteCommandAsync((ushort)opCode, @params, ct);
             return WpdToResponse(respCode, respParams);
         }
 
@@ -56,11 +58,11 @@ internal sealed class PtpSession(IPtpTransport transport) : IAsyncDisposable
         CancellationToken ct,
         params uint[] @params)
     {
-        if (OperatingSystem.IsWindows() && transport is WpdPtpTransport wpd)
+        if (transport is IMtpExtTransport mtp)
         {
             try
             {
-                var (respCode, respParams) = await wpd.ExecuteCommandWriteDataAsync((ushort)opCode, @params, data.ToArray(), ct);
+                var (respCode, respParams) = await mtp.ExecuteCommandWriteDataAsync((ushort)opCode, @params, data.ToArray(), ct);
                 return WpdToResponse(respCode, respParams);
             }
             catch (COMException)
@@ -113,11 +115,11 @@ internal sealed class PtpSession(IPtpTransport transport) : IAsyncDisposable
         CancellationToken ct,
         params uint[] @params)
     {
-        if (OperatingSystem.IsWindows() && transport is WpdPtpTransport wpd)
+        if (transport is IMtpExtTransport mtp)
         {
             try
             {
-                var (respCode, respParams, data) = await wpd.ExecuteCommandReadDataAsync((ushort)opCode, @params, ct);
+                var (respCode, respParams, data) = await mtp.ExecuteCommandReadDataAsync((ushort)opCode, @params, ct);
                 return (WpdToResponse(respCode, respParams), data);
             }
             catch (COMException)

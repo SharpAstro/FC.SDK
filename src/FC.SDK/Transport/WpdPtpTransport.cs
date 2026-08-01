@@ -5,7 +5,7 @@ using System.Runtime.Versioning;
 namespace FC.SDK.Transport;
 
 [SupportedOSPlatform("windows")]
-internal sealed partial class WpdPtpTransport : IPtpTransport
+internal sealed partial class WpdPtpTransport : IMtpExtTransport
 {
     private readonly string _deviceId;
     private IWpdDevice? _device;
@@ -82,7 +82,7 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     // All three phases go through the same gate: one command at a time, each with a deadline. The
     // mechanics (thread hop, who releases the lock, bounding the wait for the lock itself) live in
     // CommandGate so they can be tested against a FakeTimeProvider without COM or a camera.
-    internal Task<(ushort ResponseCode, uint[] ResponseParams)> ExecuteCommandAsync(
+    public Task<(ushort ResponseCode, uint[] ResponseParams)> ExecuteCommandAsync(
         ushort opCode, uint[] @params, CancellationToken ct = default) =>
         _gate.RunAsync(() => ExecuteNoData(opCode, @params), (TimedOutCode, Array.Empty<uint>()), ct);
 
@@ -93,7 +93,7 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
     // Viewfinder reads take a different road entirely (one blocking sequence on an ephemeral device
     // object — see ExecuteViewfinderRead), but the SAME gate: PTP is half-duplex, and the driver
     // below both device objects talks to one camera.
-    internal Task<(ushort ResponseCode, uint[] ResponseParams, byte[] Data)> ExecuteCommandReadDataAsync(
+    public Task<(ushort ResponseCode, uint[] ResponseParams, byte[] Data)> ExecuteCommandReadDataAsync(
         ushort opCode, uint[] @params, CancellationToken ct = default) =>
         opCode == (ushort)Protocol.PtpOperationCode.CanonGetViewfinderData
             ? _gate.RunAsync(() => ExecuteViewfinderRead(@params),
@@ -101,7 +101,7 @@ internal sealed partial class WpdPtpTransport : IPtpTransport
             : _gate.RunAsync(() => ExecuteReadDataAsync(opCode, @params),
                 (TimedOutCode, Array.Empty<uint>(), Array.Empty<byte>()), ct);
 
-    internal Task<(ushort ResponseCode, uint[] ResponseParams)> ExecuteCommandWriteDataAsync(
+    public Task<(ushort ResponseCode, uint[] ResponseParams)> ExecuteCommandWriteDataAsync(
         ushort opCode, uint[] @params, byte[] data, CancellationToken ct = default) =>
         _gate.RunAsync(() => ExecuteWriteData(opCode, @params, data), (TimedOutCode, Array.Empty<uint>()), ct);
 

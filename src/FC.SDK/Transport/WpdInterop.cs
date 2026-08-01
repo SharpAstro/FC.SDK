@@ -41,6 +41,20 @@ internal static partial class WpdInterop
     internal const uint PID_COMMAND_ID = 1002;
     internal const uint PID_HRESULT = 1003;
 
+    // WPD_COMMAND_COMMON_SAVE_CLIENT_INFORMATION — the handshake every client performs before any
+    // other command. The COM layer issues it from IPortableDevice::Open; a raw-ioctl client
+    // (WpdIoctlPtpTransport) has to send it itself. Its one required input is the client-info bag
+    // below, and it answers with a context the driver then expects back on every later command.
+    internal const uint PID_COMMAND_SAVE_CLIENT_INFORMATION = 4;
+    internal const uint PID_CLIENT_INFORMATION = 1009;
+    internal const uint PID_CLIENT_INFORMATION_CONTEXT = 1010;
+
+    // WPD_CLIENT_* PIDs inside the client-information bag.
+    internal const uint PID_CLIENT_NAME = 2;
+    internal const uint PID_CLIENT_MAJOR_VERSION = 3;
+    internal const uint PID_CLIENT_MINOR_VERSION = 4;
+    internal const uint PID_CLIENT_REVISION = 5;
+
     // MTP EXT command PIDs
     internal const uint PID_EXECUTE_NO_DATA = 12;
     internal const uint PID_EXECUTE_DATA_READ = 13;
