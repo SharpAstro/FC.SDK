@@ -42,13 +42,17 @@ Four layers, bottom-up:
 
 ### Public API (root)
 
-- **`CanonCamera`** — Entry point. Static factories: `ConnectUsb`, `ConnectWifi`, `ConnectWpd`. Async session/capture/live-view/property methods. Event handlers (`PropertyChanged`, `ObjectAdded`, `StateChanged`) are subscribed for the object's whole lifetime, not just while the poller runs, because the open-session drain and property reads also pull events. Diagnostics: `DumpPropertiesAsync`, `SupportedOperations`, `GetRawPropertyAsync`/`SetRawPropertyAsync`, `GetAllowedValuesAsync`.
+- **`CanonCamera`** — Entry point. Static factories: `ConnectUsb`, `ConnectWifi`, `ConnectWpd`, `ConnectWpdIoctl`. Async session/capture/live-view/property methods. Event handlers (`PropertyChanged`, `ObjectAdded`, `StateChanged`) are subscribed for the object's whole lifetime, not just while the poller runs, because the open-session drain and property reads also pull events. Diagnostics: `DumpPropertiesAsync`, `SupportedOperations`, `GetRawPropertyAsync`/`SetRawPropertyAsync`, `GetAllowedValuesAsync`, `CreateDeviceReportAsync`.
+
+- **`CanonDeviceReport`** — the one artefact to ask a bug reporter for. Markdown: model, transport, every advertised operation, every announced property with its allowed values, and the **decoded Custom Function block in wire order with menu numbers**. That last part is the whole point — a reporter cannot know wire ids, but can read menu numbers off their own camera, and `CanonCustomFunctionBlock.Entries` preserves the order that maps between them. It also refuses to be trusted on a flat battery: a body reporting `0xD111` level ≤ 1 gets a loud warning, because at that level a 450D ACKs releases it never performs, drops live view mid-stream, and announces dial movements nobody made.
 
 ## Reading and writing EOS properties
 
-**There is no EOS "get property" operation.** EOS bodies do not list standard PTP `GetDevicePropValue` (0x1015) in
-their supported-operations set at all, so calling it for a 0xD1xx code answers `OperationNotSupported` →
-`EdsError.NotSupported`. Canon 0x9127 is `RequestDevicePropValue`, *not* a getter — it only asks the camera to emit
+**There is no EOS "get property" operation.** Calling standard PTP `GetDevicePropValue` (0x1015) for a 0xD1xx code
+answers `OperationNotSupported` → `EdsError.NotSupported`. Note this is *not* the same as the operation being absent:
+a 450D advertises 0x1015 in its supported-operations set and still refuses every vendor code, so its presence in a
+device report proves nothing and must not be read as "the property path will work here".
+Canon 0x9127 is `RequestDevicePropValue`, *not* a getter — it only asks the camera to emit
 the value as an event. Values arrive exclusively as `PropValueChanged` (0xC189) records in the `GetEvent` (0x9116)
 stream; the selectable-value lists arrive as `AvailListChanged` (0xC18A). Both feed `CanonPropertyCache`, and
 `GetPropertyAsync` answers out of it (requesting a push + draining first if the code has not been seen, then falling
@@ -177,10 +181,12 @@ This was discovered by tracing `PortableDeviceApi.dll!SendCommand` and comparing
 
 In `SetOperationParams`, the collection is always created and attached regardless of whether `params` is empty.
 
-### Below the COM API: the raw ioctl path
+### Below the COM API: the raw ioctl path (`WpdIoctlPtpTransport`)
 
 EDSDK does not use the WPD COM API at all — it opens the same device-interface path with
-`CreateFileW` and drives the MTP driver with `DeviceIoControl`. Two docs cover this:
+`CreateFileW` and drives the MTP driver with `DeviceIoControl`. **FC.SDK now does this too**, as a
+sibling transport: `CanonCamera.ConnectWpdIoctl(deviceId)` next to `ConnectWpd(deviceId)`. Two docs
+cover the reverse engineering behind it:
 
 - **`docs/canon-windows-transports.md`** — how EDSDK reaches the body (measured), the two
   ioctl codes, the async I/O shape, and the six dead hypotheses behind the current per-frame
@@ -190,21 +196,46 @@ EDSDK does not use the WPD COM API at all — it opens the same device-interface
   PROPVARIANT using real OLE VARTYPEs), confirmed by diffing our own COM traffic against EDSDK's
   ioctls for identical calls. Every PROPERTYKEY involved is already a constant in `WpdInterop.cs`.
 
-**This is proven, not theoretical.** `rev/RawIoctlPoc` (git-ignored, needs the camera exclusively)
-drives a 450D end to end with zero COM — session setup, property writes via the three-phase
-data-WRITE, and live view at **11.4 fps sustained over one handle**, versus ~5 fps through COM.
+How it is put together:
 
-The payoff if it ever gets adopted: `ExecuteViewfinderRead` currently creates, opens, closes and
-releases a whole `IWpdDevice` **per live-view frame**, purely because an unfinished transfer
-poisons a COM device object while `END_DATA_TRANSFER` itself never returns. Neither happens over
-raw ioctl — the same end phase completes in 0–22 ms — so the poisoning is a COM-layer artifact, not
-a `wpdmtp.sys` one.
+- **`WpdPropertyBag.cs`** — the encoder/decoder. `WpdBagWriter` builds a request into a caller-owned
+  array (so the transport keeps one buffer per session rather than allocating per command);
+  `WpdBagReader` is a ref struct that *seeks* one key rather than materialising a dictionary, so a
+  frame's payload is copied exactly once out of the driver's own bytes. `WpdCommands` builds the six
+  commands. `WpdPropertyBagTests` pins all of this **byte-exact against `rev/RawIoctlPoc`**, which was
+  itself verified against captured EDSDK traffic — that reference is the only thing standing between
+  this encoder and silent drift, since the driver's sole feedback is a failed command.
+- **`WpdIoctlDevice.cs`** — the handle. Bound to the thread pool's I/O completion port, so a pending
+  ioctl parks no thread; the COM path cannot do this, which is why `CommandGate` exists at all. Both
+  ioctl codes are documented constants (`PortableDevice.h`), and which one a command takes is decided
+  by the driver's own command-access map — that is why the client-info handshake uses the READ code
+  and everything else uses READ/WRITE.
+- **`IMtpExtTransport`** — the seam. `PtpSession` routes to the three phases through this interface
+  instead of naming a concrete transport, so COM and ioctl are interchangeable and never mixed.
 
-If picked up, keep the scope narrow: session, properties, capture and events work fine over COM and
-should stay there; only the viewfinder read is worth moving, and `ExecuteCommandReadDataAsync`
-already special-cases `CanonGetViewfinderData` onto its own path as the seam. Two things are
-untested: whether a COM device object and a raw handle to the same node coexist, and whether any of
-this generalises beyond a DIGIC III 450D.
+**Do not cross the streams.** A session commits to one transport for its whole life. Each opens the
+device independently and the camera holds one PTP session, so these are alternatives, not layers.
+
+What the ioctl path is actually worth, measured on a 450D, 300 frames each through the same sample:
+
+| | COM | raw ioctl |
+|---|---|---|
+| Real frames | 300 (20.2 fps) | 300 (20.3 fps) |
+| Private working set | 73–119 MiB | 38–47 MiB |
+
+**Throughput is identical** — the body is the limiter, and roughly half of all polls answer
+`ObjectNotReady` on both. An earlier note here claimed 11.4 fps against ~5; that did not survive
+driving both paths through one harness, and the memory figure is the honest headline. It comes from
+`ExecuteViewfinderRead` having to create, open, close and release a whole `IWpdDevice` **per frame**,
+because an unfinished transfer poisons a COM device object while `END_DATA_TRANSFER` never returns.
+Neither happens over raw ioctl — the same end phase completes in 0–22 ms — so the poisoning is a
+COM-layer artifact, not a `wpdmtp.sys` one.
+
+Not a superset: the WPD **Content API** (`EnumerateWpdObjects`, `DownloadWpdObjectAsync`,
+`RegisterWpdObjectAddedCallback`) is COM interfaces rather than MTP extension commands and has no
+equivalent below the COM layer. `CanonCamera.SupportsWpdContentApi` reports this; the PTP equivalents
+(`DownloadAsync`, `GetObjectFileNameAsync`, `ObjectAdded`) work on every transport. Still untested:
+whether any of this generalises beyond a DIGIC III 450D.
 
 ## Diagnostic viewer (`src/FC.SDK.Viewer`)
 
@@ -290,14 +321,33 @@ Two things to know about the AOT build:
 
 ## Testing
 
-Automated tests cover `FC.SDK.Raw` only; the device layer needs a physical Canon body. Manual sequence
-(all of it available as buttons in the viewer):
-1. Connect camera (WPD, USB or WiFi)
-2. Open session — check the log's operation-support list, especially whether 0x1015 is absent
+Automated tests cover `FC.SDK.Raw`, the command gate, and the ioctl wire format; everything else in
+the device layer needs a physical Canon body.
+
+**`src/FC.SDK.Sample` is the fastest way to exercise a body** — no GUI, one command, and it writes a
+`CanonDeviceReport` every run:
+
+```
+dotnet run --project src/FC.SDK.Sample -- [--ioctl] [--frames N] [--no-capture]
+```
+
+`--ioctl` selects `WpdIoctlPtpTransport`; without it you get the COM transport, which makes the two
+directly comparable on the same body in the same harness. Run it from a scratch directory — it writes
+the report, the last live-view frame, and any capture into the working directory.
+
+Manual sequence (all of it also available as buttons in the viewer):
+1. Connect camera (WPD COM, WPD ioctl, USB or WiFi)
+2. Open session — check the operation-support list; note that 0x1015 being *present* does not mean
+   property reads work (see "Reading and writing EOS properties")
 3. Read all properties and confirm the event cache is populated
 4. Take picture: `TakePictureAsync()`
 5. Live view: `StartLiveViewAsync()` → `GetLiveViewFrameAsync()` → verify JPEG
 6. Bulb: `BulbStartAsync()` → delay → `BulbEndAsync()`
+
+**Check the battery before believing any of it.** A 450D at `0xD111` level 1 answers OK to releases
+that never expose, and stops producing live-view frames entirely while still answering every read —
+both indistinguishable from an SDK fault, and both observed. `CanonDeviceReport` warns about this at
+the top of its output; the sample prints it every run.
 
 Test targets so far: Canon EOS 6D (USB VID=0x04A9, PID=0x3215, WiFi AP at 192.168.0.1) and
 EOS 450D (USB PID=0x3145) — the 450D is the body most of the WPD, live-view, C.Fn and raw-ioctl

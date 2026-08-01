@@ -21,12 +21,19 @@ public class CommandGateTests
 
     private static CommandGate Gate(FakeTimeProvider time) => new(time, Timeout);
 
+    /// <summary>
+    /// The test run's own cancellation token, so a cancelled run tears these down instead of sitting
+    /// out a wait. Distinct from the tokens the cancellation tests create for themselves: those are
+    /// the subject of the test, this one is only the escape hatch.
+    /// </summary>
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
     [Fact]
     public async Task Returns_the_result_when_the_call_completes()
     {
         var gate = Gate(new FakeTimeProvider());
 
-        var result = await gate.RunAsync(() => 42, onTimeout: -1);
+        var result = await gate.RunAsync(() => 42, onTimeout: -1, Ct);
 
         result.ShouldBe(42);
     }
@@ -39,7 +46,7 @@ public class CommandGateTests
         using var stuck = new ManualResetEventSlim(false);
 
         // Stands in for a COM call that accepted the request and never answered.
-        var call = gate.RunAsync(() => { stuck.Wait(); return 42; }, onTimeout: -1);
+        var call = gate.RunAsync(() => { stuck.Wait(); return 42; }, onTimeout: -1, Ct);
 
         await WaitUntilPendingAsync(call);
         time.Advance(Timeout);
@@ -58,10 +65,10 @@ public class CommandGateTests
         var gate = Gate(time);
         using var stuck = new ManualResetEventSlim(false);
 
-        var first = gate.RunAsync(() => { stuck.Wait(); return 1; }, onTimeout: -1);
+        var first = gate.RunAsync(() => { stuck.Wait(); return 1; }, onTimeout: -1, Ct);
         await WaitUntilPendingAsync(first);
 
-        var second = gate.RunAsync(() => 2, onTimeout: -1);
+        var second = gate.RunAsync(() => 2, onTimeout: -1, Ct);
 
         time.Advance(Timeout);
         (await first).ShouldBe(-1);
@@ -82,10 +89,10 @@ public class CommandGateTests
         var gate = Gate(time);
         using var stuck = new ManualResetEventSlim(false);
 
-        var first = gate.RunAsync(() => { stuck.Wait(); return 1; }, onTimeout: -1);
+        var first = gate.RunAsync(() => { stuck.Wait(); return 1; }, onTimeout: -1, Ct);
         await WaitUntilPendingAsync(first);
 
-        var abandoned = gate.RunAsync(() => 2, onTimeout: -1);
+        var abandoned = gate.RunAsync(() => 2, onTimeout: -1, Ct);
         time.Advance(Timeout);
         await first;
         time.Advance(Timeout);
@@ -93,7 +100,7 @@ public class CommandGateTests
 
         stuck.Set();   // the wedged call returns; the gate must recover
 
-        await WaitUntilAsync(async () => await gate.RunAsync(() => 3, onTimeout: -1) == 3,
+        await WaitUntilAsync(async () => await gate.RunAsync(() => 3, onTimeout: -1, Ct) == 3,
             because: "a later command should succeed once the gate is free again");
     }
 
@@ -105,7 +112,7 @@ public class CommandGateTests
         using var stuck = new ManualResetEventSlim(false);
         using var cts = new CancellationTokenSource();
 
-        var first = gate.RunAsync(() => { stuck.Wait(); return 1; }, onTimeout: -1);
+        var first = gate.RunAsync(() => { stuck.Wait(); return 1; }, onTimeout: -1, Ct);
         await WaitUntilPendingAsync(first);
 
         // Queued behind the wedged call, then cancelled. The clock never moves.
@@ -132,7 +139,7 @@ public class CommandGateTests
         using var stuck = new ManualResetEventSlim(false);
         using var cts = new CancellationTokenSource();
 
-        var holder = gate.RunAsync(() => { stuck.Wait(); return 1; }, onTimeout: -1);
+        var holder = gate.RunAsync(() => { stuck.Wait(); return 1; }, onTimeout: -1, Ct);
         await WaitUntilPendingAsync(holder);
 
         var cancelled = gate.RunAsync(() => 2, onTimeout: -1, cts.Token);
@@ -146,7 +153,7 @@ public class CommandGateTests
 
         // If the cancelled attempt had over-released, the gate would now admit two callers at once —
         // or the next Release would throw. Both are caught by simply using it again.
-        await WaitUntilAsync(async () => await gate.RunAsync(() => 3, onTimeout: -1) == 3,
+        await WaitUntilAsync(async () => await gate.RunAsync(() => 3, onTimeout: -1, Ct) == 3,
             because: "the gate must still be intact after a cancelled wait");
     }
 
@@ -175,8 +182,8 @@ public class CommandGateTests
             return 0;
         }
 
-        var holder = gate.RunAsync(() => Tracked(holderInside, releaseHolder), onTimeout: -1);
-        holderInside.Wait(TimeSpan.FromSeconds(5)).ShouldBeTrue("the first call should be inside the gate");
+        var holder = gate.RunAsync(() => Tracked(holderInside, releaseHolder), onTimeout: -1, Ct);
+        holderInside.Wait(TimeSpan.FromSeconds(5), Ct).ShouldBeTrue("the first call should be inside the gate");
 
         using var cts = new CancellationTokenSource();
         var cancelled = gate.RunAsync(() => Tracked(null, null), onTimeout: -1, cts.Token);
@@ -198,7 +205,7 @@ public class CommandGateTests
         var gate = Gate(time);
         using var release = new ManualResetEventSlim(false);
 
-        var call = gate.RunAsync(() => { release.Wait(); return 7; }, onTimeout: -1);
+        var call = gate.RunAsync(() => { release.Wait(); return 7; }, onTimeout: -1, Ct);
         await WaitUntilPendingAsync(call);
 
         // Just short of the deadline, then the call lands.
@@ -222,7 +229,7 @@ public class CommandGateTests
         for (var i = 0; i < 200; i++)
         {
             if (await condition()) return;
-            await Task.Delay(10);
+            await Task.Delay(10, Ct);
         }
         throw new XunitException($"Timed out waiting: {because}");
     }
