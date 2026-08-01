@@ -447,6 +447,13 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         var (resp, data) = await ptp.SendCommandReceiveDataAsync(
             PtpOperationCode.CanonGetViewfinderData, ct, 0x00200000, 0, 0);
 
+        // "No frame this poll" is an ordinary part of streaming, not a failure: the body answers
+        // ObjectNotReady (0xA102) while its live-view subsystem is still settling, and intermittently
+        // afterwards whenever a read lands between frames. Report it the way a caller can act on —
+        // an empty frame, poll again — which is also what the COM transport reports for the same
+        // condition, since it sees a zero declared size and never gets as far as the response code.
+        if (resp.Code is PtpResponseCode.CanonObjectNotReady) return (EdsError.OK, []);
+
         if (!resp.IsSuccess) return (resp.ToEdsError(), []);
 
         // The payload is a record envelope, not a bare JPEG — see CanonViewfinderFrame.

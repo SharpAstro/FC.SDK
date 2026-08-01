@@ -22,6 +22,11 @@ public sealed class CanonCameraFactory(ILogger<CanonCamera> logger)
     [SupportedOSPlatform("windows")]
     public CanonCamera ConnectWpd(string wpdDeviceId) =>
         new(new WpdPtpTransport(wpdDeviceId), logger);
+
+    /// <inheritdoc cref="CanonCamera.ConnectWpdIoctl(string)"/>
+    [SupportedOSPlatform("windows")]
+    public CanonCamera ConnectWpdIoctl(string wpdDeviceId) =>
+        new(new WpdIoctlPtpTransport(wpdDeviceId), logger);
 }
 
 public sealed class CanonCamera : IAsyncDisposable
@@ -56,6 +61,27 @@ public sealed class CanonCamera : IAsyncDisposable
 
     /// <summary>Camera model name from PTP GetDeviceInfo. Available after session open.</summary>
     public string? Model => _canon.Model;
+
+    /// <summary>
+    /// Which transport this camera is connected through, for diagnostics and bug reports. Behaviour
+    /// can differ between them, so a report that does not say is a report that has to be re-asked for.
+    /// </summary>
+    public string TransportName => _transport switch
+    {
+        WpdPtpTransport => "WPD (COM)",
+        WpdIoctlPtpTransport => "WPD (raw ioctl)",
+        UsbPtpTransport => "USB (WinUSB/libusb)",
+        PtpIpTransport => "PTP/IP (WiFi)",
+        var other => other.GetType().Name,
+    };
+
+    /// <summary>
+    /// Builds a Markdown description of this body — advertised operations, announced properties and
+    /// the decoded Custom Function block. See <see cref="CanonDeviceReport"/> for why it exists and
+    /// what a bug reporter should do with it.
+    /// </summary>
+    public Task<string> CreateDeviceReportAsync(CancellationToken ct = default) =>
+        CanonDeviceReport.CreateAsync(this, ct);
 
     /// <summary>
     /// PTP operation codes the camera advertises. Empty until the session is open. Handy when
@@ -95,6 +121,31 @@ public sealed class CanonCamera : IAsyncDisposable
     [SupportedOSPlatform("windows")]
     public static CanonCamera ConnectWpd(string wpdDeviceId) =>
         new(new WpdPtpTransport(wpdDeviceId), NullLogger<CanonCamera>.Instance);
+
+    /// <summary>
+    /// Creates a connection to the same MTP driver as <see cref="ConnectWpd"/>, but through
+    /// <c>DeviceIoControl</c> on one long-lived handle rather than the WPD COM API — the road EDSDK
+    /// itself takes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Worth choosing for live view, though not for the reason you might expect. Frame rate is the
+    /// same — a 450D streams 20 fps either way, because the body is the limiter. What differs is
+    /// cost: the COM path opens and discards an entire device object per frame (an unfinished
+    /// viewfinder transfer poisons the one it used, and its end phase never returns), and that showed
+    /// up as 73–119 MiB of private working set against 38–47 MiB here over the same 300 frames.
+    /// </para>
+    /// <para>
+    /// Not a superset. The WPD Content API surface — <see cref="EnumerateWpdObjects"/>,
+    /// <see cref="DownloadWpdObjectAsync"/>, <see cref="RegisterWpdObjectAddedCallback"/> — is COM
+    /// only; see <see cref="SupportsWpdContentApi"/> for what to use instead. Everything reached over
+    /// PTP itself, capture and downloads included, works on both. Verified on an EOS 450D; other
+    /// bodies are untried.
+    /// </para>
+    /// </remarks>
+    [SupportedOSPlatform("windows")]
+    public static CanonCamera ConnectWpdIoctl(string wpdDeviceId) =>
+        new(new WpdIoctlPtpTransport(wpdDeviceId), NullLogger<CanonCamera>.Instance);
 
     /// <summary>
     /// Enumerates Canon cameras visible via WPD (Windows Portable Devices).
@@ -553,15 +604,31 @@ public sealed class CanonCamera : IAsyncDisposable
 
     /// <summary>
     /// Current mirror-lockup state. Bodies without the 0xD1BF property cannot report the mirror's
-    /// actual position; once the setting itself is known they fall back to
+    /// actual position; they fall back to
     /// <see cref="EdsMirrorLockupState.Enable"/>/<see cref="EdsMirrorLockupState.Disable"/> derived
-    /// from it. No press-counting inference: on a 450D remote releases do nothing at all while
-    /// lockup is on (see <see cref="MirrorLockupEnabled"/>), so a guessed "mirror up" would be wrong.
+    /// from the setting, wherever that setting happens to live. No press-counting inference: on a
+    /// 450D remote releases do nothing at all while lockup is on (see
+    /// <see cref="MirrorLockupEnabled"/>), so a guessed "mirror up" would be wrong.
     /// </summary>
+    /// <remarks>
+    /// Whether a body keeps mirror lockup as a property or as a Custom Function is not the caller's
+    /// problem, so this resolves the setting itself rather than reporting failure and leaving them to
+    /// discover that <see cref="GetMirrorUpSettingAsync"/> had to be called first. It used to only
+    /// consult the cache, which is null until something else populates it — so on every C.Fn body
+    /// (a 450D, for one) the obvious call answered <see cref="EdsError.DevicePropNotSupported"/> and
+    /// looked like the feature was missing.
+    /// </remarks>
     public async Task<(EdsError Error, EdsMirrorLockupState State)> GetMirrorLockupStateAsync(CancellationToken ct = default)
     {
         var (err, val) = await GetPropertyAsync(EdsPropertyId.MirrorLockUpState, ct);
         if (err is EdsError.OK) return (err, (EdsMirrorLockupState)val);
+
+        if (MirrorLockupEnabled is null)
+        {
+            // Populates MirrorLockupEnabled from the property or the C.Fn block, whichever answers.
+            var (settingErr, _) = await GetMirrorUpSettingAsync(ct);
+            if (settingErr is not EdsError.OK) return (settingErr, (EdsMirrorLockupState)val);
+        }
 
         return MirrorLockupEnabled switch
         {
@@ -853,14 +920,29 @@ public sealed class CanonCamera : IAsyncDisposable
     // --- WPD Content API (hybrid: WPD events + downloads when MTP EXT data-phase fails) ---
 
     /// <summary>
-    /// Whether this camera is connected via WPD. When true, use <see cref="RegisterWpdObjectAddedCallback"/>
-    /// instead of <see cref="StartEventPolling"/> for new-image notifications.
+    /// Whether this camera is connected through Windows Portable Devices — either
+    /// <see cref="ConnectWpd"/> or <see cref="ConnectWpdIoctl"/>.
     /// </summary>
-    public bool IsWpdTransport => _transport is WpdPtpTransport;
+    public bool IsWpdTransport => _transport is IMtpExtTransport;
+
+    /// <summary>
+    /// Whether the WPD Content API is available — object enumeration, downloads by object ID, and
+    /// driver-pushed object-added callbacks.
+    /// </summary>
+    /// <remarks>
+    /// True only for <see cref="ConnectWpd"/>. That API is COM interfaces
+    /// (<c>IPortableDeviceContent</c>, <c>IStream</c>) rather than MTP extension commands, so it has
+    /// no equivalent below the COM layer and <see cref="ConnectWpdIoctl"/> cannot offer it. Nothing
+    /// is lost that matters: the PTP equivalents — <see cref="DownloadAsync"/>,
+    /// <see cref="GetObjectFileNameAsync"/>, and <see cref="ObjectAdded"/> off the event pump — work
+    /// on every transport.
+    /// </remarks>
+    public bool SupportsWpdContentApi => _transport is WpdPtpTransport;
 
     /// <summary>
     /// Registers for WPD object-added events. The callback receives the WPD object ID.
-    /// Only works when <see cref="IsWpdTransport"/> is true.
+    /// Only works when <see cref="SupportsWpdContentApi"/> is true; use <see cref="ObjectAdded"/>
+    /// otherwise.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public void RegisterWpdObjectAddedCallback(Action<string> callback)
@@ -883,13 +965,15 @@ public sealed class CanonCamera : IAsyncDisposable
 
     /// <summary>
     /// Downloads a WPD object by its object ID to a stream.
-    /// Only works when <see cref="IsWpdTransport"/> is true.
+    /// Only works when <see cref="SupportsWpdContentApi"/> is true.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public Task DownloadWpdObjectAsync(string objectId, Stream destination, CancellationToken ct = default)
     {
         if (_transport is not WpdPtpTransport wpd)
-            throw new InvalidOperationException("Not connected via WPD");
+            throw new InvalidOperationException(
+                "The WPD Content API needs the COM transport (ConnectWpd). Use DownloadAsync, which "
+                + "goes through PTP GetObject and works on every transport.");
         return wpd.DownloadObjectAsync(objectId, destination, ct);
     }
 
