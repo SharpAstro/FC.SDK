@@ -662,6 +662,27 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         state.StatusMessage = $"Reset MLU: {err}";
     });
 
+    /// <summary>
+    /// Writes the one file worth attaching to a bug report.
+    /// </summary>
+    /// <remarks>
+    /// The PTP log answers "what happened"; this answers "what is this camera", which is the part
+    /// nobody here can determine for a body they do not own — advertised operations, announced
+    /// properties, and the Custom Function block decoded in wire order so its entries line up with
+    /// the numbers on the reporter's own C.Fn menu. See <see cref="CanonDeviceReport"/>.
+    /// </remarks>
+    public void SaveDeviceReport() => Enqueue("Save device report", async ct =>
+    {
+        if (state.Camera is not { } camera) return;
+
+        Directory.CreateDirectory(state.OutputDirectory);
+        var path = Path.Combine(state.OutputDirectory, $"device-report-{DateTime.Now:yyyyMMdd-HHmmss}.md");
+        await File.WriteAllTextAsync(path, await camera.CreateDeviceReportAsync(ct), ct);
+
+        _logger.LogInformation("Device report written to {Path}", path);
+        state.StatusMessage = $"Device report: {Path.GetFileName(path)}";
+    });
+
     public void ReadCustomFunctions() => Enqueue("Read custom-function block", async ct =>
     {
         if (state.Camera is not { } camera) return;

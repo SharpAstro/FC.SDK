@@ -329,6 +329,9 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             () => _actions.DriveLens(EdsDriveLensStep.NearMedium), enabled: remote));
 
         rows.Add(SectionHeader("Diagnostics"));
+        // First in the section on purpose: it is what a bug report needs, and a reporter should not
+        // have to find it among a dozen probing actions.
+        rows.Add(Button("Save device report", "devreport", _actions.SaveDeviceReport, enabled: open));
         rows.Add(Button("Read all properties", "readall", _actions.ReadAll, enabled: open));
         rows.Add(Button("Drain event queue", "drain", _actions.DrainEvents, enabled: open));
         rows.Add(Button("Dump properties to file", "dump", _actions.DumpProperties, enabled: open));
