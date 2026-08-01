@@ -20,10 +20,15 @@ env:
   # another (the `env` context is not in scope yet), so a composite would have to restate the line and
   # could drift from it. The parts are assembled in the shell at each point of use, where they are
   # ordinary environment variables.
-  VERSION_LINE: '1.6'
+  VERSION_LINE: '1.7'
   VERSION_BUILD: ${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
-  VERSION_SUFFIX: +${{ github.sha }}
+  # No build-metadata suffix on purpose. A `+sha` makes the version SemVer 2.0.0, which NuGet flags
+  # (NU5105) and which is not part of package identity anyway — and ContinuousIntegrationBuild plus
+  # SourceLink already record the exact commit in the symbols. There used to be a VERSION_SUFFIX here
+  # alongside a `${VERSION_HASH}` reference in the build step; the names never matched, so the suffix
+  # was silently dropped and every package published so far has a clean version. Removing both rather
+  # than connecting them keeps it that way: NuGet versions can be unlisted but never replaced.
   BUILD_CONF: Release
 
 jobs:
@@ -64,7 +69,7 @@ jobs:
       # Version assembled here rather than in env, so the release line is stated exactly once.
       # Concatenating VERSION_REV (not dotting it) preserves the existing scheme: run 53 attempt 1
       # is 1.5.531, matching the 1.4.4xx/1.4.5xx packages already on nuget.org.
-      run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_LINE}.${VERSION_BUILD}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_LINE}.${VERSION_BUILD}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
+      run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_LINE}.${VERSION_BUILD}${VERSION_REV} -p:FileVersion=${VERSION_LINE}.${VERSION_BUILD}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
     - name: Test
       run: dotnet test -c $BUILD_CONF --no-build --verbosity normal
     - name: Upload Artifact
