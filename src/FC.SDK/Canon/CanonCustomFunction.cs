@@ -41,9 +41,22 @@ public sealed class CanonCustomFunctionBlock
     private readonly Dictionary<uint, uint> _functions = new();
     private readonly Dictionary<uint, uint> _groupOfFunction = new();
     private readonly Dictionary<uint, int> _valueOffset = new();
+    private readonly List<CanonCustomFunctionEntry> _entries = [];
 
     /// <summary>All C.Fn entries: function ID → current value.</summary>
     public IReadOnlyDictionary<uint, uint> Functions => _functions;
+
+    /// <summary>
+    /// Every entry in the order the camera sent it.
+    /// </summary>
+    /// <remarks>
+    /// Order is the whole point of this list, and the reason it exists alongside
+    /// <see cref="Functions"/>: group order and entry-within-group order match the body's own C.Fn
+    /// menu, item for item (verified on a 450D). That is what lets a reporter who cannot know wire
+    /// ids say "menu C.Fn 5 is Mirror lockup" and have the id fall out — see
+    /// <c>docs/canon-custom-functions.md</c>. A dictionary cannot promise that ordering.
+    /// </remarks>
+    public IReadOnlyList<CanonCustomFunctionEntry> Entries => _entries;
 
     /// <summary>
     /// Function ID → the C.Fn group it belongs to (1..4, matching the camera menu's C.Fn I..IV).
@@ -104,9 +117,11 @@ public sealed class CanonCustomFunctionBlock
                 uint funcId = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry));
                 uint valueCount = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 4));
 
-                block._functions[funcId] = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 8));
+                uint value = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 8));
+                block._functions[funcId] = value;
                 block._groupOfFunction[funcId] = groupId;
                 block._valueOffset[funcId] = entry + 8;
+                block._entries.Add(new CanonCustomFunctionEntry(groupId, funcId, value, block._entries.Count + 1));
 
                 // Honour value_count even though every entry observed so far carries exactly one.
                 entry += 8 + (int)Math.Max(1u, valueCount) * 4;
@@ -120,6 +135,20 @@ public sealed class CanonCustomFunctionBlock
         return block;
     }
 }
+
+/// <summary>
+/// One Custom Function entry, as it appeared on the wire.
+/// </summary>
+/// <param name="GroupId">The C.Fn group, 1..4 — the camera menu's C.Fn I..IV.</param>
+/// <param name="FunctionId">The wire id, e.g. <c>0x060F</c>. Per-model; never guess one.</param>
+/// <param name="Value">The current value.</param>
+/// <param name="MenuNumber">
+/// Position in the block counting from 1 across all groups. On a 450D this is exactly the number
+/// beside the setting in the camera's own C.Fn menu, which is the one thing a reporter can read off
+/// their body without knowing anything about the protocol.
+/// </param>
+public readonly record struct CanonCustomFunctionEntry(
+    uint GroupId, uint FunctionId, uint Value, int MenuNumber);
 
 /// <summary>
 /// Well-known Canon Custom Function IDs. These are camera-specific — the same setting
@@ -140,6 +169,12 @@ public static class CanonCustomFunctionId
     // group_id matches that grouping, and entry order within a group matches menu order. Earlier
     // values here (1, 2, 7) were the menu's item numbers, which are NOT the wire ids.
 
+    /// <summary>Menu C.Fn 1 (group I, "Exposure"): exposure level increments. 0=1/3-stop, 1=1/2-stop.</summary>
+    public const uint ExposureLevelIncrements_450D = 0x0101;
+
+    /// <summary>Menu C.Fn 2 (group I): flash sync speed in Av mode. 0=Auto, 1=1/200 fixed.</summary>
+    public const uint FlashSyncSpeedInAvMode_450D = 0x010F;
+
     /// <summary>Menu C.Fn 3 (group II, "Image"): long exposure noise reduction. 0=Off, 1=Auto, 2=On.</summary>
     public const uint LongExposureNR_450D = 0x0201;
 
@@ -152,8 +187,26 @@ public static class CanonCustomFunctionId
     /// <summary>Menu C.Fn 6 (group II): Auto Lighting Optimizer.</summary>
     public const uint AutoLightingOptimizer_450D = 0x0204;
 
+    /// <summary>Menu C.Fn 7 (group III, "Autofocus/Drive"): AF-assist beam firing.</summary>
+    public const uint AfAssistBeamFiring_450D = 0x050E;
+
+    /// <summary>Menu C.Fn 8 (group III): AF during Live View shooting. 0=Disable, 1=Enable.</summary>
+    public const uint AfDuringLiveView_450D = 0x0511;
+
     /// <summary>Menu C.Fn 9 (group III, "Autofocus/Drive"): mirror lockup. 0=Disable, 1=Enable.</summary>
     public const uint MirrorLockup_450D = 0x060F;
+
+    /// <summary>Menu C.Fn 10 (group IV, "Operation/Others"): shutter / AE lock button behaviour.</summary>
+    public const uint ShutterAeLockButton_450D = 0x0701;
+
+    /// <summary>Menu C.Fn 11 (group IV): SET button function when shooting.</summary>
+    public const uint SetButtonWhenShooting_450D = 0x0704;
+
+    /// <summary>Menu C.Fn 12 (group IV): LCD display when power ON.</summary>
+    public const uint LcdDisplayWhenPowerOn_450D = 0x0811;
+
+    /// <summary>Menu C.Fn 13 (group IV): add original decision data. 0=Off, 1=On.</summary>
+    public const uint AddOriginalDecisionData_450D = 0x080F;
 
     /// <summary>
     /// The C.Fn id for mirror lockup on <paramref name="model"/>, or null when the body exposes MLU
