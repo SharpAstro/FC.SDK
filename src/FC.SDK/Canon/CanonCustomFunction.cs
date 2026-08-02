@@ -231,6 +231,22 @@ public static class CanonCustomFunctionId
         _ => null,
     };
 
+    /// <summary>
+    /// The C.Fn id for long-exposure noise reduction, or null when the body exposes it as a plain
+    /// shooting-menu property instead, or when its id here is simply unverified. Same
+    /// verified-bodies-only rule as <see cref="MirrorLockupIdFor"/>.
+    /// </summary>
+    /// <remarks>
+    /// This completes the trio: without it a caller wanting to switch long-exposure NR off had to
+    /// carry the model table itself, which is the knowledge this class exists to hold. TianWen was
+    /// doing exactly that, against two ids (a "6D" and a "Rebel") that were guesses and are gone.
+    /// </remarks>
+    public static uint? LongExposureNrIdFor(string? model) => model switch
+    {
+        not null when Is450DFamily(model) => LongExposureNR_450D,
+        _ => null,
+    };
+
     private static bool Is450DFamily(string model) =>
         model.Contains("450D") || model.Contains("XSi") || model.Contains("Kiss X2");
 }
