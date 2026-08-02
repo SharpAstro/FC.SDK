@@ -21,6 +21,22 @@
       AND Exists('$(MSBuildThisFileDirectory)..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj')">true</UseLocalSiblings>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <!-- THE release line for every package in this repo, and the only place it is written. It used
+         to live solely in .github/workflows/dotnet.yml as VERSION_LINE, which meant no csproj here
+         carried a version at all: CI stamped one -p:Version over everything, and a LOCAL dotnet pack
+         produced 1.0.0, the SDK default. That is the same class of bug that had DIR.Lib.Shaping
+         shipping a major behind DIR.Lib, just with the number missing rather than stale.
+         The workflow now READS this back (dotnet msbuild -getProperty:VersionMajorMinor) in each job
+         that needs it, so a release bump is this one line. Each job resolves it independently rather
+         than taking a job output, because publish-viewer deliberately runs in PARALLEL with build;
+         they cannot disagree, since they read the same file at the same commit. -->
+    <VersionMajorMinor>1.7</VersionMajorMinor>
+    <!-- Local builds get Major.Minor.0; CI passes -p:Version=Major.Minor.<run><attempt>, and the
+         condition lets it win. -->
+    <VersionPrefix Condition="'$(VersionPrefix)' == ''">$(VersionMajorMinor).0</VersionPrefix>
+  </PropertyGroup>
+
   <!-- SIBLING_DEBUG_INSPECTORS is defined in Directory.Build.targets, not here: this file is
        imported before the SDK defaults $(Configuration), so a Configuration test would silently
        read empty on any build that did not pass -c explicitly. -->

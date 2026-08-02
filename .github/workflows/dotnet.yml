@@ -12,15 +12,17 @@ on:
   workflow_dispatch:
 
 env:
-  # The release line, and the only number a human picks. The viewer, the release tag and anything we
-  # quote to a user are ALWAYS just major.minor — 1.6, then 1.7. The libraries append the run number
-  # and attempt so every push to main is a distinct NuGet version.
+  # The release line is NOT here any more. It lives in src/Directory.Build.props
+  # (VersionMajorMinor) and each job that needs it reads it back, so it cannot drift from what the
+  # packages declare and a LOCAL dotnet pack stamps the same line CI does. It used to be VERSION_LINE
+  # here and nowhere else, which meant no csproj carried a version at all and a local pack produced
+  # the SDK default 1.0.0.
   #
-  # Deliberately NOT a composite VERSION_PREFIX here: a workflow-level env value cannot reference
-  # another (the `env` context is not in scope yet), so a composite would have to restate the line and
-  # could drift from it. The parts are assembled in the shell at each point of use, where they are
-  # ordinary environment variables.
-  VERSION_LINE: '1.7'
+  # It stays a bare major.minor: the viewer, the release tag and anything we quote to a user are
+  # ALWAYS just that — 1.6, then 1.7. The libraries append the run number and attempt so every push to
+  # main is a distinct NuGet version, assembled in the shell at each point of use. Deliberately NOT a
+  # composite: a workflow-level env value cannot reference another (the `env` context is not in scope
+  # yet), so a composite would have to restate the line and could drift from it.
   VERSION_BUILD: ${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   # No build-metadata suffix on purpose. A `+sha` makes the version SemVer 2.0.0, which NuGet flags
@@ -30,11 +32,18 @@ env:
   # was silently dropped and every package published so far has a clean version. Removing both rather
   # than connecting them keeps it that way: NuGet versions can be unlisted but never replaced.
   BUILD_CONF: Release
+  # Three jobs CAPTURE a dotnet invocation's stdout to resolve the release line, so the SDK's
+  # first-run banner must not be able to land in it.
+  DOTNET_NOLOGO: 1
 
 jobs:
   build:
 
     runs-on: ubuntu-latest
+    # Consumed by `release`, which downloads artifacts and never checks the repo out, so it has no
+    # src/Directory.Build.props of its own to read the line from.
+    outputs:
+      version-line: ${{ steps.version.outputs.line }}
 
     steps:
     - uses: actions/checkout@v4
@@ -63,6 +72,23 @@ jobs:
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
+    - name: Resolve release line
+      id: version
+      # Read the line back from the one place it is written (src/Directory.Build.props) instead of
+      # restating it here. -getProperty only EVALUATES the file: nothing is built and no restore is
+      # needed, so this can run before restore. The value is CAPTURED, so nothing else may print to
+      # stdout: DOTNET_NOLOGO (workflow env) keeps the SDK first-run banner out, and the shape check
+      # makes anything unexpected, or a renamed property, fail the run rather than quietly building
+      # everything as ".<run>". Published as a job output for `release`, which has no checkout of its
+      # own to read the file from.
+      run: |
+        MM="$(dotnet msbuild src/Directory.Build.props -getProperty:VersionMajorMinor -nologo)"
+        case "$MM" in
+          [0-9]*.[0-9]*) ;;
+          *) echo "::error::VersionMajorMinor did not resolve from src/Directory.Build.props (got '$MM')"; exit 1 ;;
+        esac
+        echo "VERSION_LINE=${MM}" >> "$GITHUB_ENV"
+        echo "line=${MM}" >> "$GITHUB_OUTPUT"
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
@@ -134,6 +160,19 @@ jobs:
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
+    - name: Resolve release line
+      # Resolved here rather than taken from `build`, because this job deliberately runs in PARALLEL
+      # with it (see the comment above the job) and a needs: would serialise the two. They read the
+      # same file at the same commit, so they cannot disagree. Explicit bash: half this matrix is
+      # Windows, where the default shell is pwsh and the case statement would not parse.
+      shell: bash
+      run: |
+        MM="$(dotnet msbuild src/Directory.Build.props -getProperty:VersionMajorMinor -nologo)"
+        case "$MM" in
+          [0-9]*.[0-9]*) ;;
+          *) echo "::error::VersionMajorMinor did not resolve from src/Directory.Build.props (got '$MM')"; exit 1 ;;
+        esac
+        echo "VERSION_LINE=${MM}" >> "$GITHUB_ENV"
     - name: Publish FC.SDK.Viewer
       shell: bash
       # Version is the release line (1.6) because that is what the viewer is called everywhere;
@@ -157,6 +196,10 @@ jobs:
     needs: [build, publish-viewer]
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Inherited from build rather than resolved here: this job only downloads artifacts, so it has no
+    # checkout and therefore no src/Directory.Build.props to read.
+    env:
+      VERSION_LINE: ${{ needs.build.outputs.version-line }}
     permissions:
       contents: write
     steps:
