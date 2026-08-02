@@ -401,9 +401,15 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
 
     internal async Task<EdsError> BulbStartAsync(CancellationToken ct = default)
     {
-        // AF first
-        var err = await RemoteReleaseOnAsync(0x01, ct);
-        if (err is not EdsError.OK) return err;
+        // AF half-press first — but only on bodies that have the on/off release pair. A 450D does
+        // not (no 0x9128/0x9129), and the unconditional prelude here used to fail the whole wrapper
+        // with NotSupported *before 0x9125 was ever sent* — making bulb look unsupported on a body
+        // that advertises it. Discovered live: the "refusal" was ours, not the camera's.
+        if (IsOperationSupported(PtpOperationCode.CanonRemoteReleaseOn))
+        {
+            var err = await RemoteReleaseOnAsync(0x01, ct);
+            if (err is not EdsError.OK) return err;
+        }
 
         var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonBulbStart, ct);
         return resp.ToEdsError();
@@ -414,8 +420,11 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonBulbEnd, ct);
         var err = resp.ToEdsError();
 
-        // Release AF
-        await RemoteReleaseOffAsync(0x01, ct);
+        // Release the AF half-press, on the bodies where BulbStartAsync made one.
+        if (IsOperationSupported(PtpOperationCode.CanonRemoteReleaseOn))
+        {
+            await RemoteReleaseOffAsync(0x01, ct);
+        }
 
         return err;
     }

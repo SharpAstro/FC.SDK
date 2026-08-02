@@ -103,8 +103,82 @@ internal sealed class WpdIoctlPtpTransport : IMtpExtTransport
         set => _gate.Timeout = value;
     }
 
+    /// <summary>
+    /// A DeviceInfo dataset opens with StandardVersion (u16), VendorExtensionID (u32) and
+    /// VendorExtensionVersion (u16) before its first string, so anything shorter than eight bytes is
+    /// not the payload we asked for — whatever the response code claimed.
+    /// </summary>
+    private const int MinDeviceInfoLength = 8;
+
+    /// <summary>
+    /// Opens the transport and proves it can carry a complete three-phase read, so a caller can pick
+    /// between this transport and <see cref="WpdPtpTransport"/> while that choice is still free.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The probe is <c>GetDeviceInfo</c> (0x1001) rather than the connect handshake alone, and that
+    /// is the entire point of it. <see cref="ConnectAsync"/> opens a handle and introduces the
+    /// client; it exercises none of the property-bag encoding this transport hand-rolls. The failure
+    /// that most justifies having a fallback at all — a driver that will not accept the bags we
+    /// serialize — would therefore sail straight past a connect-only check and strand the caller
+    /// mid-session, where switching transports is no longer possible. 0x1001 runs
+    /// initiate → read → end and returns a dataset whose size we did not choose, exercising the
+    /// encoder, the reader and the transfer-context handling in one command.
+    /// </para>
+    /// <para>
+    /// It is also free to abandon. PTP allows GetDeviceInfo outside a session, so a probe that fails
+    /// leaves the camera exactly as it found it: no session, no transaction counter, no remote mode,
+    /// nothing for the COM transport to inherit. That is what makes this the last moment at which
+    /// the two are interchangeable, and why the choice is made here rather than on first error.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// The connected transport, or the reason it was rejected. A non-null failure is a diagnosis
+    /// rather than an error — the caller is expected to fall back and carry on.
+    /// </returns>
+    internal static async Task<(WpdIoctlPtpTransport? Transport, string? Failure)> TryConnectAsync(
+        string deviceId, TimeProvider? timeProvider = null, CancellationToken ct = default)
+    {
+        var transport = new WpdIoctlPtpTransport(deviceId, timeProvider);
+        try
+        {
+            await transport.ConnectAsync(ct).ConfigureAwait(false);
+
+            var (code, _, data) = await transport
+                .ExecuteCommandReadDataAsync((ushort)PtpOperationCode.GetDeviceInfo, [], ct)
+                .ConfigureAwait(false);
+
+            // A wedged command comes back as LocalTimeout from the gate rather than an exception,
+            // so the response code covers the hang case as well as an outright refusal.
+            if (code is not (ushort)PtpResponseCode.OK)
+            {
+                return await RejectAsync(transport, $"GetDeviceInfo answered 0x{code:X4}").ConfigureAwait(false);
+            }
+
+            return data.Length >= MinDeviceInfoLength
+                ? (transport, null)
+                : await RejectAsync(transport, $"GetDeviceInfo returned {data.Length} bytes").ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is COMException or IOException or InvalidOperationException)
+        {
+            return await RejectAsync(transport, ex.Message).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<(WpdIoctlPtpTransport?, string?)> RejectAsync(
+        WpdIoctlPtpTransport transport, string failure)
+    {
+        await transport.DisposeAsync().ConfigureAwait(false);
+        return (null, failure);
+    }
+
     public async Task ConnectAsync(CancellationToken ct = default)
     {
+        // Idempotent, because TryConnectAsync hands an already-connected transport to CanonCamera and
+        // OpenSessionAsync connects again as a matter of course. Without this the second call would
+        // orphan the first handle and re-run a handshake the driver has already accepted.
+        if (_device is not null) return;
+
         var device = WpdIoctlDevice.Open(_deviceId);
         try
         {

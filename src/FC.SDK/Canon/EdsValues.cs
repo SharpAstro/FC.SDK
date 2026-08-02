@@ -38,7 +38,11 @@ public enum EdsISOSpeed : uint
 /// <summary>Canon shutter speed (Tv) values. Set via <see cref="EdsPropertyId.Tv"/>.</summary>
 public enum EdsTv : uint
 {
-    Bulb = 0x04,
+    // 0x0C, not 0x04: 0x04 is the old PowerShot-protocol bulb. Verified on a real 450D — 0x0C is
+    // what its allowed-value list announces and what flips the top LCD to "buLb" when written —
+    // and matches libgphoto2's EOS Tv table. Bulb is an ordinary settable Tv value on such bodies,
+    // the 53rd entry after the 30s..1/4000 run; there is no separate mode to enter.
+    Bulb = 0x0C,
     Tv_30s = 0x10,
     Tv_25s = 0x13,
     Tv_20s = 0x15,
@@ -202,6 +206,22 @@ public enum EdsMeteringMode : uint
 }
 
 /// <summary>Canon drive mode. Set via <see cref="EdsPropertyId.DriveMode"/>.</summary>
+/// <remarks>
+/// <para>
+/// <b>These are EDSDK's names, and the self-timer ones do not match measured behaviour.</b> Read the
+/// body's own list with <see cref="FC.SDK.CanonCamera.GetAllowedValuesAsync"/> and time the value
+/// before trusting any name here — a mistimed self-timer costs dead time per frame and reports no
+/// error at all, so nothing else will tell you.
+/// </para>
+/// <para>
+/// Measured on an EOS 450D and an EOS 6D, which agree with each other and disagreed with EDSDK's
+/// names: 0x10 runs for roughly <i>ten</i> seconds on both although EDSDK calls it <c>2sec</c>, and
+/// the real two-second timer is 0x11, a value EDSDK's table does not name at all. Both were renamed
+/// in 2.0 — <see cref="Timer_10sec"/> and <see cref="Timer_2sec"/> — rather than left as a silent
+/// 5× error that no response code would ever reveal. <see cref="Timer_10sec_RemoteControl"/> (0x07)
+/// keeps EDSDK's name because only one body offers it and its behaviour there is not understood.
+/// </para>
+/// </remarks>
 public enum EdsDriveMode : uint
 {
     SingleShooting = 0x00,
@@ -210,8 +230,32 @@ public enum EdsDriveMode : uint
     HighSpeedContinuous = 0x04,
     LowSpeedContinuous = 0x05,
     SilentSingleShooting = 0x06,
+
+    /// <summary>
+    /// EDSDK's name for 0x07, kept because nothing here has verified it. A 450D answers this value
+    /// with a ~10 s delay and then a <b>six-frame burst</b> rather than one frame — enough
+    /// un-fetched host-destination frames to make the body go busy. A 6D does not offer 0x07 at all,
+    /// so there is no second body to check against and no honest basis for renaming it.
+    /// </summary>
     Timer_10sec_RemoteControl = 0x07,
-    Timer_2sec_RemoteControl = 0x10,
+
+    /// <summary>
+    /// Ten-second self-timer, one frame. EDSDK calls this value <c>2sec</c>; measured at ~10.3 s on
+    /// a 6D and ~10.8 s on a 450D, which is why it no longer carries that name.
+    /// </summary>
+    Timer_10sec = 0x10,
+
+    /// <summary>
+    /// Two-second self-timer, one frame — ~2.9 s release-to-image on a 6D, ~3.0 s on a 450D. Absent
+    /// from EDSDK's table entirely, yet offered by both bodies in their allowed-value lists.
+    /// </summary>
+    /// <remarks>
+    /// The one to pair with mirror lockup on bodies that honour it (a 6D does, in a self-timer drive
+    /// mode only): the mirror rises at the release, the body settles, and it exposes on its own, so
+    /// a host that dies mid-sequence cannot strand the mirror up.
+    /// </remarks>
+    Timer_2sec = 0x11,
+
     SingleSilentShooting = 0x13,
     ContinuousSilentShooting = 0x14,
     Unknown = 0xFFFFFFFF,

@@ -35,6 +35,10 @@ internal sealed partial class WpdPtpTransport : IMtpExtTransport
 
     public Task ConnectAsync(CancellationToken ct = default)
     {
+        // Idempotent for the same reason the ioctl transport's is: a caller may connect a transport
+        // before handing it to CanonCamera, whose OpenSessionAsync then connects it again.
+        if (_device is not null) return Task.CompletedTask;
+
         _device = WpdInterop.CreateInstance<IWpdDevice>(WpdInterop.CLSID_PortableDevice);
         Marshal.ThrowExceptionForHR(_device.Open(_deviceId, CreateClientInfo()));
         return Task.CompletedTask;
