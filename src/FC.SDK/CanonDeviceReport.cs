@@ -41,6 +41,12 @@ public static class CanonDeviceReport
         report.AppendLine($"- Model: `{camera.Model ?? "(unknown)"}`");
         report.AppendLine($"- Serial: `{camera.SerialNumber ?? "(unknown)"}`");
         report.AppendLine($"- Transport: {camera.TransportName}");
+        if (camera.TransportFallbackReason is { } fallback)
+        {
+            // Only set when auto-selection tried the ioctl transport and was turned away. Worth a
+            // line of its own: it is the one piece of the story the reporter cannot see afterwards.
+            report.AppendLine($"  - Raw ioctl was rejected: {fallback}");
+        }
         report.AppendLine($"- Battery: {(camera.BatteryLevelPercent is { } b ? $"{b}%" : "not reported")}");
         report.AppendLine();
 

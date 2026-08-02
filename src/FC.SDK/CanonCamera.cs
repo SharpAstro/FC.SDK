@@ -27,6 +27,11 @@ public sealed class CanonCameraFactory(ILogger<CanonCamera> logger)
     [SupportedOSPlatform("windows")]
     public CanonCamera ConnectWpdIoctl(string wpdDeviceId) =>
         new(new WpdIoctlPtpTransport(wpdDeviceId), logger);
+
+    /// <inheritdoc cref="CanonCamera.ConnectWpdAutoAsync(string, CancellationToken)"/>
+    [SupportedOSPlatform("windows")]
+    public Task<CanonCamera> ConnectWpdAutoAsync(string wpdDeviceId, CancellationToken ct = default) =>
+        CanonCamera.ConnectWpdAutoCoreAsync(wpdDeviceId, logger, ct);
 }
 
 public sealed class CanonCamera : IAsyncDisposable
@@ -74,6 +79,16 @@ public sealed class CanonCamera : IAsyncDisposable
         PtpIpTransport => "PTP/IP (WiFi)",
         var other => other.GetType().Name,
     };
+
+    /// <summary>
+    /// Why <see cref="ConnectWpdAutoAsync"/> fell back to the COM transport, or null if it did not
+    /// have to — including on every connection made through any other factory.
+    /// </summary>
+    /// <remarks>
+    /// Carried so a device report can say it out loud. "This body is on COM" invites the question
+    /// "why", and the answer is only knowable at the moment the probe was rejected.
+    /// </remarks>
+    public string? TransportFallbackReason { get; private init; }
 
     /// <summary>
     /// Builds a Markdown description of this body — advertised operations, announced properties and
@@ -146,6 +161,53 @@ public sealed class CanonCamera : IAsyncDisposable
     [SupportedOSPlatform("windows")]
     public static CanonCamera ConnectWpdIoctl(string wpdDeviceId) =>
         new(new WpdIoctlPtpTransport(wpdDeviceId), NullLogger<CanonCamera>.Instance);
+
+    /// <summary>
+    /// Connects through <see cref="ConnectWpdIoctl"/> when this driver accepts it, and through
+    /// <see cref="ConnectWpd"/> when it does not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The choice is made once, before any PTP session exists, and never revisited. That is not
+    /// timidity — it is the only point where the two are interchangeable. Once
+    /// <see cref="OpenSessionAsync"/> has run, state is spread across the transaction counter, the
+    /// camera's own session and remote-mode flags, and any open transfer context, which belongs to
+    /// the handle and dies with it. Failing over at that point would reconnect into a body that
+    /// still believes it is mid-transfer with a client that has gone; recovering from that is a
+    /// deliberate reconnect, not something a transport should do behind the caller's back.
+    /// </para>
+    /// <para>
+    /// The probe is a real <c>GetDeviceInfo</c> read rather than a bare connect, because a bare
+    /// connect proves almost nothing this fallback exists to guard against — see
+    /// <c>WpdIoctlPtpTransport.TryConnectAsync</c>.
+    /// </para>
+    /// <para>
+    /// A fallback is logged at warning level and left on <see cref="TransportFallbackReason"/>, and
+    /// <see cref="TransportName"/> always says which road was taken. Silence here would produce bug
+    /// reports about live-view memory from people with no way to know they were on COM.
+    /// </para>
+    /// </remarks>
+    [SupportedOSPlatform("windows")]
+    public static Task<CanonCamera> ConnectWpdAutoAsync(string wpdDeviceId, CancellationToken ct = default) =>
+        ConnectWpdAutoCoreAsync(wpdDeviceId, NullLogger<CanonCamera>.Instance, ct);
+
+    [SupportedOSPlatform("windows")]
+    internal static async Task<CanonCamera> ConnectWpdAutoCoreAsync(
+        string wpdDeviceId, ILogger<CanonCamera> logger, CancellationToken ct)
+    {
+        var (ioctl, failure) = await WpdIoctlPtpTransport.TryConnectAsync(wpdDeviceId, ct: ct);
+        if (ioctl is not null)
+        {
+            logger.LogDebug("WPD raw ioctl accepted for {DeviceId}", wpdDeviceId);
+            return new CanonCamera(ioctl, logger);
+        }
+
+        logger.LogWarning(
+            "WPD raw ioctl rejected for {DeviceId} ({Failure}); falling back to the COM transport, "
+            + "which costs roughly twice the working set during live view.", wpdDeviceId, failure);
+
+        return new CanonCamera(new WpdPtpTransport(wpdDeviceId), logger) { TransportFallbackReason = failure };
+    }
 
     /// <summary>
     /// Enumerates Canon cameras visible via WPD (Windows Portable Devices).
@@ -232,6 +294,8 @@ public sealed class CanonCamera : IAsyncDisposable
     public async Task<EdsError> CloseSessionAsync(CancellationToken ct = default)
     {
         _logger.LogDebug("Closing PTP session");
+        // Before the session goes, not after: a handle only means anything inside it.
+        await ReleasePendingTransfersAsync(ct);
         return await _canon.CloseAsync(ct);
     }
 
@@ -373,10 +437,12 @@ public sealed class CanonCamera : IAsyncDisposable
         if (IsPropertyAnnounced(EdsPropertyId.MirrorUpSetting))
         {
             err = await SetPropertyAsync(EdsPropertyId.MirrorUpSetting, (uint)setting, ct);
+            NoteMirrorLockupSource(customFunction: false);
         }
         else if (CanonCustomFunctionId.MirrorLockupIdFor(Model) is { } cfnId)
         {
             err = await SetCustomFunctionValueAsync(cfnId, (uint)setting, ct);
+            NoteMirrorLockupSource(customFunction: true);
         }
         else
         {
@@ -389,6 +455,13 @@ public sealed class CanonCamera : IAsyncDisposable
         }
         return err;
     }
+
+    /// <summary>
+    /// Records which of the two homes answered, so <see cref="SupportsMirrorLockupCapture"/> can be
+    /// inferred from a write as well as a read — a caller that only ever sets the value should not
+    /// have to also read it back before capture knows to refuse.
+    /// </summary>
+    private void NoteMirrorLockupSource(bool customFunction) => MirrorLockupIsCustomFunction = customFunction;
 
     /// <summary>
     /// Whether the camera itself has announced this property on the event stream. The write path
@@ -527,6 +600,8 @@ public sealed class CanonCamera : IAsyncDisposable
     {
         _logger.LogDebug("Taking picture");
 
+        if (MirrorLockupRefusal() is { } refused) return refused;
+
         // Clear the event queue first — the camera reports busy and can drop the release if it
         // still has records waiting to be read.
         await _canon.DrainEventsAsync(ct);
@@ -575,6 +650,10 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<EdsError> BulbStartAsync(CancellationToken ct = default)
     {
         _logger.LogDebug("Bulb start");
+        // Bulb is discarded by mirror lockup exactly as an ordinary release is — verified on a 450D,
+        // where an armed body emits no BulbExposureTime ticks at all, so the exposure never begins.
+        // Refusing here rather than at BulbEnd keeps a caller from timing a counter against nothing.
+        if (MirrorLockupRefusal() is { } refused) return Task.FromResult(refused);
         return _canon.BulbStartAsync(ct);
     }
 
@@ -645,6 +724,7 @@ public sealed class CanonCamera : IAsyncDisposable
     public async Task<(EdsError Error, EdsMirrorUpSetting Setting)> GetMirrorUpSettingAsync(CancellationToken ct = default)
     {
         var (err, val) = await GetPropertyAsync(EdsPropertyId.MirrorUpSetting, ct);
+        if (err is EdsError.OK) MirrorLockupIsCustomFunction = false;
 
         if (err is not EdsError.OK && CanonCustomFunctionId.MirrorLockupIdFor(Model) is { } cfnId)
         {
@@ -652,11 +732,68 @@ public sealed class CanonCamera : IAsyncDisposable
             if (cfnErr is EdsError.OK)
             {
                 (err, val) = (EdsError.OK, cfnValue);
+                MirrorLockupIsCustomFunction = true;
             }
         }
 
         if (err is EdsError.OK) MirrorLockupEnabled = val != 0;
         return (err, (EdsMirrorUpSetting)val);
+    }
+
+    /// <summary>
+    /// Where this body keeps its mirror-lockup setting: <c>true</c> for the Custom Function block,
+    /// <c>false</c> for the <see cref="EdsPropertyId.MirrorUpSetting"/> property, null until one of
+    /// them has answered.
+    /// </summary>
+    /// <remarks>
+    /// Also the best available predictor of whether remote capture works at all with lockup armed —
+    /// see <see cref="SupportsMirrorLockupCapture"/>.
+    /// </remarks>
+    public bool? MirrorLockupIsCustomFunction { get; private set; }
+
+    /// <summary>
+    /// Whether a remote release can be expected to produce an exposure while mirror lockup is armed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// There is no capability bit for this, so it is inferred from where the setting lives: bodies
+    /// that keep mirror lockup as a Custom Function are the older ones, and on those the firmware
+    /// discards remote releases entirely while it is armed. Measured on a 450D across nine sequences
+    /// — single release, double release, three self-timer drive modes, and four bulb arrangements —
+    /// every one silent, against controls that exposed. A 6D, which has the real
+    /// <see cref="EdsPropertyId.MirrorUpSetting"/> property, exposes normally instead. NINA draws the
+    /// same line and refuses with the same advice ("turn MLU off under the camera's Custom Function
+    /// menu"), which is independent corroboration from an EDSDK-based client.
+    /// </para>
+    /// <para>
+    /// It is a heuristic over two measured bodies, not a documented rule, so it is overridable: set
+    /// it explicitly to force capture through on a body where it is wrong. Erring toward refusal is
+    /// deliberate — the alternative is what this SDK used to do, which is answer OK to a release the
+    /// camera silently threw away and leave the caller waiting for an image that never comes.
+    /// </para>
+    /// </remarks>
+    public bool SupportsMirrorLockupCapture
+    {
+        get => _supportsMirrorLockupCapture ?? MirrorLockupIsCustomFunction is not true;
+        set => _supportsMirrorLockupCapture = value;
+    }
+
+    private bool? _supportsMirrorLockupCapture;
+
+    /// <summary>
+    /// The refusal shared by every capture entry point, or null when the release should go ahead.
+    /// </summary>
+    private EdsError? MirrorLockupRefusal()
+    {
+        if (MirrorLockupEnabled is not true || SupportsMirrorLockupCapture) return null;
+
+        _logger.LogError(
+            "{Model} is configured with mirror lockup on, but it does not support mirror-lockup "
+            + "exposures over PTP: the camera answers OK and then does nothing at all — no mirror, no "
+            + "event, no image. Turn mirror lockup off (Custom Function menu) for exposures to "
+            + "succeed, or set SupportsMirrorLockupCapture if this body is an exception.",
+            Model ?? "This camera");
+        return EdsError.OperationRefused;
     }
 
     // --- Custom Function block (older cameras) ---
@@ -697,8 +834,54 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<EdsError> DownloadAsync(uint objectHandle, Stream destination, CancellationToken ct = default) =>
         _canon.GetObjectAsync(objectHandle, destination, ct);
 
-    public async Task<EdsError> TransferCompleteAsync(uint objectHandle, CancellationToken ct = default) =>
-        await _canon.TransferCompleteAsync(objectHandle, ct);
+    public async Task<EdsError> TransferCompleteAsync(uint objectHandle, CancellationToken ct = default)
+    {
+        lock (_pendingHostTransfers) _pendingHostTransfers.Remove(objectHandle);
+        return await _canon.TransferCompleteAsync(objectHandle, ct);
+    }
+
+    /// <summary>
+    /// Handles announced by <see cref="CanonEventType.RequestObjectTransfer"/> that nobody has
+    /// finished with yet — frames the body is holding in its own RAM on our behalf.
+    /// </summary>
+    /// <remarks>
+    /// Only the host-destination families are tracked. A card-destination frame belongs to the card
+    /// and costs the body nothing to leave alone; a host-destination one occupies it until
+    /// <see cref="TransferCompleteAsync"/> arrives, and enough of them will stop it releasing at all.
+    /// </remarks>
+    private readonly HashSet<uint> _pendingHostTransfers = [];
+
+    /// <summary>
+    /// Hands back every frame the body is still holding for us. Best-effort and never throws: this
+    /// runs on the way out, where the useful outcome is a camera left able to shoot.
+    /// </summary>
+    private async Task ReleasePendingTransfersAsync(CancellationToken ct)
+    {
+        uint[] pending;
+        lock (_pendingHostTransfers)
+        {
+            if (_pendingHostTransfers.Count is 0) return;
+            pending = [.. _pendingHostTransfers];
+            _pendingHostTransfers.Clear();
+        }
+
+        _logger.LogWarning(
+            "Closing with {Count} host-destination frame(s) the camera is still holding; releasing them. "
+            + "A caller that takes an ObjectAdded handle must call TransferCompleteAsync when done — "
+            + "leaving them makes the body answer DeviceBusy to later releases.", pending.Length);
+
+        foreach (var handle in pending)
+        {
+            try
+            {
+                await _canon.TransferCompleteAsync(handle, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "TransferComplete for orphaned handle 0x{Handle:X8} failed", handle);
+            }
+        }
+    }
 
     /// <summary>Cancels an in-progress transfer. Use when a download is stuck or unwanted.</summary>
     public Task<EdsError> CancelTransferAsync(uint objectHandle, CancellationToken ct = default) =>
@@ -772,23 +955,40 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </summary>
     public Task<int> DrainEventsAsync(CancellationToken ct = default) => _canon.DrainEventsAsync(ct);
 
+    /// <summary>
+    /// True for every event family that means "an image exists and here is its handle".
+    /// </summary>
+    /// <remarks>
+    /// Which one a body sends is decided by the capture destination, and a caller waiting for a
+    /// picture cannot act on the difference: <see cref="CanonEventType.ObjectAddedEx"/> announces a
+    /// frame written to the card, <see cref="CanonEventType.RequestObjectTransfer"/> one held in the
+    /// body's RAM for the host to fetch. EDSDK raises the same pair
+    /// (<c>kEdsObjectEvent_DirItemCreated</c> / <c>kEdsObjectEvent_DirItemRequestTransfer</c>).
+    /// <para>
+    /// Handling only the card family is what made capture-to-host look like a body that silently
+    /// refused to release: on a 450D every exposure really happened and it was the announcement that
+    /// got dropped here. Worse than a missed callback — an un-fetched frame occupies the body until
+    /// someone calls <see cref="TransferCompleteAsync"/>, so two dropped events were enough to make
+    /// it answer <see cref="EdsError.DeviceBusy"/> to every subsequent release and refuse to power
+    /// off. A "dead" camera and a whole retracted conclusion about mirror lockup came out of this.
+    /// </para>
+    /// </remarks>
+    internal static bool AnnouncesNewImage(CanonEventType type) => type is
+        CanonEventType.ObjectAddedEx or CanonEventType.ObjectAddedEx64
+        or CanonEventType.RequestObjectTransfer or CanonEventType.RequestObjectTransfer64;
+
     private void OnCanonEvent(CanonPtpEvent evt)
     {
-        switch (evt.Type)
+        if (evt.Type is CanonEventType.PropertyChanged)
+            PropertyChanged?.Invoke(this, new CanonPropertyChangedEventArgs((EdsPropertyId)evt.Param1, evt.Param2));
+        else if (AnnouncesNewImage(evt.Type))
         {
-            case CanonEventType.PropertyChanged:
-                PropertyChanged?.Invoke(this, new CanonPropertyChangedEventArgs((EdsPropertyId)evt.Param1, evt.Param2));
-                break;
-
-            case CanonEventType.ObjectAddedEx:
-            case CanonEventType.ObjectAddedEx64:
-                ObjectAdded?.Invoke(this, new CanonObjectAddedEventArgs(evt.Param1));
-                break;
-
-            default:
-                StateChanged?.Invoke(this, new CanonStateChangedEventArgs(evt.Type, evt.Param1));
-                break;
+            if (evt.Type is CanonEventType.RequestObjectTransfer or CanonEventType.RequestObjectTransfer64)
+                lock (_pendingHostTransfers) _pendingHostTransfers.Add(evt.Param1);
+            ObjectAdded?.Invoke(this, new CanonObjectAddedEventArgs(evt.Param1));
         }
+        else
+            StateChanged?.Invoke(this, new CanonStateChangedEventArgs(evt.Type, evt.Param1));
     }
 
     /// <summary>

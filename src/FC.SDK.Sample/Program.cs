@@ -3,6 +3,7 @@
 //   dotnet run --project src/FC.SDK.Sample -- [options]
 //
 //     --ioctl        talk to the WPD driver through DeviceIoControl instead of the WPD COM API
+//     --auto         probe for the ioctl path and fall back to COM if the driver refuses it
 //     --frames N     live-view frames to pull (default 50, 0 to skip live view)
 //     --no-capture   skip the still capture and download
 //
@@ -14,10 +15,12 @@ using FC.SDK;
 using FC.SDK.Canon;
 
 bool useIoctl = args.Contains("--ioctl");
+bool useAuto = args.Contains("--auto");
 bool capture = !args.Contains("--no-capture");
 int frameCount = ArgValue("--frames") is { } n && int.TryParse(n, out int parsed) ? parsed : 50;
 
-Console.WriteLine($"FC.SDK — Canon Camera Sample ({(useIoctl ? "WPD raw ioctl" : "WPD COM")})");
+Console.WriteLine(
+    $"FC.SDK — Canon Camera Sample ({(useAuto ? "auto-select" : useIoctl ? "WPD raw ioctl" : "WPD COM")})");
 
 CanonCamera? camera = null;
 if (OperatingSystem.IsWindows())
@@ -25,11 +28,20 @@ if (OperatingSystem.IsWindows())
     foreach (var (deviceId, friendlyName) in CanonCamera.EnumerateWpdCameras())
     {
         Console.WriteLine($"Found: {friendlyName}");
-        camera = useIoctl ? CanonCamera.ConnectWpdIoctl(deviceId) : CanonCamera.ConnectWpd(deviceId);
+        camera = useAuto ? await CanonCamera.ConnectWpdAutoAsync(deviceId)
+            : useIoctl ? CanonCamera.ConnectWpdIoctl(deviceId)
+            : CanonCamera.ConnectWpd(deviceId);
         break;
     }
 }
 if (camera is null) { Console.WriteLine("No camera."); return 1; }
+
+// Printed for every run, not just --auto: which transport carried a result is part of the result.
+Console.WriteLine($"Transport: {camera.TransportName}");
+if (camera.TransportFallbackReason is { } fallbackReason)
+{
+    Console.WriteLine($"  raw ioctl rejected: {fallbackReason}");
+}
 
 Console.WriteLine("Opening session...");
 var err = await camera.OpenSessionAsync();
