@@ -67,19 +67,22 @@ internal static class Cr2Decoder
         var rawIfd = FindRawIfd(ifds)
             ?? throw new InvalidDataException("CR2 has no IFD with Compression=6 + StripOffsets — raw payload missing");
 
-        var width = (int)Cr2IfdReader.ScalarValue(rawIfd[TagImageWidth], fileIsLE);
-        var height = (int)Cr2IfdReader.ScalarValue(rawIfd[TagImageLength], fileIsLE);
         var stripOffset = (int)Cr2IfdReader.ScalarValue(rawIfd[TagStripOffsets], fileIsLE);
         var stripByteCount = (int)Cr2IfdReader.ScalarValue(rawIfd[TagStripByteCounts], fileIsLE);
 
-        var (sliceCount, sliceWidth, lastSliceWidth) = ReadCr2Slice(rawIfd, fileIsLE)
-            ?? (1, width, width);
-
         // ---- Decode the lossless JPEG payload via SharpAstro.Jpeg (LosslessJpeg) ----
+        // Decoded before the dimensions are resolved, because on older bodies its frame header is
+        // the only place they exist.
         if (stripOffset < 0 || stripOffset + stripByteCount > bytes.Length)
             throw new InvalidDataException($"CR2 strip offset {stripOffset} + length {stripByteCount} out of bounds");
         var jpegBytes = bytes.Slice(stripOffset, stripByteCount);
         var jpeg = LosslessJpeg.FromMemory(jpegBytes);
+
+        var slice = ReadCr2Slice(rawIfd, fileIsLE);
+        var (width, height) = ResolveRawDimensions(
+            rawIfd, fileIsLE, (long)jpeg.Width * jpeg.Height * jpeg.Components, jpeg.Width, jpeg.Components, slice);
+
+        var (sliceCount, sliceWidth, lastSliceWidth) = slice ?? (1, width, width);
 
         // Total JPEG samples must match output pixel count — the slice unscrambler
         // verifies this too, but the message is clearer with both width × height
@@ -154,6 +157,58 @@ internal static class Cr2Decoder
             return ifd;
         }
         return null;
+    }
+
+    /// <summary>
+    /// The raw image's pixel dimensions: from the IFD when it states them, and from the
+    /// lossless-JPEG frame plus the CR2Slice tag when it does not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A 450D — DIGIC III bodies generally — writes a raw IFD carrying only Compression,
+    /// StripOffsets, StripByteCounts and the Canon tags. There is no ImageWidth and no ImageLength.
+    /// Such files are not malformed: the dimensions have always been recoverable from the SOF3
+    /// header and the slice layout, and newer bodies merely repeat them in the IFD as a
+    /// convenience. Indexing the tags unconditionally rejected every older CR2 with a bare
+    /// <see cref="KeyNotFoundException"/> about "key 256".
+    /// </para>
+    /// <para>
+    /// The slice arithmetic is the unscrambler's own, read backwards:
+    /// <see cref="CanonSliceUnscrambler.Unscramble"/> lays down <c>Count - 1</c> slices of
+    /// <c>SliceWidth</c> and a final one of <c>LastSliceWidth</c>, so that sum is the row length.
+    /// Checked against a file that states both: a 5D-era fixture whose tag reads
+    /// <c>(2, 2784, 2784)</c> derives 5568, exactly its ImageWidth.
+    /// </para>
+    /// </remarks>
+    internal static (int Width, int Height) ResolveRawDimensions(
+        Dictionary<ushort, Cr2IfdReader.Entry> rawIfd,
+        bool fileIsLE,
+        long jpegSamples,
+        int jpegWidth,
+        int jpegComponents,
+        (int Count, int SliceWidth, int LastSliceWidth)? slice)
+    {
+        if (rawIfd.TryGetValue(TagImageWidth, out var widthEntry)
+            && rawIfd.TryGetValue(TagImageLength, out var heightEntry))
+        {
+            return ((int)Cr2IfdReader.ScalarValue(widthEntry, fileIsLE),
+                (int)Cr2IfdReader.ScalarValue(heightEntry, fileIsLE));
+        }
+
+        // Sliced: the row is the slice layout's sum, which is the only thing that tag is for.
+        // Unsliced: one output row per JPEG row, with the components interleaved across it.
+        var width = slice is { } s
+            ? ((s.Count - 1) * s.SliceWidth) + s.LastSliceWidth
+            : jpegWidth * jpegComponents;
+
+        if (width <= 0 || jpegSamples == 0 || jpegSamples % width != 0)
+        {
+            throw new InvalidDataException(
+                $"CR2 raw IFD states no ImageWidth/ImageLength and they could not be derived: "
+                + $"{jpegSamples} lossless-JPEG samples do not divide into rows of {width}.");
+        }
+
+        return (width, (int)(jpegSamples / width));
     }
 
     private static (int Count, int SliceWidth, int LastSliceWidth)? ReadCr2Slice(
