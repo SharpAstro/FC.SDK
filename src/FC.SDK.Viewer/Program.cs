@@ -90,6 +90,7 @@ using var inspector = DebugInspector.Attach(loop, new DebugInspectorOptions
         writer.Set("model", state.Model);
         writer.Set("serial", state.SerialNumber);
         writer.Set("busy", state.BusyOperation);
+        writer.Set("exposure", state.Exposure is { } e ? $"{e.Label} {e.Elapsed.TotalSeconds:F1}s" : null);
         writer.Set("status", state.StatusMessage);
         writer.Set("devices", state.Devices.Count);
         writer.Set("cachedProperties", state.RawProperties.Count);

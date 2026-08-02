@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using FC.SDK.Canon;
+using FC.SDK.Raw;
 using Microsoft.Extensions.Logging;
 using SharpAstro.Jpeg;
 
@@ -221,6 +223,9 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
     {
         await StopLiveViewLoopAsync();
 
+        // Whatever the camera was doing, we are no longer in a position to hear about it finishing.
+        EndExposure();
+
         if (state.Camera is not { } camera) return;
 
         camera.ObjectAdded -= OnObjectAdded;
@@ -330,6 +335,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         if (state.Camera is not { } camera) return;
 
         await StopLiveViewLoopAsync();
+        EndExposure();
         await camera.StopEventPollingAsync();
         var err = await camera.CloseSessionAsync(ct);
         _logger.LogInformation("CloseSession = {Error}", err);
@@ -571,21 +577,52 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 
     // --- Capture ---
 
+    /// <summary>
+    /// How long to keep waiting for the image after an ordinary release. Generous on purpose — it
+    /// has to cover a 30-second exposure plus readout — because its job is to end a wait that is
+    /// never going to finish, not to be a tight bound on a healthy one.
+    /// </summary>
+    private static readonly TimeSpan ExposureDeadline = TimeSpan.FromSeconds(45);
+
+    /// <summary>Readout window after bulb ends, where the exposure length is no longer unknown.</summary>
+    private static readonly TimeSpan ReadoutDeadline = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// How often the elapsed counter refreshes. The render loop only redraws when something
+    /// invalidates it, and during an exposure nothing else does.
+    /// </summary>
+    private static readonly TimeSpan ExposureTick = TimeSpan.FromMilliseconds(200);
+
+    private CancellationTokenSource? _exposureWatch;
+
     public void TakePicture() => Enqueue("Take picture", async ct =>
     {
         if (state.Camera is not { } camera) return;
 
+        // Begun before the release rather than after it. TakePictureAsync does not return until the
+        // body has worked through the whole release sequence — measured at 2.1 s on a 450D — and a
+        // button that still looks idle and clickable for those two seconds is precisely the gap
+        // this indicator exists to close. Every exit below ends it again.
+        BeginExposure("Exposing", ExposureDeadline);
+
         var err = await camera.TakePictureAsync(ct);
         _logger.LogInformation("TakePicture = {Error}", err);
-        state.StatusMessage = err switch
+
+        if (err is not EdsError.OK)
         {
-            not EdsError.OK => $"TakePicture failed: {err}",
-            // Verified on a 450D: with MLU on, RemoteRelease answers OK and then nothing happens —
-            // no mirror, no events, no image. Say so instead of "waiting" forever.
-            EdsError.OK when camera.MirrorLockupEnabled == true =>
-                "Released, but MLU is enabled — this body ignores remote releases in MLU mode; disable MLU to shoot remotely.",
-            _ => "Shutter released; waiting for the image…",
-        };
+            // The SDK now refuses before sending anything on bodies that keep mirror lockup as a
+            // Custom Function, rather than letting the camera ACK a release it will discard. This
+                // used to be a post-hoc check here, which could only ever report the lie after it was
+            // told.
+            EndExposure(err is EdsError.OperationRefused && camera.MirrorLockupEnabled == true
+                ? "Mirror lockup is on and this body ignores remote releases in that mode — turn MLU off (Custom Function menu) to shoot remotely."
+                : $"TakePicture failed: {err}");
+            return;
+        }
+
+        // The image can land while TakePictureAsync is still returning, in which case OnObjectAdded
+        // has already ended the wait and announcing one would be stale.
+        if (state.Exposure is not null) state.StatusMessage = "Shutter released; waiting for the image…";
     });
 
     public void InitiateCapture() => Enqueue("InitiateCapture (standard PTP)", async ct =>
@@ -594,7 +631,65 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         var err = await camera.InitiateCaptureAsync(ct);
         _logger.LogInformation("InitiateCapture = {Error}", err);
         state.StatusMessage = $"InitiateCapture: {err}";
+        if (err is EdsError.OK) BeginExposure("Exposing", ExposureDeadline);
     });
+
+    /// <summary>
+    /// Starts the exposure indicator and the tick that keeps its counter moving.
+    /// </summary>
+    /// <remarks>
+    /// The tick exists because <c>CheckNeedsRedraw</c> draws only on invalidation, and an exposure is
+    /// the one thing in this app that changes the screen without anything else touching state. It
+    /// also owns the deadline: watching for an image that never arrives has to happen somewhere, and
+    /// the alternative — checking during render — makes the timeout depend on the user moving the
+    /// mouse.
+    /// </remarks>
+    private void BeginExposure(string label, TimeSpan? deadline)
+    {
+        state.Exposure = new ExposureProgress(label, DateTime.UtcNow, deadline);
+        state.Invalidate();
+
+        var watch = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
+        Interlocked.Exchange(ref _exposureWatch, watch)?.Cancel();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (state.Exposure is { } exposure)
+                {
+                    if (exposure.IsOverdue)
+                    {
+                        _logger.LogWarning(
+                            "No image {Seconds:F0}s after the release — the camera acknowledged it and produced nothing",
+                            exposure.Elapsed.TotalSeconds);
+                        EndExposure(
+                            $"No image after {exposure.Elapsed.TotalSeconds:F0}s. The camera accepted the release and "
+                            + "never produced a frame — check the battery level and mirror lockup.");
+                        return;
+                    }
+
+                    state.Invalidate();
+                    await Task.Delay(ExposureTick, watch.Token);
+                }
+            }
+            catch (OperationCanceledException) { /* superseded, or shutting down */ }
+            finally
+            {
+                watch.Dispose();
+            }
+        }, watch.Token);
+    }
+
+    private void EndExposure(string? status = null)
+    {
+        if (state.Exposure is null) return;
+
+        state.Exposure = null;
+        Interlocked.Exchange(ref _exposureWatch, null)?.Cancel();
+        if (status is not null) state.StatusMessage = status;
+        state.Invalidate();
+    }
 
     public void HalfPress(bool press) => Enqueue(press ? "Half-press shutter" : "Release shutter", async ct =>
     {
@@ -609,9 +704,26 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         if (state.Camera is not { } camera) return;
         var err = start ? await camera.BulbStartAsync(ct) : await camera.BulbEndAsync(ct);
         _logger.LogInformation("Bulb{Action} = {Error}", start ? "Start" : "End", err);
-        state.StatusMessage = err is EdsError.OperationRefused
-            ? "Bulb refused — the mode dial has to be on B."
-            : $"Bulb {(start ? "start" : "end")}: {err}";
+
+        // OperationRefused now arrives from two places, and they need different advice: the SDK
+        // refusing up front because mirror lockup is armed on a body that discards bulb (verified on
+        // a 450D — an armed body emits no BulbExposureTime ticks at all), or the camera refusing
+        // because its mode dial is not on B.
+        state.StatusMessage = err switch
+        {
+            EdsError.OperationRefused when camera.MirrorLockupEnabled == true && !camera.SupportsMirrorLockupCapture =>
+                "Mirror lockup is on and this body discards remote bulb in that mode — turn MLU off (Custom Function menu) first.",
+            EdsError.OperationRefused => "Bulb refused — the mode dial has to be on B.",
+            _ => $"Bulb {(start ? "start" : "end")}: {err}",
+        };
+
+        if (err is not EdsError.OK) return;
+
+        // Bulb runs to no schedule but the operator's, so it gets no deadline — the counter is the
+        // point of it. Once the shutter closes the length stops being unknown, and the wait becomes
+        // an ordinary bounded one for readout.
+        if (start) BeginExposure("Bulb", deadline: null);
+        else BeginExposure("Reading out", ReadoutDeadline);
     });
 
     public void CancelAutoFocus() => Enqueue("Cancel AF", async ct =>
@@ -745,7 +857,8 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         var (thumbErr, thumbData) = await camera.GetThumbAsync(handle, ct);
         if (thumbErr is EdsError.OK && thumbData.Length > 0)
         {
-            state.LastThumbnail = TryDecodeJpeg(thumbData, "thumbnail");
+            state.CapturePreview = TryDecodeJpeg(thumbData, "thumbnail");
+            state.CapturePreviewSource = "embedded thumbnail";
             // The image that just changed is the one to show — but never yank the pane away from a
             // running live view (auto-download fires mid-stream when the camera also saves to card).
             if (!state.LiveViewActive) state.PreviewMode = PreviewPane.Capture;
@@ -761,21 +874,31 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         var extension = Path.GetExtension(fileName) is { Length: > 0 } ext ? ext : ".cr2";
         var path = Path.Combine(state.OutputDirectory, $"capture-{DateTime.Now:yyyyMMdd-HHmmss}{extension}");
 
+        EdsError downloadErr;
         await using (var fs = File.Create(path))
         {
-            var err = await camera.DownloadAsync(handle, fs, ct);
+            downloadErr = await camera.DownloadAsync(handle, fs, ct);
             state.LastSavedBytes = fs.Length;
-            _logger.LogInformation("Download = {Error} ({Bytes:N0} bytes → {Path})", err, fs.Length, path);
-            if (err is not EdsError.OK)
-            {
-                state.StatusMessage = $"Download failed: {err}";
-                return;
-            }
+            _logger.LogInformation("Download = {Error} ({Bytes:N0} bytes → {Path})", downloadErr, fs.Length, path);
+        }
+
+        // Unconditional, and before the failure path returns: a host-destination frame occupies the
+        // camera until this arrives, whether or not we managed to read it. Bailing out early on a
+        // failed download leaves it held, and a couple of held frames are enough to make the body
+        // answer DeviceBusy to every later release — the download failure would then look like the
+        // start of a camera that had died.
+        var complete = await camera.TransferCompleteAsync(handle, ct);
+        _logger.LogInformation("TransferComplete = {Error}", complete);
+
+        if (downloadErr is not EdsError.OK)
+        {
+            state.StatusMessage = $"Download failed: {downloadErr}";
+            return;
         }
 
         state.LastSavedPath = path;
-        var complete = await camera.TransferCompleteAsync(handle, ct);
-        _logger.LogInformation("TransferComplete = {Error}", complete);
+
+        QueueFullPreview(path);
 
         state.StatusMessage = $"Saved {Path.GetFileName(path)} ({state.LastSavedBytes:N0} bytes)";
         state.Invalidate();
@@ -943,6 +1066,118 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         state.StatusMessage = $"Saved {Path.GetFileName(path)}";
     });
 
+    /// <summary>
+    /// Longest edge of a decoded capture preview, in pixels. A 450D frame is 4272×2848, which is
+    /// 48 MiB of RGBA before it reaches the GPU — far more than a letterboxed pane can show.
+    /// </summary>
+    private const int MaxPreviewDimension = 1600;
+
+    /// <summary>
+    /// Bilinear rather than the AHD default. AHD's advantage is the absence of colour fringing on
+    /// hard edges, which is invisible once the image is subsampled to fit a preview pane, and it
+    /// costs roughly five times as long to get there.
+    /// </summary>
+    private static readonly CanonRenderOptions RawPreviewOptions =
+        new() { Algorithm = CanonDemosaicAlgorithm.Bilinear };
+
+    /// <summary>
+    /// Replaces the embedded thumbnail with the real image, decoded from the file just downloaded.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The thumbnail a camera embeds is a few hundred pixels wide and exists to prove the frame
+    /// happened, not to be looked at. What was actually captured is in the CR2, and this repo
+    /// already carries a decoder for it, so the preview may as well show the photograph.
+    /// </para>
+    /// <para>
+    /// Deliberately not <see cref="Enqueue"/>: that serializes against every camera command, and
+    /// demosaicing a 12 MP frame would stall live view and event draining behind work that needs
+    /// nothing from the camera. The file is on disk; the camera is free to carry on.
+    /// </para>
+    /// </remarks>
+    private void QueueFullPreview(string path)
+    {
+        _ = Task.Run(() =>
+        {
+            var started = Stopwatch.GetTimestamp();
+            try
+            {
+                var (raster, source) = DecodeCapture(path);
+                if (raster is null) return;
+
+                // A later capture may have finished while this was rendering; the newest image wins
+                // rather than whichever decode happened to land last.
+                if (!string.Equals(state.LastSavedPath, path, StringComparison.Ordinal))
+                {
+                    _logger.LogDebug("Discarding stale preview for {Path}", Path.GetFileName(path));
+                    return;
+                }
+
+                state.CapturePreview = raster;
+                state.CapturePreviewSource = source;
+                if (!state.LiveViewActive) state.PreviewMode = PreviewPane.Capture;
+                state.Invalidate();
+
+                _logger.LogInformation("Decoded {Source} for preview: {W}×{H} in {Ms:F0} ms",
+                    source, raster.Width, raster.Height,
+                    Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            }
+            catch (Exception ex)
+            {
+                // The embedded thumbnail stays on screen — a decoder that cannot read this file is a
+                // reason to keep the lesser preview, not to lose the capture.
+                _logger.LogWarning("Could not decode {File} for preview: {Message}",
+                    Path.GetFileName(path), ex.Message);
+            }
+        });
+    }
+
+    private (Raster? Raster, string Source) DecodeCapture(string path) =>
+        Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".cr2" or ".cr3" => (ToRaster(CanonDemosaic.Render(CanonRaw.Open(path), RawPreviewOptions)),
+                Path.GetExtension(path).TrimStart('.').ToUpperInvariant() + " (bilinear)"),
+            // Full-resolution JPEG beats the thumbnail for the same reason, and costs a decode we
+            // already know how to do.
+            ".jpg" or ".jpeg" => (TryDecodeJpeg(File.ReadAllBytes(path), "capture"), "full-size JPEG"),
+            var other => (null, other),
+        };
+
+    /// <summary>
+    /// Converts a 16-bit render to 8-bit RGBA, subsampling to <see cref="MaxPreviewDimension"/> on
+    /// the way through.
+    /// </summary>
+    /// <remarks>
+    /// Nearest-neighbour by an integer stride, not an area average. It aliases slightly on fine
+    /// detail, but it is one pass with no intermediate buffer, and the alternative would spend real
+    /// time improving an image whose whole purpose is to be glanced at.
+    /// </remarks>
+    private static Raster ToRaster(CanonRgbImage image)
+    {
+        int step = Math.Max(1, (Math.Max(image.Width, image.Height) + MaxPreviewDimension - 1) / MaxPreviewDimension);
+        int width = (image.Width + step - 1) / step;
+        int height = (image.Height + step - 1) / step;
+
+        var rgba = new byte[width * height * 4];
+        var source = image.InterleavedRgb;
+
+        for (int y = 0; y < height; y++)
+        {
+            int sourceRow = y * step * image.Width * 3;
+            int destination = y * width * 4;
+            for (int x = 0; x < width; x++)
+            {
+                int sample = sourceRow + x * step * 3;
+                rgba[destination++] = (byte)(source[sample] >> 8);
+                rgba[destination++] = (byte)(source[sample + 1] >> 8);
+                rgba[destination++] = (byte)(source[sample + 2] >> 8);
+                rgba[destination++] = 0xff;
+            }
+        }
+
+        return new Raster(width, height, rgba);
+    }
+
     private Raster? TryDecodeJpeg(byte[] jpeg, string what)
     {
         try
@@ -963,6 +1198,10 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
     {
         _logger.LogInformation("ObjectAdded: handle=0x{Handle:X8}", e.ObjectHandle);
         state.LastObjectHandle = e.ObjectHandle;
+
+        // The image the exposure indicator was waiting for. Ends the wait whether or not this
+        // viewer asked for the shot — a release from the camera's own shutter button lands here too.
+        EndExposure();
         // The exposure completed, so the SDK just cleared its inferred mirror-up flag.
         if (state.Camera is { } eventCamera) RefreshInferredMirrorState(eventCamera);
         state.Invalidate();
