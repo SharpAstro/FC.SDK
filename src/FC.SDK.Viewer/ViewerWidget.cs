@@ -99,7 +99,7 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
 
         // Hand the newest rasters to the upload queue before anything draws them.
         if (_state.LiveViewFrame is { } frame) _liveView.Submit(frame);
-        if (_state.LastThumbnail is { } thumb) _thumbnail.Submit(thumb);
+        if (_state.CapturePreview is { } capture) _thumbnail.Submit(capture);
 
         RenderLayout(Shell(), bounds, drawFill: PaintFill);
     }
@@ -305,14 +305,30 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             () => _actions.SetRemoteMode(!remote), enabled: open));
 
         rows.Add(SectionHeader("Capture"));
-        rows.Add(Button($"{_glyphs.Camera} Take picture".TrimStart(), "shoot", _actions.TakePicture, enabled: remote,
-            background: ViewerTheme.ActiveBg));
-        rows.Add(Button("InitiateCapture (std PTP)", "initiate", _actions.InitiateCapture, enabled: open));
+
+        // While the body is exposing, the shutter button becomes the exposure's own readout: the
+        // release itself returned long ago, so without this there is nothing on screen to say the
+        // camera is still working. Disabled with it, because a second release during an exposure is
+        // never what anyone meant.
+        var exposure = _state.Exposure;
+        rows.Add(Button(
+            exposure is null
+                ? $"{_glyphs.Camera} Take picture".TrimStart()
+                : $"{_glyphs.Busy} {exposure.Label}… {exposure.Elapsed.TotalSeconds:F1}s".TrimStart(),
+            "shoot", _actions.TakePicture,
+            enabled: remote && exposure is null,
+            background: ViewerTheme.ActiveBg,
+            disabledBackground: exposure is null ? null : ViewerTheme.BusyBg));
+
+        rows.Add(Button("InitiateCapture (std PTP)", "initiate", _actions.InitiateCapture,
+            enabled: open && exposure is null));
         rows.Add(Button("Half-press", "halfpress", () => _actions.HalfPress(true), enabled: remote));
         rows.Add(Button("Release", "release", () => _actions.HalfPress(false), enabled: remote));
         rows.Add(Button("Cancel AF", "afcancel", _actions.CancelAutoFocus, enabled: remote));
-        rows.Add(Button("Bulb start", "bulbstart", () => _actions.Bulb(true), enabled: remote));
-        rows.Add(Button("Bulb end", "bulbend", () => _actions.Bulb(false), enabled: remote));
+        rows.Add(Button("Bulb start", "bulbstart", () => _actions.Bulb(true),
+            enabled: remote && exposure is null));
+        rows.Add(Button("Bulb end", "bulbend", () => _actions.Bulb(false),
+            enabled: remote, background: exposure?.Label is "Bulb" ? ViewerTheme.BusyBg : null));
         rows.Add(Toggle("Auto-download new images", "autodl", _actions.AutoDownload,
             () => { _actions.AutoDownload = !_actions.AutoDownload; _state.Invalidate(); }));
         rows.Add(Button("Download last image", "download", _actions.DownloadLast,
@@ -477,8 +493,12 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             ? _state.LiveViewActive
                 ? $"Live view — frame {_state.LiveViewFrameCount}"
                 : "Live view (stopped)"
+            // Which preview is on screen matters: the embedded thumbnail and a decoded CR2 differ by
+            // a factor of ten in resolution, and "why does my capture look soft" has exactly one
+            // answer worth checking first.
             : _state.LastSavedPath is { } path
                 ? $"{Path.GetFileName(path)} — {_state.LastSavedBytes:N0} bytes"
+                  + (_state.CapturePreviewSource is { } src ? $" — showing {src}" : "")
                 : _state.LastFileName is { } name ? $"{name} — not downloaded" : "No capture yet";
         var labelColor = live
             ? _state.LiveViewActive ? ViewerTheme.Ok : ViewerTheme.Palette.DimText
@@ -507,7 +527,7 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
                         : "start live view to see the sensor feed");
                     break;
                 case "thumbimage":
-                    DrawRasterOrHint(_thumbnail, imageRect, "the embedded JPEG preview appears here after a capture");
+                    DrawRasterOrHint(_thumbnail, imageRect, "the captured image appears here after a download");
                     break;
             }
         });
@@ -562,11 +582,20 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             .Pad(3f)
             .RowH(ViewerTheme.Metrics.ItemHeight - 4f);
 
+    /// <param name="disabledBackground">
+    /// Fill for a button that is un-pressable because it is already running, as opposed to one that
+    /// simply does not apply. Only the latter should look inert — an exposure in progress is the
+    /// most active thing the app ever does, and greying it out says the opposite.
+    /// </param>
     private Layout.Node Button(string label, string action, Action onClick, bool enabled = true,
-        RGBAColor32? background = null)
+        RGBAColor32? background = null, RGBAColor32? disabledBackground = null)
     {
-        var bg = enabled ? background ?? ViewerTheme.ButtonBg : ViewerTheme.ButtonDisabledBg;
-        var fg = enabled ? ViewerTheme.Palette.BodyText : ViewerTheme.Palette.DimText;
+        var bg = enabled
+            ? background ?? ViewerTheme.ButtonBg
+            : disabledBackground ?? ViewerTheme.ButtonDisabledBg;
+        var fg = enabled || disabledBackground is not null
+            ? ViewerTheme.Palette.BodyText
+            : ViewerTheme.Palette.DimText;
 
         return Layout.Builder.Text(label, SmallFontSize, fg, TextAlign.Center)
             .RowH(ViewerTheme.Metrics.ButtonHeight)

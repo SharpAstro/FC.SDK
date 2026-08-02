@@ -68,7 +68,27 @@ public sealed class ViewerState
     public string? LastFileName { get; set; }
     public string? LastSavedPath { get; set; }
     public long LastSavedBytes { get; set; }
-    public Raster? LastThumbnail { get; set; }
+    /// <summary>
+    /// The best preview available for the last capture, upgraded in place as better data arrives:
+    /// the camera's embedded thumbnail first because it is small and immediate, then the decoded
+    /// file once it is on disk and rendered.
+    /// </summary>
+    public Raster? CapturePreview { get; set; }
+
+    /// <summary>Where <see cref="CapturePreview"/> came from, so the pane can say which it is.</summary>
+    public string? CapturePreviewSource { get; set; }
+
+    /// <summary>
+    /// An exposure the camera is in the middle of, or null when none is outstanding.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="BusyOperation"/>, and not derivable from it. A release command
+    /// returns as soon as the body accepts it — for a 30-second exposure that is 29.9 seconds before
+    /// anything is on the card — so the queued operation is long finished while the camera is still
+    /// working. This is the span that actually matters to someone standing at the tripod: shutter
+    /// released until <c>ObjectAdded</c>, or until the deadline says it is never coming.
+    /// </remarks>
+    public ExposureProgress? Exposure { get; set; }
 
     /// <summary>Name of the operation currently running, or null when idle.</summary>
     public string? BusyOperation { get; set; }
@@ -87,4 +107,24 @@ public sealed class ViewerState
         Readings.TryGetValue(id, out var reading) ? reading : null;
 
     public void Invalidate() => NeedsRedraw = true;
+}
+
+/// <summary>
+/// An exposure in flight: what to call it, when the shutter opened, and how long to keep believing
+/// an image is still coming.
+/// </summary>
+/// <param name="Label">Shown on the capture button while this is outstanding, e.g. "Exposing".</param>
+/// <param name="StartedUtc">When the body accepted the release.</param>
+/// <param name="Deadline">
+/// How long to wait for <c>ObjectAdded</c> before giving up, or null to wait indefinitely. Null is
+/// for bulb, where the operator decides the length and no deadline we could pick would be right.
+/// Everything else needs one: a 450D with a flat battery or mirror lockup engaged answers OK to a
+/// release it never performs, and without a deadline the button would sit there forever claiming an
+/// exposure that ended before it started.
+/// </param>
+public sealed record ExposureProgress(string Label, DateTime StartedUtc, TimeSpan? Deadline)
+{
+    public TimeSpan Elapsed => DateTime.UtcNow - StartedUtc;
+
+    public bool IsOverdue => Deadline is { } deadline && Elapsed > deadline;
 }

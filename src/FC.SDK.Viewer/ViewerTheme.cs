@@ -31,6 +31,9 @@ public static class ViewerTheme
     public static readonly RGBAColor32 DangerBg = new(0x5a, 0x2b, 0x2b, 0xff);
     public static readonly RGBAColor32 ActiveBg = new(0x27, 0x4b, 0x33, 0xff);
 
+    /// <summary>An operation the camera is still working on — amber, to read as "wait", not "go".</summary>
+    public static readonly RGBAColor32 BusyBg = new(0x53, 0x42, 0x1c, 0xff);
+
     // The library defaults (0x22222a / 0x444455) disappear against PanelBg 0x1c2028 — the thumb read
     // as a paint artifact. Track sits slightly below the panel, thumb clearly above it.
     public static readonly RGBAColor32 ScrollTrack = new(0x16, 0x1a, 0x20, 0xff);
