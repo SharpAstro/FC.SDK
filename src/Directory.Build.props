@@ -31,7 +31,7 @@
          that needs it, so a release bump is this one line. Each job resolves it independently rather
          than taking a job output, because publish-viewer deliberately runs in PARALLEL with build;
          they cannot disagree, since they read the same file at the same commit. -->
-    <VersionMajorMinor>1.7</VersionMajorMinor>
+    <VersionMajorMinor>2.0</VersionMajorMinor>
     <!-- Local builds get Major.Minor.0; CI passes -p:Version=Major.Minor.<run><attempt>, and the
          condition lets it win. -->
     <VersionPrefix Condition="'$(VersionPrefix)' == ''">$(VersionMajorMinor).0</VersionPrefix>

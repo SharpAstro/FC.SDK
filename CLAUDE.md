@@ -44,7 +44,7 @@ Four layers, bottom-up:
 
 - **`CanonCamera`** — Entry point. Static factories: `ConnectUsb`, `ConnectWifi`, `ConnectWpd`, `ConnectWpdIoctl`. Async session/capture/live-view/property methods. Event handlers (`PropertyChanged`, `ObjectAdded`, `StateChanged`) are subscribed for the object's whole lifetime, not just while the poller runs, because the open-session drain and property reads also pull events. Diagnostics: `DumpPropertiesAsync`, `SupportedOperations`, `GetRawPropertyAsync`/`SetRawPropertyAsync`, `GetAllowedValuesAsync`, `CreateDeviceReportAsync`.
 
-- **`CanonDeviceReport`** — the one artefact to ask a bug reporter for. Markdown: model, transport, every advertised operation, every announced property with its allowed values, and the **decoded Custom Function block in wire order with menu numbers**. That last part is the whole point — a reporter cannot know wire ids, but can read menu numbers off their own camera, and `CanonCustomFunctionBlock.Entries` preserves the order that maps between them. It also refuses to be trusted on a flat battery: a body reporting `0xD111` level ≤ 1 gets a loud warning, because at that level a 450D ACKs releases it never performs, drops live view mid-stream, and announces dial movements nobody made.
+- **`CanonDeviceReport`** — the one artefact to ask a bug reporter for. Markdown: model, transport, every advertised operation, every announced property with its allowed values, and the **decoded Custom Function block in wire order with menu numbers**. That last part is the whole point — a reporter cannot know wire ids, but can read menu numbers off their own camera, and `CanonCustomFunctionBlock.Entries` preserves the order that maps between them. It also refuses to be trusted on a flat battery: a body reporting `0xD111` level ≤ 1 gets a loud warning, because at that level a 450D has been seen to drop live view mid-stream and announce dial movements nobody made. (It does *not* stop capturing — that symptom turned out to be mirror lockup; see the Testing section.)
 
 ## Reading and writing EOS properties
 
@@ -79,6 +79,15 @@ Consequences worth remembering:
   Host=2 selects the *card*. `CanonCaptureDestination` holds the wire values and `SetSaveToAsync` translates.
 - **Capturing to the host needs `PCHDDCapacity` (0x911A)** with `(0x0FFFFFFF, 0x1000, 1)`, otherwise `AvailableShots`
   stays at 0 and the body refuses to release. `SetCaptureDestinationAsync` sends it automatically.
+- **The destination decides which event announces the image, and both must be handled.** A card-destination frame
+  arrives as `ObjectAddedEx` (0xC181/0xC1A7); a host-destination frame as `RequestObjectTransfer` (0xC186/0xC1A9),
+  because the body is holding it in RAM for the host to fetch. `CanonCamera.AnnouncesNewImage` covers all four and
+  `ObjectAdded` fires for any of them — matching EDSDK's `kEdsObjectEvent_DirItemCreated` /
+  `_DirItemRequestTransfer` pair. Listening only for the card family is a silent failure with a nasty tail: the
+  exposure happens, no callback fires, and **the un-fetched frame occupies the body until `TransferComplete` (0x9117)
+  arrives**. Two of them were enough to make a 450D answer `DeviceBusy` to every later release, drop out of live view
+  immediately after entering it, and refuse to finish powering off (the top LCD froze on the remaining-shots count) —
+  recoverable only by pulling the battery. Diagnosed for most of a session as a camera that had stopped releasing.
 - **`SetRequestOLCInfoGroup` (0x913D, mask 0x1fff)** is required on newer bodies before they report Tv/Av/ISO and AF
   state via `OLCInfoChanged` (0xC1A5).
 
@@ -160,9 +169,95 @@ and the whole 0xD180–0xD1A0 range is absent from EDSDK's own property table).
 - **High-ISO NR on the 450D is C.Fn 0x0202** (no 0xD178 property), and it is two-state Off/On rather than the
   four-level `EdsHighIsoNR` scheme. The SDK translates by meaning: Off ↔ `Disable`, On ↔ `Standard`.
 - **A 450D silently ignores RemoteRelease (0x910F) while MLU is enabled**: the command answers OK, no mirror moves,
-  no event is emitted, no exposure ever arrives. Remote MLU capture is not possible on this body — the viewer warns
-  instead of pretending a second press will expose. MLU state on such bodies is Enable/Disable derived from the
-  setting; there is no way to know the mirror's actual position.
+  no event is emitted, no exposure ever arrives. Re-confirmed 2026-08-02 on clean evidence (battery level 1, body
+  demonstrably still exposing minutes earlier): the discard is recognisable by timing — 0x910F returns in ~20 ms
+  against the ~2.1 s a real release sequence takes. Also discarded in 2-s self-timer drive (the manual's own
+  MLU workaround for the physical button — it does NOT extend to PTP releases) and on a double press. The viewer
+  warns instead of pretending a second press will expose. MLU state on such bodies is Enable/Disable derived from
+  the setting; there is no way to know the mirror's actual position.
+- **Remote bulb WORKS on a 450D — verified end to end.** `EdsTv.Bulb` is **0x0C** (0x04 is the old
+  PowerShot-protocol value); it is the 53rd entry in the body's own allowed list and an ordinary property write
+  flips the top LCD to buLb. Bare `BulbStart`/`BulbEnd` (0x9125/0x9126) then delivered a real exposure whose own
+  EXIF read 4.0 s — exactly the start→end interval. No UILock needed. What made bulb look unsupported for a whole
+  session: `BulbStartAsync` unconditionally sent an AF prelude via 0x9128, which this body does not have, so the
+  wrapper failed with NotSupported *before 0x9125 was ever sent*. The prelude is now gated on 0x9128 support.
+- **MLU discards bulb too, and no two-command sequence gets around it.** Settled on a *fully charged* battery
+  (level 2) with `rev/MluMatrix`, six sequences bracketed by controls that both delivered 11.2 MB CR2s minutes
+  either side:
+
+  | | MLU armed | MLU off (control) |
+  |---|---|---|
+  | `0x910F` | nothing | 11.2 MB |
+  | `0x910F`, 3 s, `0x910F` (the two-press analogue) | nothing | — |
+  | `BulbStart`, 1 s, `0x910F`, 4 s, `BulbEnd` | nothing | — |
+  | `0x910F`, 2 s, `BulbStart`, 4 s, `BulbEnd` | nothing | — |
+  | `BulbStart`, 2 s, `BulbStart`, 4 s, `BulbEnd` | nothing | — |
+  | `BulbStart`, 4 s, `BulbEnd`, 1.5 s, `0x910F` | nothing | — |
+  | self-timer drive `0x10` (2 s) | nothing | **11.2 MB** |
+  | self-timer drive `0x07` (10 s) | nothing | **11.2 MB ×6 burst** |
+  | self-timer drive `0x11` (unnamed) | nothing | **11.2 MB** |
+  | `BulbStart`, 3 s, `BulbEnd` | — | 11.2 MB |
+
+  **A 6D is the opposite case, and it needs a self-timer.** Where a 450D discards, a 6D honours mirror
+  lockup over PTP — but *only* in a self-timer drive mode, which supplies the settle. In `Single`
+  drive the same body simply shoots: an armed release delivers a frame in 0.4 s, and two presses give
+  two frames rather than raise-then-expose. So **mirror lockup + self-timer is the working recipe, and
+  mirror lockup alone is silently ignored** — the worse failure of the two, since the caller gets a
+  frame and believes they had lockup. Working recipe, measured:
+
+  | 6D drive | `EdsDriveMode` name | real settle | lockup engages? |
+  |---|---|---|---|
+  | `0x10` | `Timer_2sec_RemoteControl` | **10.3 s** | yes |
+  | `0x11` | *unnamed by the enum* | **2.9 s** | yes |
+
+  **The enum's names are simply wrong here** — `0x10` is the ten-second timer and the unnamed `0x11`
+  is the two-second one. `0x11` is therefore the one to use: native firmware sequencing (the body
+  owns raise → settle → expose, so a dead host cannot strand the mirror up) with ~2 s of dead time.
+
+  **`OLCInfoChanged = 0x15` at +0.2 s is the lockup marker**, and it is the only thing that
+  distinguishes the two cases — delivered files, frame sizes, `0xD1BF`, and total timing are all
+  identical. With lockup off the same slot carries `0x10`→`0xD`. Reproduced on both drive modes, so
+  it is independent of timer length. Corroborated three ways on `0x10`: the marker, an audible mirror
+  at T+0, and a **viewfinder that stayed black for the entire countdown** — that last one is the
+  cheapest conclusive probe and should be the first one reached for next time. Note `0x15` is an OLC
+  group mask, not a documented mirror flag; it earns its meaning from the visual confirmation.
+
+  This is the mechanism behind NINA's "mirror lockup delay", except NINA's delay is user-configurable
+  and this one is whatever the body's timer is — see the `0x9128` two-parameter note under the opcode
+  table for the likely route to an arbitrary settle.
+
+  **The SDK now refuses rather than relaying the camera's empty ACK.** `TakePictureAsync` and
+  `BulbStartAsync` answer `OperationRefused` in 0 ms — before anything reaches the wire — when mirror
+  lockup is armed and `CanonCamera.SupportsMirrorLockupCapture` is false. That flag is inferred from
+  **where the body keeps the setting**: a Custom Function means no mirror-lockup capture over PTP, the
+  real `0xD13A` property means it is fine. Both bodies measured agree, and NINA draws the same line
+  with the same advice ("turn MLU off under the camera's Custom Function menu"), which is independent
+  corroboration from an EDSDK client. The inference is over n=2, so the property has a setter to
+  overrule it, and an un-probed camera is assumed capable — refusing on no evidence would be worse
+  than the bug it replaces.
+
+  **The self-timer rows have their own controls and need them.** "Nothing with MLU on" would prove
+  nothing if the body simply ignored self-timer drive on a PTP release — so each was re-run with
+  lockup off, and all three delivered. The timer genuinely self-releases over PTP; only lockup stops
+  it. Two incidental findings from those controls: drive `0x07` fires a **six-shot burst**, not one
+  frame (enough un-fetched frames to wedge the body — see the capture-destination note above), and
+  `0x910F` blocks ~5 s in timer modes regardless of the countdown length, so its duration is not a
+  countdown measurement. Take drive values off the body's own allowed list, never from
+  `EdsDriveMode`: a 450D offers `0x11`, which that enum does not name.
+
+  The physical body needs two shutter presses in MLU — raise, then expose — so every row is some way of spelling
+  that over PTP, including a release *inside* an open bulb window. **All six are discarded**, and the mechanism is
+  visible rather than inferred: with MLU off `BulbStart` immediately emits `BulbExposureTime` ticks (0,1,2,3…);
+  with MLU on it emits none at all, so the exposure never begins — the body is not starting-and-failing, it is
+  refusing at the door. Each test was preceded by a 35 s settle, because a 450D drops a raised mirror by itself
+  after ~30 s and without the gap one test's "first press" is really the previous one's second. **Every remote
+  release path is firmware-discarded while C.Fn mirror lockup is armed on this body**; the viewer warns rather
+  than pretending a second press will expose.
+- **A silent command is not evidence until something mechanical is shown to work in the same minutes.** This body
+  has now twice produced a whole session of confident wrong conclusions from ACKs alone. Live view start is the
+  loudest cheap vitality probe (mirror flip + real frames); a control exposure either side of a negative result is
+  better. Battery level in particular proves nothing on its own — level 0 streamed live view and delivered bulb
+  exposures, and the level-0 MLU results reproduced exactly at level 2.
 
 ## WPD transport internals
 
@@ -216,6 +311,21 @@ How it is put together:
 **Do not cross the streams.** A session commits to one transport for its whole life. Each opens the
 device independently and the camera holds one PTP session, so these are alternatives, not layers.
 
+`CanonCamera.ConnectWpdAutoAsync` picks between them, and picks **once** — before `OpenSession`, the
+last moment at which the two are interchangeable. After that, state is spread across the transaction
+counter, the camera's own session and remote-mode flags, and any open transfer context (which
+belongs to the handle and dies with it), so failing over would reconnect into a body that still
+believes it is mid-transfer with a client that has gone. That is a deliberate reconnect, not a
+fallback, and it does not belong inside a transport.
+
+The probe is a real `GetDeviceInfo` (0x1001) read, not the connect handshake — `ConnectAsync` only
+opens a handle and introduces the client, exercising none of the property-bag encoding this
+transport hand-rolls, so the failure most worth guarding against would sail straight past it. 0x1001
+runs initiate → read → end and is legal outside a session, so a failed probe costs nothing.
+**Verified on a 450D: it answers 0x1001 with no session open.** A fallback is logged at warning
+level, left on `CanonCamera.TransportFallbackReason`, and printed in the device report — silence
+would produce bug reports about live-view memory from people who do not know they are on COM.
+
 What the ioctl path is actually worth, measured on a 450D, 300 frames each through the same sample:
 
 | | COM | raw ioctl |
@@ -244,6 +354,23 @@ whether any of this generalises beyond a DIGIC III 450D.
 event-stream property cache side by side, and writes a timestamped log of every PTP exchange to
 `<output-directory>/fc-viewer-*.log`. That log is what to ask a bug reporter for.
 
+- **The capture preview decodes the real file, not the embedded thumbnail.** A camera thumbnail is a
+  few hundred pixels and exists to prove the frame happened. After download, `QueueFullPreview`
+  renders the CR2/CR3 through `FC.SDK.Raw` (bilinear — AHD's edge quality is invisible once
+  subsampled to a pane, and costs 2–5× the time) and replaces it, subsampling to 1600 px.
+  Deliberately **not** on the `Enqueue` gate: a 450D frame takes ~2.3 s to decode and that would
+  stall live view and event draining behind work needing nothing from the camera. The pane label
+  says which preview is showing, because "why is my capture soft" has one answer worth checking
+  first.
+- **An exposure is tracked separately from `BusyOperation`.** `TakePictureAsync` does not return
+  until the body finishes the release — 2.1 s on a 450D — and the image arrives later still, via
+  `ObjectAdded`. `ViewerState.Exposure` spans shutter-press to image-arrival and drives a ticking
+  counter on the capture button, which is disabled and amber (not grey — see `Button`'s
+  `disabledBackground`) throughout. It is started **before** awaiting the release, or the button
+  would look idle and clickable for those first two seconds. It carries a deadline because a body
+  that accepts a release and produces nothing is a real state, and the tick that refreshes the
+  counter is also what enforces it — `CheckNeedsRedraw` only redraws on invalidation, and during an
+  exposure nothing else invalidates.
 - Layout is **declarative only** — `Layout.Node` trees painted through `PixelWidgetBase.RenderLayout`,
   which binds each click region to the rect it drew. No hand-rolled hit rectangles. Row virtualization
   is delegated to `ListScrollController`; the only arithmetic in the widget is letterboxing an image,
@@ -335,6 +462,25 @@ dotnet run --project src/FC.SDK.Sample -- [--ioctl] [--frames N] [--no-capture]
 directly comparable on the same body in the same harness. Run it from a scratch directory — it writes
 the report, the last live-view frame, and any capture into the working directory.
 
+**`src/FC.SDK.Diagnostics` is for questions the sample cannot answer** — sequencing a body through an
+experiment and judging it on delivered bytes. It lives in `src/`, not `rev/`, because the experiments
+outlive the sessions that prompted them and get re-run whenever a claim is challenged:
+
+```
+dotnet run --project src/FC.SDK.Diagnostics -- [--diag|--mlucheck|--mluself|--clack] [--host]
+```
+
+Every mode brackets its result with controls and prints per-command timings, because on these bodies
+the response code is the least informative thing available. Three of its habits are worth copying
+into any new mode:
+
+- **A control either side of a negative result.** A run whose controls did not expose proves nothing,
+  and the harness says so rather than reporting six tidy failures.
+- **A settle between mirror-lockup tests** (default 35 s): a 450D drops a raised mirror by itself
+  after ~30 s, so without the gap one test's first press is really the previous test's second.
+- **`--release <handles>`** hands back frames a crashed run left the body holding — the recovery path
+  for the `DeviceBusy` wedge described under capture destinations above.
+
 Manual sequence (all of it also available as buttons in the viewer):
 1. Connect camera (WPD COM, WPD ioctl, USB or WiFi)
 2. Open session — check the operation-support list; note that 0x1015 being *present* does not mean
@@ -344,10 +490,20 @@ Manual sequence (all of it also available as buttons in the viewer):
 5. Live view: `StartLiveViewAsync()` → `GetLiveViewFrameAsync()` → verify JPEG
 6. Bulb: `BulbStartAsync()` → delay → `BulbEndAsync()`
 
-**Check the battery before believing any of it.** A 450D at `0xD111` level 1 answers OK to releases
-that never expose, and stops producing live-view frames entirely while still answering every read —
-both indistinguishable from an SDK fault, and both observed. `CanonDeviceReport` warns about this at
-the top of its output; the sample prints it every run.
+**Check mirror lockup first, then the battery.** A dead capture on a 450D has two candidate
+explanations and the tempting one is wrong more often than not:
+
+- **MLU enabled is the usual cause.** The body answers OK to `RemoteRelease` and then does nothing —
+  no mirror, no event, no image. `TakePictureAsync` cannot tell this apart from a fault, so check
+  `Mirror lockup` in the viewer or the C.Fn table in a device report before anything else. This was
+  once written up here as a battery symptom for a whole session, because the property that would
+  have answered the question (`0xD1BF`) does not exist on this body and the old
+  `GetMirrorLockupStateAsync` returned a default instead of consulting the C.Fn block.
+- **Low battery is real but narrower than previously claimed.** Capture at `0xD111` level 1 works
+  fine with MLU off — verified repeatedly, 11.2 MB CR2s delivered in ~4 s. What *has* been observed
+  at level 1 is phantom `PropValueChanged` records for Tv that no one caused, and one session where
+  live view stopped producing frames while still answering every read. `CanonDeviceReport` still
+  warns at level ≤ 1, and that is still worth heeding — just do not let it end the investigation.
 
 Test targets so far: Canon EOS 6D (USB VID=0x04A9, PID=0x3215, WiFi AP at 192.168.0.1) and
 EOS 450D (USB PID=0x3145) — the 450D is the body most of the WPD, live-view, C.Fn and raw-ioctl
@@ -364,7 +520,9 @@ code or an iteration count.
 
 ## Reverse-engineering material (`rev/`, git-ignored)
 
-`rev/` holds decompiles, API-tracing probes, raw captures and throwaway test projects. It is in
+`rev/` holds decompiles, API-tracing probes, raw captures and throwaway test projects. A probe that
+starts answering the same question more than once belongs in `src/FC.SDK.Diagnostics` instead — that
+is where the mirror-lockup matrix went, having been re-derived from scratch twice. It is in
 `.gitignore` on purpose — the *conclusions* belong in `docs/`, the raw material stays local. Notable
 tooling, all of which expects the camera to be present and not held by another app:
 

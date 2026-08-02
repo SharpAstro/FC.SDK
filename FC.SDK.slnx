@@ -4,5 +4,6 @@
   <Project Path="src/FC.SDK.Raw.Tests/FC.SDK.Raw.Tests.csproj" />
   <Project Path="src/FC.SDK.Tests/FC.SDK.Tests.csproj" />
   <Project Path="src/FC.SDK.Sample/FC.SDK.Sample.csproj" />
+  <Project Path="src/FC.SDK.Diagnostics/FC.SDK.Diagnostics.csproj" />
   <Project Path="src/FC.SDK.Viewer/FC.SDK.Viewer.csproj" />
 </Solution>
