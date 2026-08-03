@@ -87,6 +87,48 @@ four bytes of a string read as an integer — which is what `OwnerName`, `LensNa
 `Copyright` did before 3.0. Use `GetPropertyStringAsync` / `GetPropertyBytesAsync`; EOS strings are
 plain null-terminated ASCII, **not** PTP length-prefixed UTF-16.
 
+## `0x9128` never autofocuses on a 6D, and neither `p2` value changes that
+
+Measured with `FC.SDK.Diagnostics afpress`, `EF50mm f/1.8 STM` at AF, judged on the sharpness of the
+delivered CR2 rather than on a response code — which is worthless here, since all four rows answer
+`OK` and deliver a ~21 MB frame in 130–310 ms either way.
+
+| row | normalised contrast (round 1 / 2) |
+|---|---|
+| `blur` — release with no focus command | 0.0598 / 0.0597 |
+| **`doaf` — 0x9154 first (the control)** | **0.1135 / 0.1140** |
+| `0x9128(3, 0)` — "AF" | 0.0599 / 0.0600 |
+| `0x9128(3, 1)` — "MF" | 0.0597 / 0.0598 |
+
+**The controls separate 1.9×, and both `p2` rows sit on `blur` to three significant figures.** So
+`p2=1` is *not* the un-wired way to release without autofocus that it was hoped to be: on this body
+nothing about the release focuses in the first place, so there is nothing to switch off. It does not
+follow that `p2` is meaningless everywhere — only that it has no observable effect here.
+
+**One alternative is still open**: every row above used `p1=3` (half+full in one go), which may simply
+leave no time for an AF cycle. A half-press, a pause, then a full press is the discriminating test and
+has not been run. Note `0x9128(2, ·)` alone answers `DeviceBusy`, so the full press evidently needs
+the half press to precede it.
+
+Getting to a usable measurement took four void runs, and each failure is a method to avoid:
+
+- **A listening test cannot report a negative.** "I heard nothing" and "I missed it" are the same
+  transcript. It only became worth anything once the operator independently heard `DriveLens` run,
+  which calibrated the ear as a working sensor.
+- **A sharpness comparison with no in-focus frame proves nothing.** Four defocused frames scoring
+  alike looks exactly like the sought-after null; a measure blind to focus produces it too. Every
+  round now carries `blur` and `doaf`, and the rows are declared void unless those two separate.
+- **Defocus must not accumulate.** `DriveLens NearLarge` ×6 at the top of every row, never undone,
+  walked the lens onto its near mechanical stop by row 2 — after which contrast AF had no gradient to
+  climb and all eight frames were equally, maximally blurred.
+- **The AF frame is the zoom frame in `Live` mode**, so a pan left over from the zoom measurements
+  had AF hunting in the bottom-right corner of the room while answering `OK`. Centring it has to
+  happen *while magnified*: at 1× the accepted position range is `[0, sensor − crop]` = `[0, 0]` and
+  every request is discarded. Focused frames went 112K → 124–138K once it was centred.
+- **Defocus by measured effect, not step count.** A subject at ~80 cm is near an EF50mm's 0.35 m
+  minimum, so the near stop barely blurs it — 14 steps plateau at 12% below the focused JPEG size.
+  A threshold picked for a scene that did not exist voided every row twice.
+
 ## Reading and writing EOS properties
 
 **There is no EOS "get property" operation.** Calling standard PTP `GetDevicePropValue` (0x1015) for a 0xD1xx code
@@ -150,7 +192,7 @@ Consequences worth remembering:
 | 0x9125 | BulbStart | none |
 | 0x9126 | BulbEnd | none |
 | 0x9127 | RequestDevicePropValue | none, param=propcode — a *request to emit*, NOT a getter |
-| 0x9128 | RemoteReleaseOn | none, **two** params per libgphoto2: p1 = 1 half-press / 2 full-press / 3 half+full in one go, p2 = 0 AF / 1 MF. We send only p1 — so every release implies AF, and **`p2=1` is the un-wired way to release without it**, which is what a manual lens or a telescope wants |
+| 0x9128 | RemoteReleaseOn | none, **two** params per libgphoto2: p1 = 1 half-press / 2 full-press / 3 half+full in one go, p2 = 0 AF / 1 MF. p1 is measured on a 6D; **p2 has no effect there** — see below. We send only p1 |
 | 0x9129 | RemoteReleaseOff | none, param=0x01(AF)/0x02(shutter) |
 | 0x9130 | ResetMirrorLockupState | none |
 | 0x913D | SetRequestOLCInfoGroup | none, param=group mask (0x1fff = all) |

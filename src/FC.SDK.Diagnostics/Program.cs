@@ -540,19 +540,25 @@ try
         // either: no motor was heard on any row, and "I heard nothing" is the one report a listening
         // test cannot distinguish from "I missed it".
         //
-        // So the observable is the delivered frame's own sharpness. Every row is preceded by the
-        // same 6-step DriveLens defocus, and a row that autofocused comes back sharp.
+        // So the observable is the delivered frame's own sharpness: each row starts from focus,
+        // departs it by a fixed small amount, and a row that autofocused comes back sharp.
         //
         // That only means something against controls, because a sharpness measure that cannot see
         // focus would rank four defocused frames "all equal" and look exactly like a null result.
         // Each round therefore carries both ends of the scale:
         //
-        //   blur — defocus, then release with no focus command at all   (known soft)
-        //   doaf — defocus, then 0x9154 DoAf, which is proven on this   (known sharp)
-        //          body: the STM is audible and the LV JPEG jumps 51->120 KB
+        //   blur — defocused, then released with no focus command at all   (known soft)
+        //   doaf — defocused, then 0x9154 DoAf, proven on this body        (known sharp)
         //
-        // If blur and doaf do not separate, the instrument is blind and the p2 rows are void.
-        // Cap OFF for this one, and the lens switch at AF.
+        // If blur and doaf do not separate, the instrument is blind and the p2 rows are void — which
+        // is what the previous run reported, for a reason worth keeping written down. The defocus
+        // used to accumulate: NearLarge x6 at the top of every row, never undone, so by the second
+        // row the lens sat on its near mechanical stop and contrast AF had no gradient left to climb.
+        // Eight rows scored alike and it looked precisely like the sought-after null.
+        //
+        // Two changes follow from that. The defocus is now small and re-established from focus every
+        // row, so it stays recoverable; and the setup is verified rather than assumed, by watching the
+        // live-view JPEG shrink when the lens leaves focus. Cap OFF, lens switch at AF.
         const ushort RemoteReleaseOn = 0x9128, RemoteReleaseOff = 0x9129;
 
         var (_, focus) = await camera.GetFocusStateAsync();
@@ -598,30 +604,125 @@ try
         if (pick.Mean < 0.05)
             Log("*** Even the best rung is very dark — expect the sharpness controls not to separate.");
 
-        // Returns how many of the six steps the body acknowledged. An ACK is not motion, but a zero
-        // is conclusive the other way: nothing moved, so there is nothing for a focus command to
-        // correct and the row cannot answer anything.
-        async Task<int> DefocusReported()
+        // A cap, not a recipe: SetUpRowAsync steps until the frame has measurably shrunk and stops.
+        const int DefocusSteps = 14;
+
+        // How small the live-view JPEG must get before the lens counts as off focus.
+        //
+        // 10% is chosen from what the rig can actually deliver, not from what would be comfortable.
+        // A subject at ~80 cm sits close to an EF50mm's 0.35 m minimum, so driving to the near stop
+        // barely blurs it: 14 steps plateau at 12% below the focused size (124K -> 110K), the plateau
+        // being the mechanical stop. An earlier 25% bar was therefore unreachable and voided every
+        // row. 10% still clears the ~3% frame-to-frame wobble by 4x, and the CR2 sharpness measure
+        // this only has to set up for is far more sensitive than JPEG size.
+        const double DefocusTarget = 0.90;
+
+        // The live-view JPEG's size is a focus gauge, and a free one: a sharper frame carries more
+        // high-frequency detail and compresses worse. This body was measured going 51 -> 120 KB when
+        // DoAf pulled it into focus. Averaging a few frames because the size wobbles with noise.
+        async Task<int> FrameSizeAsync()
+        {
+            var total = 0;
+            var got = 0;
+            for (var i = 0; i < 4; i++)
+            {
+                var (err, jpeg) = await camera!.GetLiveViewFrameAsync();
+                if (err is EdsError.OK && jpeg.Length > 0) { total += jpeg.Length; got++; }
+                await Task.Delay(120);
+            }
+            return got is 0 ? 0 : total / got;
+        }
+
+        // Run focus in, then back out by a fixed amount, checking both ends against the frame size.
+        //
+        // The previous version drove NearLarge x6 at the top of every row and never undrove it, so
+        // the defocus accumulated: by the second row the lens was pinned at the near mechanical stop
+        // and every remaining frame was equally, maximally blurred. That is what made eight rows
+        // score alike — and it looked exactly like the null result being hunted for. The fix is that
+        // each row starts from focus and departs it by the same small, recoverable amount.
+        async Task<(bool Ok, int Focused, int Defocused, string Note)> SetUpRowAsync(int defocusSteps)
         {
             await camera!.StartLiveViewAsync();
             await Task.Delay(1200);
             await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
-            int ok = 0;
-            for (int i = 0; i < 6; i++)
+
+            var afErr = await camera.AutoFocusLiveViewAsync();
+            await Task.Delay(4000);
+            await camera.CancelAutoFocusAsync();
+            await Task.Delay(500);
+            var focused = await FrameSizeAsync();
+
+            // The defocus is defined by its measured optical effect, not by a step count. A fixed
+            // count cannot be right for an unknown lens and scene: three NearLarge steps moved the
+            // frame only 3% on an EF50mm at f/2.8 — nowhere near out of focus, since this body runs
+            // ~120K focused against ~51K defocused — while six accumulated onto the mechanical stop
+            // when they were never undone. So step until the frame has actually shrunk, and cap it.
+            var driven = 0;
+            var defocused = focused;
+            while (driven < defocusSteps && defocused > focused * DefocusTarget)
             {
-                if (await camera.DriveLensAsync(EdsDriveLensStep.NearLarge) is EdsError.OK) ok++;
-                await Task.Delay(250);
+                if (await camera.DriveLensAsync(EdsDriveLensStep.NearLarge) is not EdsError.OK) break;
+                driven++;
+                await Task.Delay(300);
+                defocused = await FrameSizeAsync();
             }
-            return ok;
+
+            // Both ends have to be shown, or "defocused" is an assumption. A frame that did not
+            // shrink means either the AF never focused or the lens never moved, and in both cases
+            // the row cannot distinguish a focus command from a no-op.
+            var shrank = focused > 0 && defocused > 0 && defocused <= focused * DefocusTarget;
+            var note = $"AF {afErr}, {driven} steps, {focused / 1024}K -> {defocused / 1024}K "
+                + $"({(focused is 0 ? 0 : 100 - defocused * 100 / focused)}% smaller)";
+            return (shrank, focused, defocused, note);
         }
+
+
+        // Two things to put right once, before any row runs.
+        Log("\nResetting the lens and the AF frame");
+        await camera.StartLiveViewAsync();
+        await Task.Delay(1200);
+        await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
+
+        // In Live (FlexiZone-Single) the magnification frame IS the AF frame, so a zoom pan from any
+        // earlier session leaves the AF point wherever it was last dragged — the zoom measurements
+        // left it in the bottom-right corner, so contrast AF was hunting on the corner of the room
+        // rather than the subject, and answering OK for it.
+        //
+        // It has to be centred while magnified: at 1x the rect is the whole frame, so the accepted
+        // range for a position is [0, sensor - crop] = [0, 0] and every request is discarded. Zoom
+        // in, centre, zoom back out — the centred frame carries over.
+        await camera.SetEvfZoomAsync((uint)CanonEvfZoom.X5, verify: false);
+        await Task.Delay(1200);
+        if (await camera.GetEvfZoomRectAsync() is { SensorWidth: > 0, Width: > 0 } r)
+        {
+            var (cx, cy) = ((r.SensorWidth - r.Width) / 2, (r.SensorHeight - r.Height) / 2);
+            var (posErr, landed) = await camera.SetEvfZoomPositionAsync(cx, cy);
+            Log($"  AF frame centred at ({cx},{cy}): {posErr}, landed {landed}");
+        }
+        else Log("  *** no zoom rect, so the AF frame position could not be reset");
+        await camera.SetEvfZoomAsync((uint)CanonEvfZoom.Fit, verify: false);
+        await Task.Delay(1200);
+
+        // The lens may be sitting on its near stop from a previous run, and the first row's AF would
+        // then have to recover from the worst possible starting point.
+        for (var i = 0; i < 8; i++) { await camera.DriveLensAsync(EdsDriveLensStep.FarLarge); await Task.Delay(200); }
+        await camera.StopLiveViewAsync();
+        await Task.Delay(1000);
 
         int busyRows = 0;
         foreach (var round in new[] { 1, 2 })
         foreach (var (tag, p2) in new (string, uint?)[] { ("blur", null), ("doaf", null), ("p2is0", 0), ("p2is1", 1) })
         {
-            var defocused = await DefocusReported();
-            Log($"\nround {round}, {tag} — defocus drove the lens {defocused}/6");
-            if (defocused is 0) { Log("  *** the lens did not move — void"); await camera.StopLiveViewAsync(); continue; }
+            var setup = await SetUpRowAsync(DefocusSteps);
+            Log($"\nround {round}, {tag} — {setup.Note}");
+            if (!setup.Ok)
+            {
+                Log("  *** setup failed: the frame did not shrink, so the lens is not verifiably off");
+                Log("  *** focus. Nothing this row produced could distinguish a focus command — void.");
+                await camera.StopLiveViewAsync();
+                await Task.Delay(1000);
+                continue;
+            }
 
             // DoAf needs live view; the other rows must not have it, since entering live view is
             // itself a focus opportunity on a body doing contrast AF.
@@ -630,8 +731,8 @@ try
             // hunt still in flight wedged this body for three solid minutes — every subsequent
             // release answered DeviceBusy, including the controls, which invalidated a whole run.
             // 0x9154 returns on acceptance, not on focus, so its OK says nothing about whether the
-            // lens has stopped moving; in a dim room at the near limit the hunt outlasts any delay
-            // worth waiting. AfCancel is not a tidy-up here, it is what keeps the body usable.
+            // lens has stopped moving. AfCancel is not a tidy-up here, it is what keeps the body
+            // usable.
             string focusNote = "none";
             if (tag is "doaf")
             {
@@ -639,7 +740,12 @@ try
                 await Task.Delay(4000);
                 var cancelErr = await camera.CancelAutoFocusAsync();
                 await Task.Delay(500);
-                focusNote = $"0x9154 = {afErr}, 0x9160 = {cancelErr}";
+                // The control has to prove it recovered the focus it was meant to recover, not just
+                // that the command was accepted. Back near the focused size means it worked.
+                var recovered = await FrameSizeAsync();
+                focusNote = $"0x9154 = {afErr}, 0x9160 = {cancelErr}, "
+                    + $"{setup.Defocused / 1024}K -> {recovered / 1024}K "
+                    + $"({(recovered > setup.Defocused * 1.1 ? "RECOVERED" : "did NOT recover")})";
             }
             await camera.StopLiveViewAsync();
             await Task.Delay(1500);
