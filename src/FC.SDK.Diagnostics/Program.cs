@@ -1,43 +1,98 @@
 // Hardware diagnostics harness: sequences a real Canon body through experiments the unit tests
 // cannot reach, and judges them on delivered bytes rather than response codes.
 //
-//   dotnet run --project src/FC.SDK.Diagnostics -- <mode> [options]
+//   dotnet run --project src/FC.SDK.Diagnostics -- <command> [options]
+//   ...                                          -- --help
 //
-//     (default)     the mirror-lockup × remote-release matrix   [--settle N] [--only T3,T4]
-//     --diag        connect, dump the properties that gate a release, then release / bulb / live view
-//     --mlucheck    does a MirrorUpSetting write actually land? (read-back, not the ACK)
-//     --mluself     watch 0xD1BF across a self-timer countdown  [--drive 10] [--wait N]
-//     --clack       A/B listening test: self-timer with lockup off, then on
-//     --evf         string properties, live-view zoom / pan / autofocus, envelope record dump
+// Every experiment is a subcommand; `--help` lists them with their options. This used to be
+// `args.Contains("--evf")` and friends, which had a nasty property for a harness that drives real
+// hardware: an unrecognised argument was not an error, it silently selected the DEFAULT mode. A
+// mistyped `--evff` therefore ran the mirror-lockup matrix — minutes long, firing the shutter
+// repeatedly — instead of reading some properties. System.CommandLine rejects it instead.
 //
-//   Common: --host (capture to the body's RAM) | default card, --release <hex,hex> to hand back
-//   handles a crashed run left the camera holding.
+// The original question, which the matrix answers: is there ANY remote command sequence that
+// produces an exposure while C.Fn mirror lockup is armed? The physical body needs two shutter
+// presses in MLU — one to raise the mirror, one to expose — so every sequence there is some way of
+// spelling "two presses" over PTP, including a release inside an open bulb window.
 //
-// The question: is there ANY remote command sequence that produces an exposure while C.Fn mirror
-// lockup is armed? The physical body needs two shutter presses in MLU — one to raise the mirror,
-// one to expose — so every sequence here is some way of spelling "two presses" over PTP, including
-// the bulb-window variants that have never been tried.
-//
-// Judged on delivered files, never on response codes: this body ACKs commands it discards. A
+// Judged on delivered files, never on response codes: these bodies ACK commands they discard. A
 // discarded release returns in ~20 ms against ~2.1 s for a real one, so the timings are logged too.
 //
 // Controls run first AND last with MLU off. A negative result is only worth anything if the same
 // harness got a positive one from the same body on the same battery minutes earlier.
+using System.CommandLine;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using FC.SDK;
 using FC.SDK.Canon;
 
+// Hex throughout, because every drive-mode and property value in this domain is quoted in hex —
+// and taken off the body's own allowed-value list, never from EdsDriveMode, whose numbering is
+// EDSDK's rather than any particular body's.
+static uint ParseHex(System.CommandLine.Parsing.ArgumentResult r) =>
+    uint.Parse(r.Tokens[0].Value.TrimStart('0', 'x', 'X') is { Length: > 0 } t ? t : "0",
+        NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+
 // The 450D drops a raised mirror by itself after ~30 s. Each MLU test therefore has to start from a
 // known-down mirror, or a "first press" is really someone else's second one.
-int settleSeconds = ArgValue("--settle") is { } s && int.TryParse(s, out int parsed) ? parsed : 35;
+var settleOpt = new Option<int>("--settle") { Description = "Seconds to let a raised mirror drop between tests.", DefaultValueFactory = _ => 35 };
+var onlyOpt = new Option<string[]>("--only") { Description = "Run only these matrix rows, e.g. T3 T4.", AllowMultipleArgumentsPerToken = true };
+var driveOpt = new Option<uint>("--drive") { Description = "Self-timer drive value (hex).", CustomParser = ParseHex, DefaultValueFactory = _ => 0x10 };
+var drive2Opt = new Option<uint>("--drive2") { Description = "Second self-timer drive value (hex).", CustomParser = ParseHex, DefaultValueFactory = _ => 0x07 };
+var drive3Opt = new Option<uint>("--drive3") { Description = "Third self-timer drive value (hex).", CustomParser = ParseHex, DefaultValueFactory = _ => 0x11 };
+var waitOpt = new Option<int>("--wait") { Description = "Seconds to watch before the release.", DefaultValueFactory = _ => 0 };
 
-// The two self-timer drive values to exercise, as hex, taken off the body's own allowed list rather
-// than from EdsDriveMode — see the list this prints at startup. Defaults are EDSDK's 2 s and 10 s.
-uint SelfTimerDrive = ArgValue("--drive") is { } d1 ? Convert.ToUInt32(d1, 16) : 0x10;
-uint SelfTimerDrive2 = ArgValue("--drive2") is { } d2 ? Convert.ToUInt32(d2, 16) : 0x07;
-uint SelfTimerDrive3 = ArgValue("--drive3") is { } d3 ? Convert.ToUInt32(d3, 16) : 0x11;
-string[]? only = ArgValue("--only")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+// Card by default and deliberately: a host-destination frame sits in the body's RAM until someone
+// fetches it, and two un-fetched frames are enough to wedge a 450D into DeviceBusy.
+var hostOpt = new Option<bool>("--host") { Description = "Capture into the body's RAM instead of to the card." };
+var releaseOpt = new Option<uint[]>("--release") { Description = "Object handles (hex) a crashed run left the camera holding.", AllowMultipleArgumentsPerToken = true, CustomParser = r => [.. r.Tokens.Select(t => uint.Parse(t.Value.TrimStart('0', 'x', 'X'), NumberStyles.HexNumber, CultureInfo.InvariantCulture))] };
+
+var avOpt = new Option<EdsAv>("--av") { Description = "Aperture.", DefaultValueFactory = _ => EdsAv.Av_5_6 , HelpName = "aperture" };
+var tvOpt = new Option<EdsTv>("--tv") { Description = "Shutter speed.", DefaultValueFactory = _ => EdsTv.Tv_1_125 , HelpName = "shutter" };
+var isoOpt = new Option<EdsISOSpeed>("--iso") { Description = "ISO.", DefaultValueFactory = _ => EdsISOSpeed.ISO_400 , HelpName = "iso" };
+
+var root = new RootCommand("Canon hardware diagnostics — judged on delivered bytes, not response codes.");
+foreach (var o in new Option[] { hostOpt, releaseOpt }) root.Options.Add(o);
+
+// Subcommands inherit the two common options via Recursive, so `--host` works wherever it makes
+// sense without being declared five times.
+hostOpt.Recursive = releaseOpt.Recursive = true;
+
+(string Name, string Description, Option[] Options)[] modes =
+[
+    ("matrix",   "The mirror-lockup x remote-release matrix. The default experiment.", [settleOpt, onlyOpt, driveOpt, drive2Opt, drive3Opt]),
+    ("diag",     "Dump the properties that gate a release, then release / bulb / live view.", []),
+    ("mlucheck", "Does a MirrorUpSetting write actually land? Read-back, not the ACK.", []),
+    ("mluself",  "Watch 0xD1BF across a self-timer countdown.", [driveOpt, waitOpt]),
+    ("clack",    "A/B listening test: self-timer with lockup off, then on.", [driveOpt]),
+    ("evf",      "String properties, live-view zoom / pan / autofocus, envelope record dump.", []),
+    ("zoom",     "Why a zoom is ignored: sweep factors and LV AF systems against the zoom rect.", []),
+    ("zoompix",  "Visual proof of magnification and panning — writes JPEGs to compare.", [avOpt, tvOpt, isoOpt]),
+    ("lens",     "Dump the lens / focus properties. Run with no lens, lens at AF, lens at MF and diff.", []),
+];
+
+string? mode = null;
+foreach (var (name, description, options) in modes)
+{
+    var cmd = new Command(name, description);
+    foreach (var o in options) cmd.Options.Add(o);
+    cmd.SetAction(_ => { mode = name; return 0; });
+    root.Subcommands.Add(cmd);
+}
+root.SetAction(_ => { mode = "matrix"; return 0; });
+
+var parse = root.Parse(args);
+int parseExit = parse.Invoke();
+// Help, version and parse errors all leave the mode unset — they have already printed, so the only
+// thing left to do is carry their exit code out.
+if (mode is null) return parseExit;
+
+int settleSeconds = parse.GetValue(settleOpt);
+uint SelfTimerDrive = parse.GetValue(driveOpt);
+uint SelfTimerDrive2 = parse.GetValue(drive2Opt);
+uint SelfTimerDrive3 = parse.GetValue(drive3Opt);
+string[]? only = parse.GetValue(onlyOpt) is { Length: > 0 } selectedRows ? selectedRows : null;
 
 var clock = Stopwatch.StartNew();
 var objects = new List<(TimeSpan At, uint Handle)>();
@@ -87,7 +142,7 @@ camera.ObjectAdded += (_, e) =>
 };
 // Verbose in --diag: when a release is refused the only account of why is whatever the body
 // volunteers on the event stream, and it volunteers it to nobody in particular.
-if (args.Contains("--diag"))
+if (mode is "diag")
 {
     camera.PropertyChanged += (_, e) => Log($"       evt prop {e.PropertyId} = 0x{e.Value:X} ({e.Value})");
     camera.StateChanged += (_, e) => Log($"       evt state {e.EventType} param=0x{e.Param:X}");
@@ -105,16 +160,13 @@ try
     // and two un-fetched frames are enough to make the next release answer DeviceBusy — a failure
     // mode with nothing to do with the question being asked, which cost a whole matrix run. On the
     // card the body owns its own storage and every exposure still announces itself as ObjectAddedEx.
-    var dest = args.Contains("--host") ? CanonCaptureDestination.Host : CanonCaptureDestination.Card;
+    var dest = parse.GetValue(hostOpt) ? CanonCaptureDestination.Host : CanonCaptureDestination.Card;
     Log($"CaptureDestination={dest} = {await camera.SetCaptureDestinationAsync(dest)}");
 
     // Anything a previous (or crashed) run left un-fetched keeps the body busy. Handles are given
     // on the command line because a dead process took its own list to the grave.
-    foreach (var h in (ArgValue("--release") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
-    {
-        var handle = Convert.ToUInt32(h.Trim(), 16);
+    foreach (var handle in parse.GetValue(releaseOpt) ?? [])
         Log($"TransferComplete(0x{handle:X8}) = {await camera.TransferCompleteAsync(handle)}");
-    }
     Log($"AutoPowerOff=off = {await camera.SetAutoPowerOffAsync(0)}");
     // Self-timer drive was left set by an earlier session and adds a delay to every release; the
     // matrix wants the plainest possible release.
@@ -132,7 +184,7 @@ try
         ? "none announced"
         : string.Join(", ", driveValues.Select(v => $"0x{v:X}({(EdsDriveMode)v})"))));
 
-    if (args.Contains("--clack"))
+    if (mode is "clack")
     {
         // Counting clacks does not work — an ordinary release is already mirror-up/shutter/mirror-down
         // inside ~100 ms. What a person CAN judge is whether anything happened at the instant of the
@@ -213,7 +265,7 @@ try
         return 0;
     }
 
-    if (args.Contains("--mluself"))
+    if (mode is "mluself")
     {
         // The measurement nobody has taken: with MLU armed and a self-timer running, does the mirror
         // actually go up during the countdown? A delivered file cannot answer it — the 6D delivers a
@@ -222,7 +274,7 @@ try
         const ushort MirrorLockUpState = 0xD1BF;
         const ushort MirrorUpSetting = 0xD13A;
 
-        var drive = ArgValue("--drive") is { } d ? Convert.ToUInt32(d, 16) : 0x10u;
+        var drive = SelfTimerDrive;
         Log($"MLU -> On = {await camera.SetMirrorLockupAsync(EdsMirrorUpSetting.On)}");
         await Task.Delay(1500);
         await camera.DrainEventsAsync();
@@ -245,7 +297,7 @@ try
         // Lead-in so a human can be listening at the right moment. The mirror is the instrument here:
         // 0xD1BF does not report live position on this body, so two distinct clacks (mirror, then
         // shutter) versus one is the only available evidence that lockup engaged.
-        if (ArgValue("--wait") is { } w && int.TryParse(w, out int lead))
+        if (parse.GetValue(waitOpt) is var lead && lead > 0)
         {
             for (int i = lead; i > 0; i--)
             {
@@ -272,7 +324,7 @@ try
         return 0;
     }
 
-    if (args.Contains("--mlucheck"))
+    if (mode is "mlucheck")
     {
         // Does a MirrorUpSetting write actually land? SetMirrorLockupAsync trusts the response code
         // on the property path, and this body ACKs the write while shooting straight through it.
@@ -296,7 +348,49 @@ try
         return 0;
     }
 
-    if (args.Contains("--zoompix"))
+    if (mode is "lens")
+    {
+        // Can the body tell us where the lens's AF/MF switch is? It matters twice over: a caller on
+        // a telescope wants to know autofocus is unavailable, and the 0x9128 AF/MF parameter can
+        // only be tested in the one configuration where AF is actually possible.
+        //
+        // Run three times — no lens, lens at AF, lens at MF — and diff. Any code that moves between
+        // AF and MF while the lens stays mounted is reporting the switch; anything that only moves
+        // when the lens comes off is reporting the mount.
+        (ushort Code, string Name)[] candidates =
+        [
+            (0xD108, "FocusMode"), (0xD1A8, "LensStatus"), (0xD1DD, "LensID"),
+            (0xD128, "LensBarrelStatus"), (0xD17A, "ContinuousAFValid"), (0xD124, "RefocusState"),
+            (0xD1BA, "Evf_AFMode"), (0xD1D3, "FocusInfoEx"),
+        ];
+
+        var (_, lens) = await camera.GetLensNameAsync();
+        Log($"Lens name: \"{lens}\"   (tag this run: no lens / lens AF / lens MF)");
+        Log("");
+
+        foreach (var (code, name) in candidates)
+        {
+            var (e, v) = await camera.GetRawPropertyAsync(code);
+            var (be, bytes) = await camera.GetRawPropertyBytesAsync(code);
+            var allowed = await camera.GetRawAllowedValuesAsync(code);
+            var hex = be is EdsError.OK && bytes.Length > 0
+                ? string.Join(' ', bytes.Take(16).Select(b => b.ToString("X2")))
+                : "-";
+            Log($"  0x{code:X4} {name,-18} = {(e is EdsError.OK ? $"0x{v:X8} ({v})" : e.ToString()),-22} "
+                + $"[{bytes.Length,3} bytes: {hex}]");
+            if (allowed is { Length: > 0 })
+                Log($"         allowed: {string.Join(',', allowed.Select(a => $"0x{a:X}"))}");
+        }
+
+        // FocusMode is the one our EdsAFMode already names, so spell out its reading.
+        var (fe, fv) = await camera.GetPropertyAsync(EdsPropertyId.AFMode);
+        Log($"\n  EdsPropertyId.AFMode = {(EdsAFMode)fv} ({fe})");
+        Log($"  0x9128 RemoteReleaseOn advertised: {camera.SupportedOperations.Contains(0x9128)}");
+        Log($"  0x9154 DoAf advertised:            {camera.SupportedOperations.Contains(0x9154)}");
+        return 0;
+    }
+
+    if (mode is "zoompix")
     {
         // The rect record is the body's own claim about magnification. This checks the claim against
         // the pixels: a 5x crop must LOOK like a crop. Needed because the record numbering is our own
@@ -308,9 +402,9 @@ try
         // The mode dial is physical on a 6D, so the body cannot be put into Av over PTP to meter for
         // itself — the exposure has to be dialled in from here. Overridable, because the right
         // values depend on the room.
-        var av = ArgValue("--av") is { } avs ? Enum.Parse<EdsAv>(avs) : EdsAv.Av_5_6;
-        var shutter = ArgValue("--tv") is { } tvs ? Enum.Parse<EdsTv>(tvs) : EdsTv.Tv_1_125;
-        var iso = ArgValue("--iso") is { } isos ? Enum.Parse<EdsISOSpeed>(isos) : EdsISOSpeed.ISO_400;
+        var av = parse.GetValue(avOpt);
+        var shutter = parse.GetValue(tvOpt);
+        var iso = parse.GetValue(isoOpt);
         Log($"Av = {av}: {await camera.SetApertureAsync(av)}");
         Log($"Tv = {shutter}: {await camera.SetShutterSpeedAsync(shutter)}");
         Log($"ISO = {iso}: {await camera.SetISOAsync(iso)}");
@@ -375,7 +469,7 @@ try
         return 0;
     }
 
-    if (args.Contains("--zoom"))
+    if (mode is "zoom")
     {
         // Why does 0x9158 answer OK and leave the feed at full frame? Judged on the zoom rect the
         // body itself reports in the live-view envelope (record type 18: x, y, w, h) — not on the
@@ -488,7 +582,7 @@ try
         return 0;
     }
 
-    if (args.Contains("--evf"))
+    if (mode is "evf")
     {
         // Live-view magnification, panning and autofocus — plus the string properties, which are
         // read here because they are the cheapest possible check that the byte accessor works at
@@ -637,7 +731,7 @@ try
         return 0;
     }
 
-    if (args.Contains("--diag"))
+    if (mode is "diag")
     {
         // Everything the body will admit about why it might refuse to release, before asking it to.
         foreach (var id in new[]
@@ -913,8 +1007,4 @@ async Task<(bool Delivered, long Bytes)> CollectAsync(string id, TimeSpan window
     return (true, largest);
 }
 
-string? ArgValue(string name)
-{
-    int i = Array.IndexOf(args, name);
-    return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
-}
+

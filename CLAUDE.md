@@ -501,8 +501,15 @@ experiment and judging it on delivered bytes. It lives in `src/`, not `rev/`, be
 outlive the sessions that prompted them and get re-run whenever a claim is challenged:
 
 ```
-dotnet run --project src/FC.SDK.Diagnostics -- [--diag|--mlucheck|--mluself|--clack] [--host]
+dotnet run --project src/FC.SDK.Diagnostics -- --help     # every experiment, with its options
+dotnet run --project src/FC.SDK.Diagnostics -- evf [--host]
 ```
+
+Each experiment is a **System.CommandLine subcommand** (`matrix`, `diag`, `mlucheck`, `mluself`,
+`clack`, `evf`, `zoom`, `zoompix`, `lens`), so `--help` is the list and a typo is an error. That last
+part is not cosmetic: the old `args.Contains("--evf")` dispatch treated an unrecognised argument as
+"no mode given" and therefore ran the **default** one, so a mistyped `--evff` fired the mirror-lockup
+matrix — minutes of shutter actuations — instead of reading a few properties.
 
 Every mode brackets its result with controls and prints per-command timings, because on these bodies
 the response code is the least informative thing available. Three of its habits are worth copying
