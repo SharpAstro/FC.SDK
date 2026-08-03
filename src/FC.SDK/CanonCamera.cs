@@ -654,6 +654,34 @@ public sealed class CanonCamera : IAsyncDisposable
     public async Task<(EdsError Error, uint Value)> GetTempStatusAsync(CancellationToken ct = default) =>
         await GetPropertyAsync(EdsPropertyId.TempStatus, ct);
 
+    /// <summary>
+    /// Whether the camera can autofocus at all right now, and why not if it cannot.
+    /// </summary>
+    /// <remarks>
+    /// Worth asking before any operation that implies autofocus — a half-press release, or
+    /// <see cref="AutoFocusLiveViewAsync"/> — because neither reports the absence of a focus motor
+    /// as an error. On a telescope both answer <c>OK</c> and do nothing.
+    /// <para>
+    /// Verified on an EOS 6D across all three configurations. <see cref="EdsPropertyId.AFMode"/>
+    /// (0xD108) tracks the <b>lens's own AF/MF switch</b>, reading <see cref="EdsAFMode.ManualFocus"/>
+    /// when it is at MF. Note that value is <i>not</i> in the property's allowed-value list, which
+    /// offers only One-Shot / AI Servo / AI Focus — allowed values are what a client may write, not
+    /// the values the property can report, and reading the list as the latter is what made this look
+    /// undetectable at first. With no lens at all the same property reads One-Shot, so lens presence
+    /// has to come from the name.
+    /// </para>
+    /// </remarks>
+    public async Task<(EdsError Error, CanonFocusState State)> GetFocusStateAsync(CancellationToken ct = default)
+    {
+        var (nameErr, lensName) = await GetLensNameAsync(ct);
+        var (modeErr, mode) = await GetPropertyAsync(EdsPropertyId.AFMode, ct);
+
+        var err = nameErr is not EdsError.OK ? nameErr : modeErr;
+        return (err, new CanonFocusState(
+            LensName: string.IsNullOrWhiteSpace(lensName) ? null : lensName,
+            FocusMode: (EdsAFMode)mode));
+    }
+
     /// <summary>The attached lens, as the body names it. Read-only.</summary>
     public Task<(EdsError Error, string? Value)> GetLensNameAsync(CancellationToken ct = default) =>
         GetPropertyStringAsync(EdsPropertyId.LensName, ct: ct);

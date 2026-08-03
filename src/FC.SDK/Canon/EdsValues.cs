@@ -382,3 +382,34 @@ public enum EdsHighIsoNR : uint
     Strong = 2,
     Disable = 3,
 }
+
+/// <summary>
+/// What the camera can currently do about focus: whether glass is mounted, and where that glass's
+/// AF/MF switch is.
+/// </summary>
+/// <remarks>
+/// The two are separate questions and both matter. A body with no lens and a body whose lens is
+/// switched to MF both refuse to autofocus, but only the first is a telescope; the second is a user
+/// who flicked a switch and will wonder why nothing focuses.
+/// </remarks>
+/// <param name="LensName">The mounted lens, or null when the mount is bare.</param>
+/// <param name="FocusMode">
+/// The body's focus mode, which follows the lens switch — <see cref="EdsAFMode.ManualFocus"/> means
+/// the switch is at MF.
+/// </param>
+public readonly record struct CanonFocusState(string? LensName, EdsAFMode FocusMode)
+{
+    /// <summary>True when a lens is mounted.</summary>
+    public bool LensAttached => LensName is not null;
+
+    /// <summary>
+    /// True when an autofocus request could actually drive something. False on a bare mount and
+    /// false with the lens switch at MF — in both cases the camera answers an AF command with
+    /// <c>OK</c> and does nothing.
+    /// </summary>
+    public bool AutoFocusAvailable => LensAttached && FocusMode is not EdsAFMode.ManualFocus;
+
+    public override string ToString() => LensAttached
+        ? $"{LensName} ({FocusMode}), autofocus {(AutoFocusAvailable ? "available" : "unavailable")}"
+        : "no lens, autofocus unavailable";
+}

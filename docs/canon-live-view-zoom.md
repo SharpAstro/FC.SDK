@@ -139,6 +139,31 @@ is no second implementation to check against. A body that numbers its records di
 `null` rather than a wrong answer, and `IsMagnified` stays false when the sensor record is missing
 rather than being inferred from the crop alone.
 
+## Detecting whether autofocus is possible at all
+
+Nothing in the protocol reports "I cannot focus" — a bare mount and a lens switched to MF both
+answer an AF command with `OK` and move nothing. Both are distinguishable, though, and
+`GetFocusStateAsync` combines them:
+
+| Configuration | `LensName` (0xD1D8) | `AFMode` (0xD108) | `AutoFocusAvailable` |
+|---|---|---|---|
+| No lens | `""` | `OneShot` | false |
+| Lens, switch at AF | `EF50mm f/1.8 STM` | `OneShot` | true |
+| Lens, switch at MF | `EF50mm f/1.8 STM` | **`ManualFocus`** | false |
+
+**`0xD108` follows the lens's own AF/MF switch**, established by flipping it with the lens mounted
+and diffing. `FocusInfoEx` (0xD1D3) tracks it too — the uint16 at offset 6 goes `2 → 0` — but the
+focus mode is the readable one.
+
+The trap on the way there is worth keeping. `0xD108`'s allowed-value list is
+`{OneShot, AIServo, AIFocus}` — `ManualFocus` is **not in it** — which made the switch look
+undetectable through this property. That inference was wrong: **allowed values are what a client may
+write, not the values a property can report.** A property the body sets for itself can report
+outside its own writable set.
+
+Note the focus mode alone cannot tell a bare mount from a lens at AF; both read `OneShot`. Lens
+presence has to come from the name.
+
 ## Live-view autofocus works
 
 `DoAf` (0x9154) returns in ~8 ms — on acceptance, not on focus. Confirmed mechanically: the STM

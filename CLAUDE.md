@@ -73,6 +73,14 @@ Full write-up in **`docs/canon-live-view-zoom.md`**. Three things that are easy 
   (5–8 all give 5×) and "5×" is really 4.96×, so read `GetEvfZoomRectAsync` rather than trusting what
   was asked for. Panning is exact and silently clamped, and the body reports where it landed.
 
+**Allowed values are what you may *write*, not what a property can *report*.** `Evf_AFMode`/`AFMode`
+(0xD108) follows the lens's own AF/MF switch and reads `ManualFocus` when it is at MF — a value
+absent from its own allowed-value list. Reading that list as "the values this property can hold" is
+what made the switch look undetectable. `GetFocusStateAsync` combines the focus mode with lens
+presence (from `LensName`, empty on a bare mount) to answer the question that actually matters:
+**can this camera autofocus at all right now** — false on a telescope and false at MF, and in both
+cases an AF command answers `OK` and moves nothing.
+
 **Property reads are typed now.** `CanonPropertyMap` carries a `CanonPropertyType` instead of a dead
 `Size` field, and `GetPropertyAsync` refuses a non-scalar rather than answering `OK` with the first
 four bytes of a string read as an integer — which is what `OwnerName`, `LensName`, `Artist` and

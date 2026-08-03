@@ -385,6 +385,8 @@ try
         // FocusMode is the one our EdsAFMode already names, so spell out its reading.
         var (fe, fv) = await camera.GetPropertyAsync(EdsPropertyId.AFMode);
         Log($"\n  EdsPropertyId.AFMode = {(EdsAFMode)fv} ({fe})");
+        var (fsErr, focus) = await camera.GetFocusStateAsync();
+        Log($"  GetFocusStateAsync   = {focus}  ({fsErr})");
         Log($"  0x9128 RemoteReleaseOn advertised: {camera.SupportedOperations.Contains(0x9128)}");
         Log($"  0x9154 DoAf advertised:            {camera.SupportedOperations.Contains(0x9154)}");
         return 0;
