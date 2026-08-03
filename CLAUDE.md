@@ -46,6 +46,39 @@ Four layers, bottom-up:
 
 - **`CanonDeviceReport`** — the one artefact to ask a bug reporter for. Markdown: model, transport, every advertised operation, every announced property with its allowed values, and the **decoded Custom Function block in wire order with menu numbers**. That last part is the whole point — a reporter cannot know wire ids, but can read menu numbers off their own camera, and `CanonCustomFunctionBlock.Entries` preserves the order that maps between them. It also refuses to be trusted on a flat battery: a body reporting `0xD111` level ≤ 1 gets a loud warning, because at that level a 450D has been seen to drop live view mid-stream and announce dial movements nobody made. (It does *not* stop capturing — that symptom turned out to be mirror lockup; see the Testing section.)
 
+## What is still missing vs EDSDK
+
+**`docs/edsdk-feature-gaps.md`** is the tracked list — read it before concluding that something is
+absent by design, and update it when a gap closes. Still open at 3.0: no PTP filesystem (six opcodes
+declared, zero uses), 31 of EDSDK's 234 property pairs mapped, no movie control, no hotplug.
+
+## Live-view magnification, verified on a 6D
+
+Full write-up in **`docs/canon-live-view-zoom.md`**. Three things that are easy to get wrong:
+
+- **Zoom is an operation, not a property.** `0x9158 Zoom` (1 arg) and `0x9159 ZoomPosition` (2 args:
+  x, y). EDSDK exposes them as `Evf_Zoom` (0x507) / `Evf_ZoomPosition` (0x508) and **no such PTP
+  property exists** — do not map those ids. `../tianwen` deferred its whole DSLR planetary mode
+  waiting for a point/rect property accessor that was never needed.
+- **`Evf_AFMode` (0xD1BA, libgphoto2 `LvAfSystem`) can silently gate magnification** — and it is a
+  condition, not a rule. *With a lens attached*, the factory-default `LiveFace` makes the zoom
+  operation answer `OK` while the feed stays at full frame; `Live` and `Quick` crop. *With no lens*
+  (a body on a telescope) the same body magnifies in all three, and the pan inset disappears too. So
+  do not encode the rule: `SetEvfZoomAsync` verifies against the zoom rect and answers
+  `OperationRefused` only when the frame really did not crop — same pattern as the mirror-lockup
+  refusal, and it gets both configurations right without knowing which it is in. Set `Live` anyway;
+  it worked in every configuration measured.
+- **The zoom rect is the only honest read-out**, and it comes from the live-view envelope, not a
+  property: record type 18 is `[x][y][w][h]`, type 14 the sensor size. The factor is a *threshold*
+  (5–8 all give 5×) and "5×" is really 4.96×, so read `GetEvfZoomRectAsync` rather than trusting what
+  was asked for. Panning is exact and silently clamped, and the body reports where it landed.
+
+**Property reads are typed now.** `CanonPropertyMap` carries a `CanonPropertyType` instead of a dead
+`Size` field, and `GetPropertyAsync` refuses a non-scalar rather than answering `OK` with the first
+four bytes of a string read as an integer — which is what `OwnerName`, `LensName`, `Artist` and
+`Copyright` did before 3.0. Use `GetPropertyStringAsync` / `GetPropertyBytesAsync`; EOS strings are
+plain null-terminated ASCII, **not** PTP length-prefixed UTF-16.
+
 ## Reading and writing EOS properties
 
 **There is no EOS "get property" operation.** Calling standard PTP `GetDevicePropValue` (0x1015) for a 0xD1xx code
