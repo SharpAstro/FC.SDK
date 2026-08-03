@@ -8,6 +8,7 @@
 //     --mlucheck    does a MirrorUpSetting write actually land? (read-back, not the ACK)
 //     --mluself     watch 0xD1BF across a self-timer countdown  [--drive 10] [--wait N]
 //     --clack       A/B listening test: self-timer with lockup off, then on
+//     --evf         string properties, live-view zoom / pan / autofocus, envelope record dump
 //
 //   Common: --host (capture to the body's RAM) | default card, --release <hex,hex> to hand back
 //   handles a crashed run left the camera holding.
@@ -292,6 +293,347 @@ try
                 + $"| 0xD1BF {state}({stateErr}) | SDK claims {camera.MirrorLockupEnabled}");
             Log($"  => the write {(after == (uint)want ? "LANDED" : "DID NOT LAND — the ACK was empty")}");
         }
+        return 0;
+    }
+
+    if (args.Contains("--zoompix"))
+    {
+        // The rect record is the body's own claim about magnification. This checks the claim against
+        // the pixels: a 5x crop must LOOK like a crop. Needed because the record numbering is our own
+        // reading of one model's bytes — if type 18 were something else, the rect could track
+        // perfectly while the image never changed.
+        //
+        // Stopped down first, because the earlier runs were so overexposed that a crop and a full
+        // frame were both white rectangles and the visual test could not have failed.
+        // The mode dial is physical on a 6D, so the body cannot be put into Av over PTP to meter for
+        // itself — the exposure has to be dialled in from here. Overridable, because the right
+        // values depend on the room.
+        var av = ArgValue("--av") is { } avs ? Enum.Parse<EdsAv>(avs) : EdsAv.Av_5_6;
+        var shutter = ArgValue("--tv") is { } tvs ? Enum.Parse<EdsTv>(tvs) : EdsTv.Tv_1_125;
+        var iso = ArgValue("--iso") is { } isos ? Enum.Parse<EdsISOSpeed>(isos) : EdsISOSpeed.ISO_400;
+        Log($"Av = {av}: {await camera.SetApertureAsync(av)}");
+        Log($"Tv = {shutter}: {await camera.SetShutterSpeedAsync(shutter)}");
+        Log($"ISO = {iso}: {await camera.SetISOAsync(iso)}");
+
+        Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
+        await Task.Delay(2000);
+        Log($"SetEvfAfSystem(Live) = {await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live)}");
+        await Task.Delay(900);
+
+        async Task Shot(string tag)
+        {
+            for (int i = 0; i < 30; i++)
+            {
+                var (e, jpeg) = await camera!.GetLiveViewFrameAsync();
+                if (e is EdsError.OK && jpeg.Length > 1000 && jpeg[0] == 0xFF && jpeg[1] == 0xD8)
+                {
+                    await File.WriteAllBytesAsync(Path.Combine(outDir, $"{tag}.jpg"), jpeg);
+                    Log($"  {tag,-16} {jpeg.Length,7:N0} bytes   rect {await camera.GetEvfZoomRectAsync()}");
+                    return;
+                }
+                await Task.Delay(100);
+            }
+            Log($"  {tag}: NO FRAME");
+        }
+
+        // Centre the crop first, so 1x / 5x / 10x differ only in magnification.
+        await camera.SetEvfZoomAsync(CanonEvfZoom.X5);
+        await camera.SetEvfZoomPositionAsync(2184, 1456);
+        await Task.Delay(1000);
+        await camera.SetEvfZoomAsync(CanonEvfZoom.Fit);
+        await Task.Delay(1200);
+
+        Log("\n--- magnification, same centre ---");
+        await Shot("mag_1x");
+        Log($"  zoom X5  = {await camera.SetEvfZoomAsync(CanonEvfZoom.X5)}");
+        await Shot("mag_5x");
+        Log($"  zoom X10 = {await camera.SetEvfZoomAsync(CanonEvfZoom.X10)}");
+        await Shot("mag_10x");
+
+        // Panning at 5x across the frame. Four corners plus centre: if these are really different
+        // regions of the sensor, the five images show five different parts of the scene.
+        Log("\n--- panning at 5x ---");
+        await camera.SetEvfZoomAsync(CanonEvfZoom.X5);
+        await Task.Delay(1200);
+        // Corners in SENSOR coordinates. An earlier pass used 9999 as "far enough" and the axis
+        // simply kept its previous value: a coordinate beyond the sensor is rejected outright, not
+        // clamped, so the frames all looked like the pan had failed. 4368 (inside 5472) does clamp.
+        foreach (var (tag, x, y) in new (string, uint, uint)[]
+                 {
+                     ("pan_topleft", 0, 0), ("pan_topright", 5471, 0), ("pan_centre", 2184, 1456),
+                     ("pan_bottomleft", 0, 3647), ("pan_bottomright", 5471, 3647),
+                 })
+        {
+            await camera.SetEvfZoomPositionAsync(x, y);
+            await Task.Delay(1000);
+            await Shot(tag);
+        }
+
+        await camera.SetEvfZoomAsync(CanonEvfZoom.Fit);
+        Log($"\nStopLiveView = {await camera.StopLiveViewAsync()}");
+        Log($"Images in {outDir}");
+        return 0;
+    }
+
+    if (args.Contains("--zoom"))
+    {
+        // Why does 0x9158 answer OK and leave the feed at full frame? Judged on the zoom rect the
+        // body itself reports in the live-view envelope (record type 18: x, y, w, h) — not on the
+        // response code, which is already known to lie here, and not on eyeballing a JPEG.
+        const uint ZoomRectRecord = 18;
+        const ushort LvAfSystem = 0xD1BA;
+        const ushort LvViewTypeSelect = 0xD1BC;
+
+        static uint U32(ReadOnlySpan<byte> s, int at) => BitConverter.ToUInt32(s[at..(at + 4)]);
+
+        async Task<(uint X, uint Y, uint W, uint H)?> Rect(int tries = 30)
+        {
+            for (int i = 0; i < tries; i++)
+            {
+                var (e, records) = await camera!.GetLiveViewRecordsAsync();
+                if (e is EdsError.OK)
+                    foreach (var r in records)
+                        if (r.Type == ZoomRectRecord && r.Payload.Length >= 16)
+                        {
+                            var s = r.Payload.Span;
+                            return (U32(s, 0), U32(s, 4), U32(s, 8), U32(s, 12));
+                        }
+                await Task.Delay(100);
+            }
+            return null;
+        }
+
+        string Show((uint X, uint Y, uint W, uint H)? r) =>
+            r is { } v ? $"({v.X},{v.Y}) {v.W}x{v.H}" : "no frame";
+
+        Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
+        await Task.Delay(2000);
+
+        var baseline = await Rect();
+        Log($"baseline rect: {Show(baseline)}");
+        if (baseline is null) { Log("No frames — nothing below this line means anything."); return 1; }
+
+        foreach (var code in new[] { LvAfSystem, LvViewTypeSelect })
+        {
+            var (e, v) = await camera.GetRawPropertyAsync(code);
+            var allowed = await camera.GetRawAllowedValuesAsync(code);
+            Log($"  0x{code:X4} = {(e is EdsError.OK ? $"0x{v:X}" : e.ToString())}"
+                + $"   allowed: {(allowed is null ? "none announced" : string.Join(',', allowed.Select(a => $"0x{a:X}")))}");
+        }
+
+        // 1: does ANY zoom factor move the rect? gphoto2 passes the value straight through and
+        // documents only 1 and 5; EDSDK's property uses 1/5/10. Neither is evidence for this body.
+        Log("\n--- zoom factors, AF system as found ---");
+        foreach (uint z in new uint[] { 1, 2, 3, 5, 10 })
+        {
+            var err2 = await camera.SetEvfZoomAsync(z);
+            await Task.Delay(1200);
+            await camera.DrainEventsAsync();
+            var r = await Rect();
+            Log($"  zoom {z,-3} = {err2,-10} rect {Show(r)}"
+                + $"{(r is { } v && baseline is { } b && (v.W != b.W || v.H != b.H) ? "   <<< MOVED" : "")}");
+        }
+        await camera.SetEvfZoomAsync(1);
+        await Task.Delay(800);
+
+        // 2: a 6D disables magnification in Face+Tracking AF. If that is the gate, changing the LV
+        // AF system and re-trying is what shows it.
+        Log("\n--- zoom 5 across LV AF systems (0xD1BA) ---");
+        foreach (uint af in new uint[] { 0, 1, 2 })
+        {
+            var setAf = await camera.SetRawPropertyAsync(LvAfSystem, af);
+            await Task.Delay(900);
+            await camera.DrainEventsAsync();
+            var (_, nowAf) = await camera.GetRawPropertyAsync(LvAfSystem);
+            var err3 = await camera.SetEvfZoomAsync(5);
+            await Task.Delay(1200);
+            var r = await Rect();
+            Log($"  LvAfSystem->{af} ({setAf}, reads 0x{nowAf:X})  zoom5={err3}  rect {Show(r)}"
+                + $"{(r is { } v && baseline is { } b && (v.W != b.W || v.H != b.H) ? "   <<< MOVED" : "")}");
+            await camera.SetEvfZoomAsync(1);
+            await Task.Delay(600);
+        }
+
+        // 3: with the gate open, which factors are real? The first sweep ran in the blocking AF mode
+        // and so proved nothing about the factors themselves.
+        Log("\n--- zoom factors, LvAfSystem=1 (gate open) ---");
+        await camera.SetRawPropertyAsync(LvAfSystem, 1);
+        await Task.Delay(900);
+        foreach (uint z in new uint[] { 1, 2, 3, 4, 5, 6, 8, 10, 15 })
+        {
+            var err4 = await camera.SetEvfZoomAsync(z);
+            await Task.Delay(1100);
+            var r = await Rect();
+            var factor = r is { } v && v.W > 0 ? $"{5472.0 / v.W:F2}x" : "?";
+            Log($"  zoom {z,-3} = {err4,-10} rect {Show(r),-24} => {factor}");
+        }
+
+        // 4: panning. Only meaningful while zoomed, and the rect origin is the read-out that says
+        // whether a coordinate landed where it was asked to.
+        Log("\n--- pan at zoom 5 (rect origin is the instrument) ---");
+        await camera.SetEvfZoomAsync(5);
+        await Task.Delay(1100);
+        foreach (var (x, y) in new (uint, uint)[] { (0, 0), (1000, 500), (2184, 1456), (4368, 2912), (9999, 9999) })
+        {
+            var errp = await camera.SetEvfZoomPositionAsync(x, y);
+            await Task.Delay(900);
+            var r = await Rect();
+            var landed = r is { } v && v.X == x && v.Y == y ? "exact"
+                : r is { } v2 ? $"clamped to ({v2.X},{v2.Y})" : "no frame";
+            Log($"  asked ({x},{y}) = {errp,-10} rect {Show(r),-24} {landed}");
+        }
+
+        await camera.SetEvfZoomAsync(1);
+        Log($"\nStopLiveView = {await camera.StopLiveViewAsync()}");
+        return 0;
+    }
+
+    if (args.Contains("--evf"))
+    {
+        // Live-view magnification, panning and autofocus — plus the string properties, which are
+        // read here because they are the cheapest possible check that the byte accessor works at
+        // all, and one of them can be checked against a value from a different part of the firmware.
+        Log("--- string properties (byte accessor) ---");
+        foreach (var id in new[]
+                 {
+                     EdsPropertyId.LensName, EdsPropertyId.BodyIDEx, EdsPropertyId.OwnerName,
+                     EdsPropertyId.Artist, EdsPropertyId.Copyright,
+                 })
+        {
+            var (e, text) = await camera.GetPropertyStringAsync(id);
+            var (bytesErr, bytes) = await camera.GetPropertyBytesAsync(id);
+            Log($"  {id,-12} = {(e is EdsError.OK ? $"\"{text}\"" : e.ToString())}"
+                + $"   [{bytes.Length} bytes{(bytesErr is EdsError.OK ? "" : $", {bytesErr}")}]");
+        }
+        // Two different identifiers, not two readings of one: 0xD1AF is the serial printed on the
+        // body, GetDeviceInfo's is a 32-hex-digit internal id. Printed together so nobody re-derives
+        // that the hard way.
+        var (_, bodyId) = await camera.GetBodyIdAsync();
+        Log($"  BodyIDEx (0xD1AF): \"{bodyId}\"   GetDeviceInfo serial: \"{camera.SerialNumber}\"");
+
+        Log($"\n  0x9154 DoAf:         {camera.SupportsLiveViewAutoFocus}");
+        Log($"  0x9158 Zoom:         {camera.SupportsEvfZoom}");
+        Log($"  0x9159 ZoomPosition: {camera.SupportsEvfZoomPosition}");
+
+        Log("\n--- live view ---");
+        Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
+        await Task.Delay(1500);
+
+        // A frame is only evidence if it has real bytes in it — a body that has stopped streaming
+        // answers OK forever with a zero-length payload.
+        async Task<int> Frames(string tag, int want = 3)
+        {
+            int got = 0;
+            for (int i = 0; i < 25 && got < want; i++)
+            {
+                var (e, jpeg) = await camera!.GetLiveViewFrameAsync();
+                if (e is EdsError.OK && jpeg.Length > 1000 && jpeg[0] == 0xFF && jpeg[1] == 0xD8)
+                {
+                    var path = Path.Combine(outDir, $"{tag}_{got}.jpg");
+                    await File.WriteAllBytesAsync(path, jpeg);
+                    if (got is 0) Log($"  {tag}: {jpeg.Length:N0} bytes -> {Path.GetFileName(path)}");
+                    got++;
+                }
+                else await Task.Delay(120);
+            }
+            if (got is 0) Log($"  {tag}: NO FRAME — nothing below this line means anything");
+            return got;
+        }
+
+        // The envelope's non-image records are where the zoom rect must live. Logging type+length at
+        // each zoom level is what makes it identifiable: the record that changes when zoom changes.
+        async Task Records(string tag)
+        {
+            var (e, records) = await camera!.GetLiveViewRecordsAsync();
+            if (e is not EdsError.OK || records.Count is 0) { Log($"  {tag} records: none ({e})"); return; }
+            foreach (var r in records)
+            {
+                var head = string.Join(' ', r.Payload.Span[..Math.Min(32, r.Payload.Length)].ToArray().Select(b => b.ToString("X2")));
+                Log($"  {tag} record type={r.Type,-3} len={r.Payload.Length,-8} {(r.IsImage ? "(JPEG)" : head)}");
+            }
+        }
+
+        await Frames("zoom1");
+        await Records("zoom1");
+        Log($"  rect: {await camera.GetEvfZoomRectAsync()}");
+
+        // The guard, both ways round. LiveFace is the factory default and silently blocks
+        // magnification, so the SDK must refuse rather than relay the camera's OK — and it must NOT
+        // refuse once the AF method allows it. A test that only showed one direction would be
+        // satisfied by a method that always refuses.
+        Log("\n--- the AF-method gate ---");
+        var (_, afWas) = await camera.GetEvfAfSystemAsync();
+        var afAllowed = await camera.GetRawAllowedValuesAsync(0xD1BA);
+        Log($"  Evf_AFMode as found: {afWas}");
+        Log($"  Evf_AFMode allowed:  {(afAllowed is null ? "none announced" : string.Join(", ", afAllowed.Select(a => $"{(CanonEvfAfSystem)a}({a})")))}");
+        // With a manual lens or a telescope there are no electronic contacts, so whether this
+        // setting is even changeable is the thing to watch — the unlock depends on it entirely.
+        Log($"  Lens: \"{(await camera.GetLensNameAsync()).Value}\"");
+
+        foreach (var af in new[] { CanonEvfAfSystem.LiveFace, CanonEvfAfSystem.Live })
+        {
+            Log($"\n  SetEvfAfSystem({af}) = {await camera.SetEvfAfSystemAsync(af)}");
+            await Task.Delay(900);
+            await camera.DrainEventsAsync();
+            var (_, afNow) = await camera.GetEvfAfSystemAsync();
+            Log($"    reads back: {afNow}{(afNow == af ? "" : "  <<< DID NOT TAKE")}");
+
+            var zoomErr = await camera.SetEvfZoomAsync(CanonEvfZoom.X5);
+            var rect = await camera.GetEvfZoomRectAsync();
+            Log($"    SetEvfZoom(X5) = {zoomErr}   rect {rect}");
+
+            // Only one of these is a rule. Zoom in Live MUST work — if it does not, the feature is
+            // broken. Whether LiveFace blocks it is lens-dependent: with an EF lens attached it is
+            // silently ignored, with no lens (the telescope case) it magnifies anyway. So that row
+            // is reported rather than asserted, and the SDK decides by verifying the rect instead of
+            // by knowing this rule — which is why it gets both cases right without being told.
+            if (af is CanonEvfAfSystem.Live)
+            {
+                Log($"    => must be OK: {(zoomErr is EdsError.OK ? "CORRECT" : "*** WRONG ***")}");
+                if (zoomErr is not EdsError.OK) failures++;
+            }
+            else
+            {
+                Log($"    => lens-dependent, not asserted: this body "
+                    + $"{(zoomErr is EdsError.OK ? "ALLOWED" : "BLOCKED")} zoom in {af}");
+            }
+
+            await Frames($"af_{af}_zoom5", want: 1);
+            await camera.SetEvfZoomAsync(CanonEvfZoom.Fit, verify: false);
+            await Task.Delay(700);
+        }
+
+        // Pan, with the gate open. The rect origin says where the crop actually landed; the camera
+        // clamps silently to keep the crop on the sensor.
+        Log("\n--- pan at 5x ---");
+        await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
+        await Task.Delay(700);
+        Log($"  zoom X5 = {await camera.SetEvfZoomAsync(CanonEvfZoom.X5)}");
+        foreach (var (x, y) in new (uint, uint)[] { (0, 0), (2184, 1456), (4368, 2912) })
+        {
+            Log($"  SetEvfZoomPosition({x},{y}) = {await camera.SetEvfZoomPositionAsync(x, y)}");
+            await Task.Delay(900);
+            Log($"    landed: {await camera.GetEvfZoomRectAsync()}");
+            await Frames($"pan_{x}x{y}", want: 1);
+        }
+
+        Log($"\n  back to 1x = {await camera.SetEvfZoomAsync(CanonEvfZoom.Fit)}");
+        await Task.Delay(1000);
+        await Frames("zoom1_again", want: 1);
+
+        Log("\n--- live-view autofocus (0x9154) ---");
+        camera.PropertyChanged += (_, e) => Log($"       evt prop {e.PropertyId} = 0x{e.Value:X}");
+        camera.StateChanged += (_, e) => Log($"       evt state {e.EventType} param=0x{e.Param:X}");
+        var afStart = clock.Elapsed;
+        Log($"  AutoFocusLiveView = {await camera.AutoFocusLiveViewAsync()}  (+{(clock.Elapsed - afStart).TotalMilliseconds:F0} ms)");
+        // AF returns on acceptance, not on focus — the outcome is on the event stream, and the frames
+        // are the visual record of whether the image actually snapped into focus.
+        for (int i = 0; i < 6; i++) { await Task.Delay(500); await camera.DrainEventsAsync(); }
+        await Frames("after_af", want: 2);
+        Log($"  AfCancel = {await camera.CancelAutoFocusAsync()}");
+
+        Log($"\nStopLiveView = {await camera.StopLiveViewAsync()}");
+        Log($"Frames written to {outDir}");
         return 0;
     }
 

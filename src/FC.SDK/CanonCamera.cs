@@ -988,6 +988,234 @@ public sealed class CanonCamera : IAsyncDisposable
     public async Task<(EdsError Error, byte[] JpegData)> GetLiveViewFrameAsync(CancellationToken ct = default) =>
         await _canon.GetViewfinderDataAsync(ct);
 
+    /// <summary>
+    /// Every record in a live-view frame, image and undecoded metadata alike. For identifying what
+    /// the body puts alongside the picture — the zoom rect, focus points, histogram.
+    /// </summary>
+    public async Task<(EdsError Error, IReadOnlyList<CanonViewfinderRecord> Records)> GetLiveViewRecordsAsync(
+        CancellationToken ct = default)
+    {
+        var (err, envelope) = await _canon.GetViewfinderEnvelopeAsync(ct);
+        return err is EdsError.OK
+            ? (EdsError.OK, CanonViewfinderFrame.ParseRecords(envelope))
+            : (err, []);
+    }
+
+    // --- Live view magnification ---
+    //
+    // Zoom is the DSLR planetary/focusing regime: at 5x or 10x the live feed is a near-1:1-pixel
+    // crop of a small sensor region rather than a downscaled whole frame. Both of these are
+    // *operations* (0x9158 / 0x9159), not property writes — EDSDK models them as the properties
+    // Evf_Zoom (0x507) and Evf_ZoomPosition (0x508), and no such PTP property exists.
+
+    /// <summary>True when the body advertises live-view magnification (0x9158).</summary>
+    public bool SupportsEvfZoom => _canon.SupportsEvfZoom;
+
+    /// <summary>True when the body advertises panning the magnified crop (0x9159).</summary>
+    public bool SupportsEvfZoomPosition => _canon.SupportsEvfZoomPosition;
+
+    /// <summary>True when the body advertises live-view autofocus (0x9154).</summary>
+    public bool SupportsLiveViewAutoFocus => _canon.SupportsDoAf;
+
+    /// <summary>
+    /// Sets the live-view magnification. Live view must already be running.
+    /// </summary>
+    public Task<EdsError> SetEvfZoomAsync(
+        CanonEvfZoom zoom, bool verify = true, CancellationToken ct = default) =>
+        SetEvfZoomAsync((uint)zoom, verify, ct);
+
+    /// <summary>
+    /// Sets the live-view magnification to a raw value, for a body that offers a factor
+    /// <see cref="CanonEvfZoom"/> does not name.
+    /// </summary>
+    /// <param name="verify">
+    /// Read the zoom rect back and answer <see cref="EdsError.OperationRefused"/> when the camera
+    /// took no notice. On by default: this operation is one of the ones that ACKs unconditionally,
+    /// and the caller cannot otherwise tell. Costs up to a second of frame polling. Turn it off for
+    /// a body already known to honour zoom, or when live view is not streaming.
+    /// </param>
+    /// <remarks>
+    /// A 6D measured with the factor as a <b>threshold</b> rather than an exact value: 1–4 give 1×,
+    /// 5–8 give 5×, 10 and above give 10×. Ask for what you want and read
+    /// <see cref="GetEvfZoomRectAsync"/> for what you got.
+    /// </remarks>
+    public async Task<EdsError> SetEvfZoomAsync(uint zoom, bool verify = true, CancellationToken ct = default)
+    {
+        var err = await _canon.EvfZoomAsync(zoom, ct);
+        if (err is not EdsError.OK)
+        {
+            _logger.LogWarning("SetEvfZoom({Zoom}) failed: {Error}", zoom, err);
+            return err;
+        }
+
+        if (!verify) return EdsError.OK;
+
+        // Wait for the rect to REACH the expected state rather than sampling one frame: the body
+        // takes about a second to apply a zoom and keeps streaming pre-zoom frames meanwhile, so a
+        // single read reliably catches the old rect and calls a working zoom refused.
+        var want = zoom > 1;
+        var rect = await WaitForZoomRectAsync(r => r.IsMagnified == want, ZoomSettleTimeout, ct);
+
+        if (rect is null)
+        {
+            // No frame arrived, so there is no evidence either way. Refusing here would be the
+            // mistake this whole method exists to prevent, one level up.
+            _logger.LogDebug("SetEvfZoom({Zoom}): no live-view frame to verify against", zoom);
+            return EdsError.OK;
+        }
+
+        if (zoom > 1 && !rect.Value.IsMagnified)
+        {
+            var (_, afMode) = await GetPropertyAsync(EdsPropertyId.Evf_AFMode, ct);
+            _logger.LogError(
+                "{Model} accepted zoom {Zoom} and stayed at full frame ({Rect}). The known cause is "
+                + "the live-view AF method: Evf_AFMode is {AfMode}, and {Blocking} silently disables "
+                + "magnification on a body with a lens attached. Try {Alternative}.",
+                Model ?? "The camera", zoom, rect.Value, (CanonEvfAfSystem)afMode,
+                nameof(CanonEvfAfSystem.LiveFace), nameof(CanonEvfAfSystem.Live));
+            return EdsError.OperationRefused;
+        }
+
+        return EdsError.OK;
+    }
+
+    /// <summary>
+    /// The region of the sensor live view is currently showing, as the body reports it — the only
+    /// trustworthy account of whether a zoom or pan actually took effect. Null when no frame
+    /// arrives, or when the body does not describe its zoom rect.
+    /// </summary>
+    /// <param name="ct">Cancellation.</param>
+    public Task<CanonEvfZoomRect?> GetEvfZoomRectAsync(CancellationToken ct = default) =>
+        WaitForZoomRectAsync(_ => true, ZoomReadTimeout, ct);
+
+    /// <summary>How long a zoom change is given to show up in the rect before it counts as ignored.</summary>
+    private static readonly TimeSpan ZoomSettleTimeout = TimeSpan.FromSeconds(3);
+
+    /// <summary>Budget for simply reading the current rect — enough to outlast a few empty polls.</summary>
+    private static readonly TimeSpan ZoomReadTimeout = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Polls live view until the zoom rect satisfies <paramref name="settled"/>, returning the last
+    /// rect seen if it never does. Roughly half of all live-view reads answer "no frame yet" on the
+    /// bodies measured, so any single read is unreliable on its own.
+    /// </summary>
+    private async Task<CanonEvfZoomRect?> WaitForZoomRectAsync(
+        Func<CanonEvfZoomRect, bool> settled, TimeSpan timeout, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        CanonEvfZoomRect? last = null;
+
+        while (true)
+        {
+            var (err, records) = await GetLiveViewRecordsAsync(ct);
+            if (err is EdsError.OK && records.Count > 0
+                && CanonViewfinderFrame.TryGetZoomRect([.. records]) is { } rect)
+            {
+                last = rect;
+                if (settled(rect)) return rect;
+            }
+
+            if (DateTime.UtcNow >= deadline) return last;
+            await Task.Delay(100, ct);
+        }
+    }
+
+    /// <summary>The live-view AF method. Gates magnification — see <see cref="CanonEvfAfSystem"/>.</summary>
+    public async Task<(EdsError Error, CanonEvfAfSystem Value)> GetEvfAfSystemAsync(CancellationToken ct = default)
+    {
+        var (err, value) = await GetPropertyAsync(EdsPropertyId.Evf_AFMode, ct);
+        return (err, (CanonEvfAfSystem)value);
+    }
+
+    /// <summary>
+    /// Sets the live-view AF method. Set this to <see cref="CanonEvfAfSystem.Live"/> before zooming:
+    /// the factory default on at least a 6D is <see cref="CanonEvfAfSystem.LiveFace"/>, which
+    /// silently blocks magnification.
+    /// </summary>
+    public Task<EdsError> SetEvfAfSystemAsync(CanonEvfAfSystem system, CancellationToken ct = default) =>
+        SetPropertyAsync(EdsPropertyId.Evf_AFMode, (uint)system, ct);
+
+    /// <summary>
+    /// Moves the magnified crop across the sensor.
+    /// </summary>
+    /// <remarks>
+    /// Coordinates are the body's own sensor-coordinate space, and the units differ across
+    /// generations — libgphoto2 measured "approx 64 pixel steps on the EOS 1000D". Treat a value as
+    /// calibrated only against the zoom rect the viewfinder envelope reports on the same body; do
+    /// not carry a constant between models. Has no visible effect unless zoom is above 1×.
+    /// </remarks>
+    /// <param name="verify">
+    /// Wait for the move to appear in the zoom rect and return where it landed. On by default: the
+    /// body streams pre-move frames for up to a second afterwards, so an immediate read of the rect
+    /// reports the <i>previous</i> position — which looks exactly like a pan that did not work.
+    /// </param>
+    public async Task<(EdsError Error, CanonEvfZoomRect? Landed)> SetEvfZoomPositionAsync(
+        uint x, uint y, bool verify = true, CancellationToken ct = default)
+    {
+        var before = verify ? await GetEvfZoomRectAsync(ct) : null;
+
+        // Clamp into the range the body will even look at. Measured on a 6D: a coordinate up to
+        // (sensor - crop) is accepted and then clamped inwards by the body itself, but anything
+        // beyond that is DISCARDED — the axis silently keeps its previous value, which reads exactly
+        // like a pan that did not work. Asking for "the far corner" with a large number therefore
+        // moves nothing at all, so the far corner is computed here instead.
+        if (before is { IsMagnified: true } b)
+        {
+            var (maxX, maxY) = (b.SensorWidth - b.Width, b.SensorHeight - b.Height);
+            if (x > maxX || y > maxY)
+            {
+                _logger.LogDebug(
+                    "SetEvfZoomPosition({X},{Y}) is outside the pannable range; asking for ({CX},{CY})",
+                    x, y, Math.Min(x, maxX), Math.Min(y, maxY));
+                (x, y) = (Math.Min(x, maxX), Math.Min(y, maxY));
+            }
+        }
+
+        var err = await _canon.EvfZoomPositionAsync(x, y, ct);
+        if (err is not EdsError.OK)
+        {
+            _logger.LogWarning("SetEvfZoomPosition({X},{Y}) failed: {Error}", x, y, err);
+            return (err, null);
+        }
+
+        if (!verify) return (EdsError.OK, null);
+
+        // Settled means either the exact coordinate asked for, or — when the camera clamped, which
+        // it does silently and by an amount that cannot be predicted without knowing the crop size —
+        // any origin other than the one it started from.
+        var landed = await WaitForZoomRectAsync(
+            r => (r.X == x && r.Y == y) || before is not { } b || r.X != b.X || r.Y != b.Y,
+            ZoomSettleTimeout, ct);
+
+        if (landed is { } l && (l.X != x || l.Y != y))
+            _logger.LogDebug("SetEvfZoomPosition({X},{Y}) clamped to ({LX},{LY})", x, y, l.X, l.Y);
+
+        return (EdsError.OK, landed);
+    }
+
+    /// <summary>
+    /// Runs contrast-detect autofocus on the live-view image (0x9154).
+    /// </summary>
+    /// <remarks>
+    /// The live-view counterpart to the mirror-path half-press: <see cref="PressShutterHalfwayAsync"/>
+    /// drives the phase-detect sensor, which is blind while the mirror is up for live view. Returns
+    /// when the camera accepts the command, not when focus is achieved — watch the event stream, and
+    /// <see cref="CancelAutoFocusAsync"/> to abort a hunt.
+    /// </remarks>
+    public async Task<EdsError> AutoFocusLiveViewAsync(CancellationToken ct = default)
+    {
+        if (!_canon.SupportsDoAf)
+        {
+            _logger.LogWarning("{Model} does not advertise live-view autofocus (0x9154)", Model ?? "This camera");
+            return EdsError.NotSupported;
+        }
+
+        var err = await _canon.DoAfAsync(ct);
+        if (err is not EdsError.OK)
+            _logger.LogWarning("AutoFocusLiveView failed: {Error}", err);
+        return err;
+    }
+
     public async Task<EdsError> StopLiveViewAsync(CancellationToken ct = default)
     {
         var err = await _canon.TerminateViewfinderAsync(ct);

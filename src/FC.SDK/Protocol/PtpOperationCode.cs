@@ -75,7 +75,12 @@ internal enum PtpOperationCode : ushort
     CanonDepthOfFieldPreview = 0x9156,
     CanonAfCancel = 0x9160,
     CanonChangeUSBProtocol = 0x901F,
+
+    /// <summary>Live-view magnification. One parameter: the zoom factor. An operation, not a property.</summary>
     CanonZoom = 0x9158,
+
+    /// <summary>Pans the magnified live-view crop. Two parameters: x, y.</summary>
+    CanonZoomPosition = 0x9159,
     CanonGetObjectInfo64 = 0x9170,
     CanonGetObject64 = 0x9171,
     CanonGetPartialObject64 = 0x9172,
