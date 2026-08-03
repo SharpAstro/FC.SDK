@@ -174,6 +174,29 @@ Consequences worth remembering:
 - **`SetRequestOLCInfoGroup` (0x913D, mask 0x1fff)** is required on newer bodies before they report Tv/Av/ISO and AF
   state via `OLCInfoChanged` (0xC1A5).
 
+## The still/movie lever is readable, and costs nothing to ignore
+
+Measured on a 6D with `FC.SDK.Diagnostics movie --tag <position>`, which dumps all 110 announced
+properties per lever position so the two can be diffed. Diffing everything rather than guessing which
+property reports it is the same method that found the lens AF/MF switch, after reasoning from an
+allowed-value list got that one wrong.
+
+- **`Evf_Mode` (0xD1B1) goes 1 → 2**, and **2 is not in its own allowed list of `1,0`**. Third
+  independent instance of the rule: *allowed values are what you may write, not what a property can
+  report.* A body sets this for itself from a physical lever, so the writable set does not bound it.
+- **`0xD1C2` goes 0 → 1**, which EDSDK's own extracted table names `FixedMovie` (0x01000422). Second,
+  independent indicator.
+- **A still release still works in movie position**: `OK` in 274 ms, a 21.7 MB CR2 delivered. So there
+  is nothing to warn about and no code needs to care. That is the whole reason this was worth ten
+  minutes: the fear was a release answering `OK` and producing nothing, the shape that cost a session
+  for mirror lockup and again for the un-fetched-frame wedge.
+- **Record type 9 does NOT appear**, contradicting the note that "9 is movie mode". Live view in movie
+  position still delivers image record 1. Record 9 presumably needs actual movie *recording*, which we
+  cannot start (`Record`, 0x510, has no PTP pairing in EDSDK's table either). Corrected accordingly.
+- Movie position also narrows `Tv` (52 values down to 22) and `ISOSpeed`, moves `MeteringMode` 4 → 5,
+  empties `AFMode`'s allowed list, and changes the C.Fn block size at 0xD1A0 from 156 to 188 bytes.
+  All consequences of the lever rather than indicators of it.
+
 ## Mirror-lockup capture, and why its cleanup is the caller's job
 
 `TakePictureWithMirrorLockupAsync` does the verified 6D recipe: arm `0xD13A`, select a self-timer
