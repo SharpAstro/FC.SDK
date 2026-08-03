@@ -397,6 +397,23 @@ public enum EdsHighIsoNR : uint
 /// The body's focus mode, which follows the lens switch — <see cref="EdsAFMode.ManualFocus"/> means
 /// the switch is at MF.
 /// </param>
+/// <summary>
+/// Camera settings a helper changed and has not been able to put back yet. Null members are already
+/// restored or were never touched.
+/// </summary>
+/// <param name="DriveMode">Drive mode to return to, or null if it is already back.</param>
+/// <param name="MirrorLockup">Mirror-lockup setting to return to, or null if already back.</param>
+public readonly record struct CanonPendingRestore(EdsDriveMode? DriveMode, bool? MirrorLockup)
+{
+    public override string ToString() => (DriveMode, MirrorLockup) switch
+    {
+        ({ } d, { } m) => $"drive {d} and mirror lockup {(m ? "on" : "off")}",
+        ({ } d, null) => $"drive {d}",
+        (null, { } m) => $"mirror lockup {(m ? "on" : "off")}",
+        _ => "nothing",
+    };
+}
+
 public readonly record struct CanonFocusState(string? LensName, EdsAFMode FocusMode)
 {
     /// <summary>True when a lens is mounted.</summary>

@@ -72,7 +72,20 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
     {
         _ = Task.Run(async () =>
         {
-            await _gate.WaitAsync(_shutdown.Token);
+            // Count the wait, so the UI can say "accepted, waiting for the camera" rather than showing
+            // nothing at all. PTP is half-duplex and every action shares one gate, so during a
+            // multi-second operation a click legitimately queues; without this it looked dropped.
+            Interlocked.Increment(ref state.QueuedOperations);
+            state.Invalidate();
+            try
+            {
+                await _gate.WaitAsync(_shutdown.Token);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref state.QueuedOperations);
+                state.Invalidate();
+            }
 
             // Published so teardown can cancel this operation instead of queueing behind it.
             using var running = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);

@@ -486,6 +486,226 @@ public sealed class CanonCamera : IAsyncDisposable
         SetPropertyAsync(EdsPropertyId.DriveMode, (uint)mode, ct);
 
     /// <summary>
+    /// Settings <see cref="TakePictureWithMirrorLockupAsync"/> changed and could not put back yet,
+    /// or null when nothing is outstanding.
+    /// </summary>
+    /// <remarks>
+    /// Not a failure. The body refuses property writes while a just-taken frame is still awaiting
+    /// <c>TransferComplete</c>, and only the caller can clear that by fetching the image, so the
+    /// restore has to happen after they do. Apply it with
+    /// <see cref="ApplyPendingMirrorLockupRestoreAsync"/>.
+    /// </remarks>
+    public CanonPendingRestore? PendingMirrorLockupRestore { get; private set; }
+
+    /// <summary>
+    /// Applies whatever <see cref="PendingMirrorLockupRestore"/> is holding. Safe to call when there is
+    /// nothing outstanding, and safe to call more than once: anything that lands is cleared.
+    /// </summary>
+    /// <remarks>
+    /// Call this after fetching the frame from a mirror-lockup capture. Leaving it uncalled leaves the
+    /// body on a self-timer drive, which delays every later exposure by a few seconds and looks like a
+    /// camera fault rather than a leftover setting.
+    /// </remarks>
+    public async Task<EdsError> ApplyPendingMirrorLockupRestoreAsync(CancellationToken ct = default)
+    {
+        if (PendingMirrorLockupRestore is not { } pending) return EdsError.OK;
+
+        await _canon.DrainEventsAsync(ct);
+        var result = EdsError.OK;
+        var (drive, lockup) = (pending.DriveMode, pending.MirrorLockup);
+
+        if (drive is { } wantDrive)
+        {
+            var err = await SetDriveModeAsync(wantDrive, ct);
+            var (_, now) = await GetDriveModeAsync(ct);
+            if (now == wantDrive) drive = null;
+            else result = err is EdsError.OK ? EdsError.OperationRefused : err;
+        }
+
+        if (lockup is { } wantLockup)
+        {
+            var err = await SetMirrorLockupAsync(
+                wantLockup ? EdsMirrorUpSetting.On : EdsMirrorUpSetting.Off, ct);
+            if (MirrorLockupEnabled == wantLockup) lockup = null;
+            else result = err is EdsError.OK ? EdsError.OperationRefused : err;
+        }
+
+        PendingMirrorLockupRestore = drive is null && lockup is null
+            ? null
+            : new CanonPendingRestore(drive, lockup);
+
+        if (PendingMirrorLockupRestore is not null)
+            _logger.LogWarning("Still could not restore {Pending}", PendingMirrorLockupRestore);
+
+        return result;
+    }
+
+    /// <summary>
+    /// The current drive mode.
+    /// </summary>
+    public async Task<(EdsError Error, EdsDriveMode Value)> GetDriveModeAsync(CancellationToken ct = default)
+    {
+        var (err, value) = await GetPropertyAsync(EdsPropertyId.DriveMode, ct);
+        return (err, (EdsDriveMode)value);
+    }
+
+    /// <summary>
+    /// Takes one photograph with the mirror raised and allowed to settle before the shutter opens, for
+    /// vibration-sensitive work.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Mirror lockup alone is not enough, and that is the whole reason this method exists.</b> On a
+    /// 6D in a single-shot drive mode, an armed release simply shoots: a frame arrives in 0.4 s and two
+    /// presses give two frames rather than raise-then-expose. The caller gets an image and believes
+    /// they had lockup, which is the worse of the two failure modes. Lockup engages only in a
+    /// self-timer drive, where the body's own firmware owns raise, settle and expose.
+    /// </para>
+    /// <para>
+    /// So the settle is the body's timer, not a parameter, and cannot be chosen. 0x9128's second
+    /// parameter was the standing hope for an arbitrary delay and turned out to select AF versus MF
+    /// (and on a 6D to do nothing at all), so there is no known way to ask an EOS for a settle of
+    /// one's choosing over PTP. This is the mechanism behind NINA's "mirror lockup delay", except
+    /// NINA's is user-configurable and this one is whatever the body offers.
+    /// </para>
+    /// <para>
+    /// The drive value is taken from the body's own allowed list rather than from
+    /// <see cref="EdsDriveMode"/>, because that enum is EDSDK's numbering and not necessarily any
+    /// given body's: a 450D offers 0x11, which the enum does not name. Measured settles on a 6D are
+    /// ~2.9 s for <see cref="EdsDriveMode.Timer_2sec"/> and ~10.3 s for
+    /// <see cref="EdsDriveMode.Timer_10sec"/>, so the shorter one is preferred when offered.
+    /// </para>
+    /// <para>
+    /// Returns <see cref="EdsError.OperationRefused"/> without touching the wire when
+    /// <see cref="SupportsMirrorLockupCapture"/> is false, or when the body offers no self-timer drive
+    /// to supply the settle. The drive mode and the lockup setting are both restored afterwards, so a
+    /// caller is not left with a self-timer armed on their camera.
+    /// </para>
+    /// </remarks>
+    /// <param name="preferredTimer">
+    /// Which self-timer to use when the body offers more than one. Ignored if the body does not
+    /// announce it; the shortest available timer is used instead.
+    /// </param>
+    /// <param name="ct">Cancellation.</param>
+    public async Task<EdsError> TakePictureWithMirrorLockupAsync(
+        EdsDriveMode preferredTimer = EdsDriveMode.Timer_2sec, CancellationToken ct = default)
+    {
+        if (!SupportsMirrorLockupCapture)
+        {
+            _logger.LogError(
+                "{Model} keeps mirror lockup as a Custom Function, and such bodies discard every remote "
+                + "release while it is armed: no mirror, no event, no image. Measured across nine "
+                + "sequences on a 450D. Capture with lockup is not possible over PTP here.",
+                Model ?? "This camera");
+            return EdsError.OperationRefused;
+        }
+
+        // The settle has to come from the body's own timer, so a body without one cannot do this at
+        // all. Take the value from what it announces: EdsDriveMode is EDSDK's numbering.
+        var allowed = await GetAllowedValuesAsync(EdsPropertyId.DriveMode, ct);
+        var timers = (allowed ?? [])
+            .Where(v => v is (uint)EdsDriveMode.Timer_2sec or (uint)EdsDriveMode.Timer_10sec
+                             or (uint)EdsDriveMode.Timer_10sec_RemoteControl)
+            .ToList();
+
+        if (timers.Count is 0)
+        {
+            _logger.LogError(
+                "{Model} announces no self-timer drive mode ({Allowed}), and mirror lockup only engages "
+                + "in one — in a single-shot drive the body ignores the raised mirror and simply shoots. "
+                + "Refusing rather than delivering a frame that was not taken with lockup.",
+                Model ?? "This camera",
+                allowed is null ? "none announced" : string.Join(", ", allowed.Select(v => $"0x{v:X}")));
+            return EdsError.OperationRefused;
+        }
+
+        // Prefer what the caller asked for, then the shortest real settle. Timer_2sec (0x11) measured
+        // ~2.9 s against ~10.3 s for Timer_10sec, and 0x07 fired a six-shot burst on a 450D, so it is
+        // the last resort rather than a peer.
+        var chosen = timers.Contains((uint)preferredTimer) ? (uint)preferredTimer
+            : timers.Contains((uint)EdsDriveMode.Timer_2sec) ? (uint)EdsDriveMode.Timer_2sec
+            : timers.Contains((uint)EdsDriveMode.Timer_10sec) ? (uint)EdsDriveMode.Timer_10sec
+            : timers[0];
+
+        var (driveErr, entryDrive) = await GetDriveModeAsync(ct);
+
+        // Resolve the lockup setting rather than reading a cache that may never have been populated.
+        // MirrorLockupEnabled is null until something asks, and a null entry state cannot be compared
+        // against afterwards, so "did we put it back" was unanswerable.
+        if (MirrorLockupEnabled is null) await GetMirrorUpSettingAsync(ct);
+        var lockupWasArmed = MirrorLockupEnabled;
+
+        var armErr = await SetMirrorLockupAsync(EdsMirrorUpSetting.On, ct);
+        if (armErr is not EdsError.OK)
+        {
+            _logger.LogWarning("Could not arm mirror lockup: {Error}", armErr);
+            return armErr;
+        }
+
+        var setDriveErr = await SetDriveModeAsync((EdsDriveMode)chosen, ct);
+        if (setDriveErr is not EdsError.OK)
+        {
+            _logger.LogWarning("Could not select self-timer drive 0x{Drive:X}: {Error}", chosen, setDriveErr);
+            await RestoreAsync();
+            return setDriveErr;
+        }
+
+        _logger.LogInformation(
+            "Mirror-lockup capture: lockup armed, drive 0x{Drive:X} ({Name}). The body owns the "
+            + "raise-settle-expose sequence from here, so the settle is its timer and not ours.",
+            chosen, (EdsDriveMode)chosen);
+
+        var err = await TakePictureAsync(ct);
+        await RestoreAsync();
+        return err;
+
+        async Task RestoreAsync()
+        {
+            // Leave the camera as it was found: a self-timer left armed silently delays every later
+            // exposure the caller takes, and an armed lockup changes how the body behaves. Both are
+            // side effects that get blamed on the camera rather than on this method.
+            //
+            // But this cannot be relied on here, and hardware is what established that. Restoring
+            // immediately failed on a 6D with both settings left changed, while the identical write a
+            // few seconds later succeeded first time. The reason is sequencing, not the write:
+            // TakePictureAsync returns when the body finishes the release, which is BEFORE the image
+            // arrives, and a frame still awaiting TransferComplete keeps the body refusing property
+            // writes. Only the caller can clear that, by fetching the image.
+            //
+            // So this is a best effort, and whatever it cannot put back is recorded on
+            // PendingMirrorLockupRestore for the caller to apply once they have the frame.
+            await _canon.DrainEventsAsync(ct);
+
+            var driveToRestore = driveErr is EdsError.OK && (uint)entryDrive != chosen ? entryDrive : (EdsDriveMode?)null;
+            var lockupToRestore = lockupWasArmed is not true ? false : (bool?)null;
+
+            if (driveToRestore is { } wantDrive)
+            {
+                await SetDriveModeAsync(wantDrive, ct);
+                var (_, nowDrive) = await GetDriveModeAsync(ct);
+                if (nowDrive == wantDrive) driveToRestore = null;
+            }
+
+            if (lockupToRestore is false)
+            {
+                await SetMirrorLockupAsync(EdsMirrorUpSetting.Off, ct);
+                if (MirrorLockupEnabled is not true) lockupToRestore = null;
+            }
+
+            PendingMirrorLockupRestore = driveToRestore is null && lockupToRestore is null
+                ? null
+                : new CanonPendingRestore(driveToRestore, lockupToRestore);
+
+            if (PendingMirrorLockupRestore is not null)
+                _logger.LogInformation(
+                    "Mirror-lockup capture could not restore {Pending} yet, which is normal: the body "
+                    + "refuses property writes while the new frame awaits TransferComplete. Call "
+                    + "ApplyPendingMirrorLockupRestoreAsync after fetching the image.",
+                    PendingMirrorLockupRestore);
+        }
+    }
+
+    /// <summary>
     /// Enables or disables mirror lockup. Uses the 0xD13A property only when the camera has actually
     /// announced it on the event stream — a 450D answers OK to writes of properties it does not
     /// have, so a bare "try the property, fall back on error" never falls back. Bodies without the

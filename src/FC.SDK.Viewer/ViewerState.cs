@@ -92,6 +92,19 @@ public sealed class ViewerState
 
     /// <summary>Name of the operation currently running, or null when idle.</summary>
     public string? BusyOperation { get; set; }
+
+    /// <summary>
+    /// Clicks accepted but still waiting for the camera, not counting the one running.
+    /// </summary>
+    /// <remarks>
+    /// Shown because its absence read as a bug. Every action serialises on one semaphore, since PTP is
+    /// half-duplex and two commands in flight is not a thing. So a click during a multi-second
+    /// operation is accepted and queued, and with only <see cref="BusyOperation"/> on screen there was
+    /// nothing to distinguish that from a click the app had dropped. During an exposure, which is
+    /// exactly when someone is most likely to prod another button, the wait is long enough to look
+    /// broken. Interlocked because Enqueue runs on the thread pool.
+    /// </remarks>
+    public int QueuedOperations;
     public string StatusMessage { get; set; } = "Not connected. Scan for cameras to begin.";
 
     /// <summary>Set by anything that changes what is on screen; cleared by the render loop.</summary>
