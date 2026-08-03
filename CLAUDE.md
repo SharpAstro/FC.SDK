@@ -32,7 +32,7 @@ Four layers, bottom-up:
 
 ### Canon (`Canon/`)
 
-- **`CanonPtpSession`** — Wraps all Canon vendor opcodes (0x9xxx range). Session lifecycle: `OpenSession(0x1002)` → `GetDeviceInfo(0x1001)` → `SetRemoteMode(0x9114, 1)` → `SetEventMode(0x9115, 1)` → `SetRequestOLCInfoGroup(0x913D, 0x1fff)` → drain `GetEvent` → `RequestDevicePropValue(0x9127)` for the properties the camera never volunteers → drain again. Capture uses `RemoteReleaseOn/Off(0x9128/0x9129)` with param 0x01=AF, 0x02=shutter. Bulb wraps AF + `BulbStart(0x9125)` / `BulbEnd(0x9126)`.
+- **`CanonPtpSession`** — Wraps all Canon vendor opcodes (0x9xxx range). Session lifecycle: `OpenSession(0x1002)` → `GetDeviceInfo(0x1001)` → `SetRemoteMode(0x9114, 1)` → `SetEventMode(0x9115, 1)` → `SetRequestOLCInfoGroup(0x913D, 0x1fff)` → drain `GetEvent` → `RequestDevicePropValue(0x9127)` for the properties the camera never volunteers → drain again. Capture uses `RemoteReleaseOn/Off(0x9128/0x9129)`; param1 is the press stage (1=half, 2=full, 3=half+full), and we do not yet send param2 (0=AF, 1=MF). Bulb wraps AF + `BulbStart(0x9125)` / `BulbEnd(0x9126)`.
 
 - **`CanonPropertyMap`** — `FrozenDictionary<EdsPropertyId, (ushort PtpCode, int Size)>` mapping EDSDK property IDs to Canon PTP property codes (0xD1xx), plus the reverse map for naming raw codes in diagnostics dumps.
 
@@ -142,7 +142,7 @@ Consequences worth remembering:
 | 0x9125 | BulbStart | none |
 | 0x9126 | BulbEnd | none |
 | 0x9127 | RequestDevicePropValue | none, param=propcode — a *request to emit*, NOT a getter |
-| 0x9128 | RemoteReleaseOn | none, param=0x01(AF)/0x02(shutter) |
+| 0x9128 | RemoteReleaseOn | none, **two** params per libgphoto2: p1 = 1 half-press / 2 full-press / 3 half+full in one go, p2 = 0 AF / 1 MF. We send only p1 — so every release implies AF, and **`p2=1` is the un-wired way to release without it**, which is what a manual lens or a telescope wants |
 | 0x9129 | RemoteReleaseOff | none, param=0x01(AF)/0x02(shutter) |
 | 0x9130 | ResetMirrorLockupState | none |
 | 0x913D | SetRequestOLCInfoGroup | none, param=group mask (0x1fff = all) |
@@ -256,8 +256,9 @@ and the whole 0xD180–0xD1A0 range is absent from EDSDK's own property table).
   group mask, not a documented mirror flag; it earns its meaning from the visual confirmation.
 
   This is the mechanism behind NINA's "mirror lockup delay", except NINA's delay is user-configurable
-  and this one is whatever the body's timer is — see the `0x9128` two-parameter note under the opcode
-  table for the likely route to an arbitrary settle.
+  and this one is whatever the body's timer is. It cannot be otherwise: 0x9128's second parameter was
+  the standing hope for an arbitrary settle, and libgphoto2 documents it as AF/MF, not a delay. There is
+  no known way to ask an EOS for a settle of one's choosing over PTP.
 
   **The SDK now refuses rather than relaying the camera's empty ACK.** `TakePictureAsync` and
   `BulbStartAsync` answer `OperationRefused` in 0 ms — before anything reaches the wire — when mirror
