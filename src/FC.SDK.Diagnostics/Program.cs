@@ -20,6 +20,7 @@
 //
 // Controls run first AND last with MLU off. A negative result is only worth anything if the same
 // harness got a positive one from the same body on the same battery minutes earlier.
+using System.Collections.Concurrent;
 using System.CommandLine;
 using System.Diagnostics;
 using System.Globalization;
@@ -53,6 +54,16 @@ var releaseOpt = new Option<uint[]>("--release") { Description = "Object handles
 // has to be asserted deliberately rather than defaulted to.
 var cappedOpt = new Option<bool>("--capped") { Description = "The lens cap is ON — enables the phase that discriminates AF from MF." };
 
+var tagOpt = new Option<string>("--tag")
+{
+    Description = "Label for this run's property dump, so two positions of a physical switch can be diffed.",
+    DefaultValueFactory = _ => "run",
+    HelpName = "name",
+};
+var shootOpt = new Option<bool>("--shoot")
+{
+    Description = "Spend one shutter actuation to find out whether a still release is honoured here.",
+};
 var avOpt = new Option<EdsAv>("--av") { Description = "Aperture.", DefaultValueFactory = _ => EdsAv.Av_5_6 , HelpName = "aperture" };
 var tvOpt = new Option<EdsTv>("--tv") { Description = "Shutter speed.", DefaultValueFactory = _ => EdsTv.Tv_1_125 , HelpName = "shutter" };
 var isoOpt = new Option<EdsISOSpeed>("--iso") { Description = "ISO.", DefaultValueFactory = _ => EdsISOSpeed.ISO_400 , HelpName = "iso" };
@@ -80,6 +91,7 @@ hostOpt.Recursive = releaseOpt.Recursive = true;
     ("meter",    "Live-view histogram: is it real metering? Structure, channel order, exposure sweep.", [avOpt, tvOpt, isoOpt]),
     ("power",    "Is AutoPowerOff (0xD114) writable, or was its DeviceBusy just a no-op write?", []),
     ("mlushot",  "TakePictureWithMirrorLockupAsync: does it deliver, and does it restore what it changed?", []),
+    ("movie",    "Is the still/movie lever readable? Dump every property + LV record types; run per position.", [tagOpt, shootOpt]),
 ];
 
 string? mode = null;
@@ -105,7 +117,7 @@ uint SelfTimerDrive3 = parse.GetValue(drive3Opt);
 string[]? only = parse.GetValue(onlyOpt) is { Length: > 0 } selectedRows ? selectedRows : null;
 
 var clock = Stopwatch.StartNew();
-var objects = new List<(TimeSpan At, uint Handle)>();
+var objects = new ConcurrentQueue<(TimeSpan At, uint Handle)>();
 
 // Paths written by the most recent CollectAsync. A mode that has to judge the pixels rather than the
 // response code needs the file, and threading a path back through every call site would churn eight
@@ -157,7 +169,7 @@ if (err is not EdsError.OK) { await camera.DisposeAsync(); return 1; }
 
 camera.ObjectAdded += (_, e) =>
 {
-    lock (objects) objects.Add((clock.Elapsed, e.ObjectHandle));
+    objects.Enqueue((clock.Elapsed, e.ObjectHandle));
     Log($"  *** ObjectAdded  handle=0x{e.ObjectHandle:X8}");
 };
 // Verbose in --diag: when a release is refused the only account of why is whatever the body
@@ -231,11 +243,11 @@ try
         // round does not have.
         var sinceFire = Stopwatch.StartNew();
         var round = "setup";
-        var timeline = new List<string>();
+        var timeline = new ConcurrentQueue<string>();
         void Note(string what)
         {
             var line = $"[{round}] +{sinceFire.Elapsed.TotalSeconds,5:F1}s {what}";
-            lock (timeline) timeline.Add(line);
+            timeline.Enqueue(line);
             Log("    " + line);
         }
         camera.PropertyChanged += (_, e) => Note($"prop {e.PropertyId} = 0x{e.Value:X}");
@@ -265,7 +277,7 @@ try
                 await Task.Delay(i is 4 or 3 or 2 ? 880 : 1000);
             }
 
-            lock (objects) objects.Clear();
+            objects.Clear();
             round = mlu.ToString();
             sinceFire.Restart();
             var sw = Stopwatch.StartNew();
@@ -274,7 +286,7 @@ try
             for (int i = 1; i <= 12; i++)
             {
                 await Task.Delay(1000);
-                bool got; lock (objects) got = objects.Count > 0;
+                var got = !objects.IsEmpty;
                 Log($"  T+{i,2}s{(got ? "   <<< image arrived — the exposure was HERE" : "")}");
                 if (got) break;
             }
@@ -287,7 +299,7 @@ try
         Console.WriteLine();
         Log("======== EVENT TIMELINE, BY ROUND (offsets are from the release) ========");
         string[] snapshot;
-        lock (timeline) snapshot = [.. timeline];
+        snapshot = [.. timeline];
         foreach (var tag in new[] { "Off", "On" })
         {
             Log($"--- lockup {tag} ---");
@@ -320,7 +332,7 @@ try
         var (_, driveNow) = await camera.GetPropertyAsync(EdsPropertyId.DriveMode);
         Log($"DriveMode reads 0x{driveNow:X}");
 
-        lock (objects) objects.Clear();
+        objects.Clear();
         camera.PropertyChanged += (_, e) =>
         {
             if (e.PropertyId is EdsPropertyId.MirrorLockUpState)
@@ -350,7 +362,7 @@ try
                 Log($"  [{sw.Elapsed.TotalSeconds,5:F1}s] 0xD1BF = 0x{v:X}{(v != 0 ? "   <<< MIRROR UP" : "")}");
                 last = v;
             }
-            lock (objects) { if (objects.Count > 0) break; }
+            if (!objects.IsEmpty) break;
             await Task.Delay(150);
         }
         Log($"image after {sw.Elapsed.TotalSeconds:F1}s: {await CollectAsync("SELF", TimeSpan.FromSeconds(20))}");
@@ -381,6 +393,86 @@ try
         return 0;
     }
 
+    if (mode is "movie")
+    {
+        // Is the still/movie lever visible over PTP? Nothing is assumed about WHICH property reports
+        // it: every announced code is dumped to a labelled file, and the two lever positions are
+        // diffed. That is how the lens AF/MF switch was found, after an attempt to reason from a
+        // property's allowed-value list got it wrong.
+        //
+        // Worth knowing because of the failure it would otherwise cause: if a still release is
+        // discarded in movie mode, the caller gets OK and no image, which is the same shape as the
+        // mirror-lockup trap and cost a session each time it has appeared.
+        var tag = parse.GetValue(tagOpt) ?? "run";
+
+        Log($"AEMode = {ae}");
+        var (evfModeErr, evfMode) = await camera.GetRawPropertyAsync(0xD1B1);
+        var evfModeAllowed = await camera.GetAllowedValuesAsync(EdsPropertyId.Evf_Mode);
+        Log($"0xD1B1 Evf_Mode = {evfMode} ({evfModeErr}), allowed: "
+            + (evfModeAllowed is null ? "none announced" : string.Join(",", evfModeAllowed)));
+
+        // Live view is the other half: the envelope's image record is type 1 or 11 for stills and 9 for
+        // movie mode, so the record types are an independent signal that needs no property at all.
+        var recordTypes = new SortedSet<uint>();
+        var lvErr = await camera.StartLiveViewAsync();
+        Log($"\nStartLiveView = {lvErr}");
+        if (lvErr is EdsError.OK)
+        {
+            await Task.Delay(1800);
+            for (var i = 0; i < 12; i++)
+            {
+                var (recErr, records) = await camera.GetLiveViewRecordsAsync();
+                if (recErr is EdsError.OK)
+                    foreach (var r in records) recordTypes.Add(r.Type);
+                await Task.Delay(150);
+            }
+            var hist = await camera.GetEvfHistogramAsync();
+            Log($"  record types seen: {string.Join(", ", recordTypes.Select(t => $"0x{t:X}"))}");
+            Log($"  image record 9 (movie) present: {recordTypes.Contains(9)}");
+            Log($"  image record 1/11 (still) present: {recordTypes.Contains(1) || recordTypes.Contains(11)}");
+            Log($"  histogram: {hist?.ToString() ?? "none"}");
+            await camera.StopLiveViewAsync();
+            await Task.Delay(800);
+        }
+
+        // The dump goes next to the working directory rather than into the timestamped artefact folder,
+        // so two runs land side by side and can be diffed without hunting.
+        var snapshot = await camera.DumpPropertiesAsync();
+        var dumpPath = Path.Combine(Environment.CurrentDirectory, $"movie-{tag}.txt");
+        var lines = snapshot
+            .OrderBy(p => p.PtpCode)
+            .Select(p => $"0x{p.PtpCode:X4} {p.PropertyId?.ToString() ?? "(unmapped)",-28} = {p.Value,-12} "
+                + $"allowed: {(p.AllowedValues is { Length: > 0 } a ? string.Join(",", a) : "-")}")
+            .ToList();
+        lines.Insert(0, $"# lever position: {tag}");
+        lines.Insert(1, $"# AEMode={ae}  Evf_Mode=0x{evfMode:X}  LV={lvErr}  "
+            + $"records={string.Join("/", recordTypes.Select(t => $"0x{t:X}"))}");
+        await File.WriteAllLinesAsync(dumpPath, lines);
+
+        // The question that decides whether any of this needs acting on: is a still release honoured in
+        // this lever position, or does the body answer OK and produce nothing? The latter is the shape
+        // of failure worth detecting, and the only way to know is to spend one actuation.
+        if (parse.GetValue(shootOpt))
+        {
+            objects.Clear();
+            await camera.DrainEventsAsync();
+            var sw = Stopwatch.StartNew();
+            var shotErr = await camera.TakePictureAsync();
+            var shotMs = sw.Elapsed.TotalMilliseconds;
+            var (delivered, shotBytes) = await CollectAsync($"MOVIE-{tag}", TimeSpan.FromSeconds(20));
+            Log($"\nStill release with lever at '{tag}': {shotErr} in {shotMs:F0} ms, "
+                + $"{(delivered ? $"IMAGE {shotBytes:N0} bytes" : "NO IMAGE")}");
+            Log(delivered
+                ? "  => a still capture works in this position; nothing to warn about."
+                : "  => the release produced nothing. This is the silent-failure case worth detecting.");
+        }
+
+        Log($"\n{snapshot.Count} announced properties written to {dumpPath}");
+        Log("Now flip the lever to the other position and run this again with a different --tag,");
+        Log("then diff the two files. Any property that tracks the lever will stand out.");
+        return 0;
+    }
+
     if (mode is "mlushot")
     {
         // Exercises TakePictureWithMirrorLockupAsync end to end. Three things have to hold, and only
@@ -400,16 +492,16 @@ try
         var entryLockup = camera.MirrorLockupEnabled;
         Log($"On entry: drive {entryDriveMode} ({entryDriveErr}), lockup {entryLockup?.ToString() ?? "unknown"}");
 
-        var olc = new List<(double At, uint P1, uint P2)>();
+        var olc = new ConcurrentQueue<(double At, uint P1, uint P2)>();
         var watchClock = Stopwatch.StartNew();
         void OnState(object? _, CanonStateChangedEventArgs e)
         {
             if (e.EventType is CanonEventType.OLCInfoChanged)
-                lock (olc) olc.Add((watchClock.Elapsed.TotalSeconds, e.Param, 0));
+                olc.Enqueue((watchClock.Elapsed.TotalSeconds, e.Param, 0));
         }
         camera.StateChanged += OnState;
 
-        lock (objects) objects.Clear();
+        objects.Clear();
         watchClock.Restart();
         var mluErr = await camera.TakePictureWithMirrorLockupAsync();
         var elapsed = watchClock.Elapsed.TotalSeconds;
@@ -420,7 +512,7 @@ try
             + $"{(gotMlu ? $"IMAGE {mluBytes:N0} bytes" : "NO IMAGE")}");
 
         (double At, uint P1, uint P2)[] seen;
-        lock (olc) seen = [.. olc];
+        seen = [.. olc];
         Log($"OLCInfoChanged records: {(seen.Length is 0 ? "none" : string.Join(", ", seen.Select(s => $"0x{s.P1:X} at +{s.At:F1}s")))}");
         // 0x15 is an OLC GROUP MASK, not a flag value, so equality was the wrong test: this run
         // reported 0x17, which contains every bit of 0x15 plus one more, and an equality check called
@@ -464,7 +556,7 @@ try
         {
             Log("\n*** No image. Before blaming the helper, note a control is needed: if a plain");
             Log("*** TakePictureAsync also fails right now, the body is not exposing at all.");
-            lock (objects) objects.Clear();
+            objects.Clear();
             var ctrlErr = await camera.TakePictureAsync();
             var (gotCtrl, ctrlBytes) = await CollectAsync("MLUSHOT-CTRL", TimeSpan.FromSeconds(20));
             Log($"control plain release = {ctrlErr}, {(gotCtrl ? $"IMAGE {ctrlBytes:N0}" : "NO IMAGE")}");
@@ -880,7 +972,7 @@ try
                 }
             }
 
-            lock (objects) objects.Clear();
+            objects.Clear();
             await camera.DrainEventsAsync();
             var sw = Stopwatch.StartNew();
             EdsError e1;
@@ -1037,17 +1129,17 @@ try
 
         async Task<(bool Delivered, long Bytes, double PressMs, double TotalMs)> Press(string id, uint p1, uint p2)
         {
-            lock (objects) objects.Clear();
+            objects.Clear();
             await camera!.DrainEventsAsync();
 
             // The event stream is the instrument that settled mirror lockup, and it is the right one
             // here too: if p2 selects autofocus, an AF row emits focus records that an MF row does
             // not, whatever the timings say.
-            var seen = new List<string>();
+            var seen = new ConcurrentQueue<string>();
             void OnProp(object? _, CanonPropertyChangedEventArgs e)
-            { lock (seen) seen.Add($"prop {(uint)e.PropertyId:X4}=0x{e.Value:X}"); }
+            { seen.Enqueue($"prop {(uint)e.PropertyId:X4}=0x{e.Value:X}"); }
             void OnState(object? _, CanonStateChangedEventArgs e)
-            { lock (seen) seen.Add($"{e.EventType}=0x{e.Param:X}"); }
+            { seen.Enqueue($"{e.EventType}=0x{e.Param:X}"); }
             camera.PropertyChanged += OnProp;
             camera.StateChanged += OnState;
 
@@ -1068,7 +1160,7 @@ try
         }
 
         Log("\n--- control: the ordinary path must deliver, or nothing below means anything ---");
-        lock (objects) objects.Clear();
+        objects.Clear();
         await camera.DrainEventsAsync();
         Log($"TakePicture = {await camera.TakePictureAsync()}");
         var (c1, c1Bytes) = await CollectAsync("CTRL-1", TimeSpan.FromSeconds(15));
@@ -1120,7 +1212,7 @@ try
         }
 
         Log("\n--- control: same again at the end ---");
-        lock (objects) objects.Clear();
+        objects.Clear();
         await camera.DrainEventsAsync();
         Log($"TakePicture = {await camera.TakePictureAsync()}");
         var (c2, c2Bytes) = await CollectAsync("CTRL-2", TimeSpan.FromSeconds(15));
@@ -1531,14 +1623,14 @@ try
         Log("\n--- diag 1: MLU off, Tv 1/60, single 0x910F, watch the stream for 15 s");
         await SetMlu(false);
         await SetTv(EdsTv.Tv_1_60);
-        lock (objects) objects.Clear();
+        objects.Clear();
         await camera.DrainEventsAsync();
         await Release("0x910F");
         Log($"  result: {await CollectAsync("D1", TimeSpan.FromSeconds(15))}");
 
         Log("\n--- diag 2: MLU off, bulb 3 s — the path that worked last session");
         await SetTv(EdsTv.Bulb);
-        lock (objects) objects.Clear();
+        objects.Clear();
         await camera.DrainEventsAsync();
         await BulbStart();
         await Wait(3);
@@ -1653,7 +1745,7 @@ try
 
         if (!await SetMlu(wantMlu)) { failures++; results.Add((id, what, wantMlu, false, 0)); continue; }
 
-        lock (objects) objects.Clear();
+        objects.Clear();
         await camera.DrainEventsAsync();
         await run();
 
@@ -1771,15 +1863,14 @@ async Task<(bool Delivered, long Bytes)> CollectAsync(string id, TimeSpan window
     var deadline = Stopwatch.StartNew();
     while (deadline.Elapsed < window)
     {
-        lock (objects) { if (objects.Count > 0) break; }
+        if (!objects.IsEmpty) break;
         await Task.Delay(100);
     }
     // Something arrived — give a second frame a chance to show up before moving on.
-    lock (objects) { if (objects.Count > 0) { } }
     await Task.Delay(1500);
 
     (TimeSpan At, uint Handle)[] found;
-    lock (objects) found = [.. objects];
+    found = [.. objects];
     if (found.Length is 0) return (false, 0);
 
     long largest = 0;
