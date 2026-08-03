@@ -24,6 +24,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using FC.SDK.Diagnostics;
 using FC.SDK;
 using FC.SDK.Canon;
 
@@ -104,6 +105,16 @@ string[]? only = parse.GetValue(onlyOpt) is { Length: > 0 } selectedRows ? selec
 
 var clock = Stopwatch.StartNew();
 var objects = new List<(TimeSpan At, uint Handle)>();
+
+// Paths written by the most recent CollectAsync. A mode that has to judge the pixels rather than the
+// response code needs the file, and threading a path back through every call site would churn eight
+// of them for one caller's benefit.
+var lastDownloads = new List<string>();
+
+// The exposure the body was on before this run touched it, so the teardown can hand it back.
+EdsAv? entryAv = null;
+EdsTv? entryTv = null;
+EdsISOSpeed? entryIso = null;
 var outDir = Path.Combine(Environment.CurrentDirectory, $"mlu-matrix_{DateTime.Now:yyyyMMdd_HHmmss}");
 Directory.CreateDirectory(outDir);
 
@@ -187,6 +198,15 @@ try
     var (aeErr, ae) = await camera.GetAEModeAsync();
     var (tvErr, tv) = await camera.GetShutterSpeedAsync();
     Log($"AEMode = {ae} ({aeErr})   Tv = {tv} ({tvErr})");
+
+    // Snapshot the exposure so the teardown can put it back. Several modes move all three: `meter`
+    // sweeps ISO and ends on the last rung, `afpress` picks an ISO by metering and sets an aperture.
+    // The teardown used to force Tv to a hardcoded 1/60 and ignore Av and ISO entirely, so a run left
+    // the body on ISO 6400 at f/2.8 and the next hand-held shot inherited it.
+    if (tvErr is EdsError.OK) entryTv = tv;
+    if (await camera.GetApertureAsync() is (EdsError.OK, var entryAvValue)) entryAv = entryAvValue;
+    if (await camera.GetISOAsync() is (EdsError.OK, var entryIsoValue)) entryIso = entryIsoValue;
+    Log($"Exposure on entry: Av {entryAv?.ToString() ?? "?"}, Tv {entryTv?.ToString() ?? "?"}, ISO {entryIso?.ToString() ?? "?"}");
 
     // Printed every run, because EdsDriveMode's numbering is EDSDK's and not necessarily this body's:
     // a 450D was found sitting on 0x11, which the enum does not contain at all. Self-timer tests take
@@ -709,6 +729,7 @@ try
         await camera.StopLiveViewAsync();
         await Task.Delay(1000);
 
+        var scores = new List<(int Round, string Tag, double Score)>();
         int busyRows = 0;
         foreach (var round in new[] { 1, 2 })
         foreach (var (tag, p2) in new (string, uint?)[] { ("blur", null), ("doaf", null), ("p2is0", 0), ("p2is1", 1) })
@@ -784,6 +805,23 @@ try
             var (got, bytes) = await CollectAsync($"{round}{tag}", TimeSpan.FromSeconds(12));
             Log($"  {tag}: release = {e1}   focus {focusNote}   {pressMs:F0} ms   {(got ? $"IMAGE {bytes:N0}" : "no image")}");
 
+            // Score it now, while the file is to hand. The verdict is the whole point of the mode and
+            // used to be computed by a throwaway script outside the repo, which made the result
+            // unreproducible.
+            if (got && lastDownloads.FirstOrDefault() is { } shotPath)
+            {
+                try
+                {
+                    var score = FocusScore.Measure(shotPath);
+                    scores.Add((round, tag, score));
+                    Log($"  sharpness {score:F4}");
+                }
+                catch (Exception ex)
+                {
+                    Log($"  *** could not score {Path.GetFileName(shotPath)}: {ex.Message}");
+                }
+            }
+
             // A wedged body answers DeviceBusy to everything, and the rows keep printing as if they
             // were results. That is the shape of a run that reads like six tidy findings and is
             // really one fault repeated, so it stops here instead.
@@ -803,9 +841,43 @@ try
             else busyRows = 0;
         }
 
-        Log("\nNow measure sharpness across the eight frames.");
-        Log("If blur and doaf do not separate, the measurement is blind and nothing here is evidence.");
-        Log("If they do, p2=0 landing on doaf means p2 selects AF; landing on blur means it does not.");
+        // The verdict. Controls first, because whether they separated decides if anything else counts.
+        Log("\n=== sharpness (higher is sharper; only comparable within this run) ===");
+        foreach (var group in scores.GroupBy(s => s.Tag).OrderBy(g => g.Key is "blur" ? 0 : g.Key is "doaf" ? 1 : 2))
+            Log($"  {group.Key,-6} {string.Join("  ", group.Select(s => s.Score.ToString("F4")))}");
+
+        double? Average(string tag) =>
+            scores.Where(s => s.Tag == tag).Select(s => s.Score).DefaultIfEmpty(0).Average() is var a && a > 0 ? a : null;
+
+        var (soft, sharp) = (Average("blur"), Average("doaf"));
+        Log("");
+        if (soft is not { } softAvg || sharp is not { } sharpAvg)
+        {
+            Log("*** Controls missing, so nothing here is evidence. Both blur and doaf must deliver.");
+            return 1;
+        }
+
+        // A measure that cannot see focus scores four defocused frames alike, which looks exactly like
+        // the null result this mode hunts for. The separation between the controls is what rules that
+        // out, and 1.3x is well beyond the few percent that scene drift moves the number by.
+        var separation = sharpAvg / softAvg;
+        Log($"Controls: blur {softAvg:F4} vs doaf {sharpAvg:F4} = {separation:F2}x separation");
+        if (separation < 1.3)
+        {
+            Log("*** The controls did not separate, so this measurement is blind to focus here and the");
+            Log("*** p2 rows are VOID. Do not read a null result out of them. Likely causes: too little");
+            Log("*** defocus to recover, AF that never achieved focus, or a scene without fine detail.");
+            return 1;
+        }
+
+        Log("=> The measurement can see focus. The p2 rows are therefore readable:");
+        var midpoint = (softAvg + sharpAvg) / 2;
+        foreach (var tag in new[] { "p2is0", "p2is1" })
+        {
+            if (Average(tag) is not { } avg) { Log($"  {tag}: no frames"); continue; }
+            var focused = avg > midpoint;
+            Log($"  {tag}: {avg:F4} sits with {(focused ? "DOAF — this release autofocused" : "BLUR — this release did NOT autofocus")}");
+        }
         return 0;
     }
 
@@ -1512,7 +1584,16 @@ try
 finally
 {
     Log($"\nRestoring: MLU off = {await camera.SetMirrorLockupAsync(EdsMirrorUpSetting.Off)}");
-    Log($"Restoring: Tv = 1/60 = {await camera.SetShutterSpeedAsync(EdsTv.Tv_1_60)}");
+
+    // Put back what was found, rather than a hardcoded 1/60 plus whatever ISO and aperture the run
+    // happened to end on. Writes of a value the body already holds answer DeviceBusy, which is
+    // harmless here and why these are logged rather than checked.
+    if (entryTv is { } restoreTv)
+        Log($"Restoring: Tv = {restoreTv} = {await camera.SetShutterSpeedAsync(restoreTv)}");
+    if (entryAv is { } restoreAv)
+        Log($"Restoring: Av = {restoreAv} = {await camera.SetApertureAsync(restoreAv)}");
+    if (entryIso is { } restoreIso)
+        Log($"Restoring: ISO = {restoreIso} = {await camera.SetISOAsync(restoreIso)}");
     await camera.StopEventPollingAsync();
     Log($"CloseSession = {await camera.CloseSessionAsync()}");
     await camera.DisposeAsync();
@@ -1605,6 +1686,7 @@ async Task<(bool Delivered, long Bytes)> CollectAsync(string id, TimeSpan window
     if (found.Length is 0) return (false, 0);
 
     long largest = 0;
+    lastDownloads.Clear();
     foreach (var (at, handle) in found)
     {
         var (_, name) = await camera!.GetObjectFileNameAsync(handle);
@@ -1615,6 +1697,7 @@ async Task<(bool Delivered, long Bytes)> CollectAsync(string id, TimeSpan window
             var e = await camera.DownloadAsync(handle, fs);
             Log($"  downloaded {Path.GetFileName(path)}: {e}, {fs.Length:N0} bytes  (camera name {name ?? "?"})");
             largest = Math.Max(largest, fs.Length);
+            if (e is EdsError.OK) lastDownloads.Add(path);
         }
         await camera.TransferCompleteAsync(handle);
     }

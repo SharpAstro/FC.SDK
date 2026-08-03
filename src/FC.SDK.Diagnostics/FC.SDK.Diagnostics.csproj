@@ -13,6 +13,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FC.SDK\FC.SDK.csproj" />
+    <!-- FocusScore decodes the delivered CR2, because the 0x9128 autofocus question cannot be
+         answered from a response code: every row answers OK and delivers a frame either way. -->
+    <ProjectReference Include="..\FC.SDK.Raw\FC.SDK.Raw.csproj" />
   </ItemGroup>
 
   <ItemGroup>
