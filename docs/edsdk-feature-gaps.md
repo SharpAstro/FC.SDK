@@ -183,12 +183,20 @@ Worth stating so the list stops growing:
 
 Not EDSDK-parity, but tracked here so there is one list:
 
-- **A mirror-lockup capture helper.** `TakePictureAsync` currently *refuses* when lockup is armed on
-  a body that discards the release, but nothing performs a lockup exposure where it works. The 6D
-  recipe is verified: `0xD13A` = 1 → drive = `Timer_2sec` (0x11, ~2.9 s settle) → `TakePictureAsync`
-  → restore drive. Held because the settle is the body's own timer rather than a parameter, and the
-  `0x9128` second-parameter lead is now closed and was a dead end (it selects AF vs MF, not a delay),
-  so the settle really is only ever the body's own timer and the API should say so plainly.
+- ~~**A mirror-lockup capture helper.**~~ **DONE**: `TakePictureWithMirrorLockupAsync`, verified on a
+  6D (`FC.SDK.Diagnostics mlushot`) delivering a 21.9 MB CR2 in ~2.5 s with the `0x15` OLC marker
+  present. It picks the self-timer off the body's own allowed list rather than from `EdsDriveMode`,
+  refuses when the body offers no timer (lockup only engages in one; in single drive the body ignores
+  the raised mirror and just shoots, handing back a frame the caller wrongly believes had lockup), and
+  refuses on a Custom-Function body where every release is discarded.
+
+  **The restore cannot happen inside the call, and that took hardware to learn.** An immediate restore
+  failed on both drive mode and lockup while the identical write seconds later succeeded first time.
+  `TakePictureAsync` returns when the body finishes the *release*, which is before the image arrives,
+  and a frame still awaiting `TransferComplete` keeps the body refusing property writes. Only the
+  caller can clear that, by fetching the image. So whatever cannot be put back is left on
+  `PendingMirrorLockupRestore` and applied by `ApplyPendingMirrorLockupRestoreAsync` after the fetch.
+  Skipping it leaves a self-timer armed, which delays every later exposure and reads as a camera fault.
 - **`0x9128`'s second parameter is still unmeasured after two attempts**, and both failures are worth
   recording because they are about method, not the camera. On a 6D with an `EF50mm f/1.8 STM` at AF,
   `(3,0)` and `(3,1)` are indistinguishable on everything cheap: both answer `OK`, both deliver a

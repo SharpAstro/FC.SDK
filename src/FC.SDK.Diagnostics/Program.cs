@@ -79,6 +79,7 @@ hostOpt.Recursive = releaseOpt.Recursive = true;
     ("afpress",  "Does 0x9128's p2 drive the focus motor? Judged on frame sharpness, against controls.", [avOpt, tvOpt, isoOpt]),
     ("meter",    "Live-view histogram: is it real metering? Structure, channel order, exposure sweep.", [avOpt, tvOpt, isoOpt]),
     ("power",    "Is AutoPowerOff (0xD114) writable, or was its DeviceBusy just a no-op write?", []),
+    ("mlushot",  "TakePictureWithMirrorLockupAsync: does it deliver, and does it restore what it changed?", []),
 ];
 
 string? mode = null;
@@ -378,6 +379,102 @@ try
             Log($"  => the write {(after == (uint)want ? "LANDED" : "DID NOT LAND — the ACK was empty")}");
         }
         return 0;
+    }
+
+    if (mode is "mlushot")
+    {
+        // Exercises TakePictureWithMirrorLockupAsync end to end. Three things have to hold, and only
+        // the first is about the photograph: it delivers a frame; it leaves the drive mode and the
+        // lockup setting as it found them; and the marker that distinguishes a real lockup exposure
+        // from an ordinary one is present.
+        //
+        // That marker matters because delivered files, frame sizes, 0xD1BF and total timing are all
+        // identical either way. The only discriminator found is an OLCInfoChanged = 0x15 at +0.2 s,
+        // against 0x10 -> 0xD with lockup off. It is an OLC group mask rather than a documented
+        // mirror flag, and it earns its meaning from having been corroborated by an audible mirror and
+        // a viewfinder that stayed black for a whole countdown.
+        Log($"SupportsMirrorLockupCapture: {camera.SupportsMirrorLockupCapture}");
+        Log($"MirrorLockupIsCustomFunction: {camera.MirrorLockupIsCustomFunction?.ToString() ?? "unknown"}");
+
+        var (entryDriveErr, entryDriveMode) = await camera.GetDriveModeAsync();
+        var entryLockup = camera.MirrorLockupEnabled;
+        Log($"On entry: drive {entryDriveMode} ({entryDriveErr}), lockup {entryLockup?.ToString() ?? "unknown"}");
+
+        var olc = new List<(double At, uint P1, uint P2)>();
+        var watchClock = Stopwatch.StartNew();
+        void OnState(object? _, CanonStateChangedEventArgs e)
+        {
+            if (e.EventType is CanonEventType.OLCInfoChanged)
+                lock (olc) olc.Add((watchClock.Elapsed.TotalSeconds, e.Param, 0));
+        }
+        camera.StateChanged += OnState;
+
+        lock (objects) objects.Clear();
+        watchClock.Restart();
+        var mluErr = await camera.TakePictureWithMirrorLockupAsync();
+        var elapsed = watchClock.Elapsed.TotalSeconds;
+        var (gotMlu, mluBytes) = await CollectAsync("MLUSHOT", TimeSpan.FromSeconds(25));
+        camera.StateChanged -= OnState;
+
+        Log($"\nTakePictureWithMirrorLockup = {mluErr} after {elapsed:F1}s, "
+            + $"{(gotMlu ? $"IMAGE {mluBytes:N0} bytes" : "NO IMAGE")}");
+
+        (double At, uint P1, uint P2)[] seen;
+        lock (olc) seen = [.. olc];
+        Log($"OLCInfoChanged records: {(seen.Length is 0 ? "none" : string.Join(", ", seen.Select(s => $"0x{s.P1:X} at +{s.At:F1}s")))}");
+        // 0x15 is an OLC GROUP MASK, not a flag value, so equality was the wrong test: this run
+        // reported 0x17, which contains every bit of 0x15 plus one more, and an equality check called
+        // that "absent". Test for containment instead. Being a mask also caps how much the marker can
+        // ever prove; it earns its meaning from having once been corroborated by an audible mirror and
+        // a viewfinder that stayed black for a whole countdown, not from the number itself.
+        const uint LockupMask = 0x15;
+        var marker = seen.FirstOrDefault(s => (s.P1 & LockupMask) == LockupMask);
+        Log($"  lockup marker (0x{LockupMask:X} bits): "
+            + (marker.P1 is not 0
+                ? $"PRESENT as 0x{marker.P1:X} at +{marker.At:F1}s, consistent with raise-settle-expose"
+                : "absent"));
+
+        // The restore half. A self-timer left armed would silently delay every later exposure the
+        // caller takes, which is the kind of side effect that gets blamed on the camera.
+        var (exitDriveErr, exitDriveMode) = await camera.GetDriveModeAsync();
+        Log($"\nAfter: drive {exitDriveMode} ({exitDriveErr}), lockup {camera.MirrorLockupEnabled?.ToString() ?? "unknown"}");
+        var driveRestored = entryDriveErr is not EdsError.OK || exitDriveMode == entryDriveMode;
+        Log($"  drive restored:  {(driveRestored ? "yes" : $"NO — left on {exitDriveMode}")}");
+        Log($"  lockup restored: {(camera.MirrorLockupEnabled == entryLockup ? "yes" : $"NO — left {camera.MirrorLockupEnabled}")}");
+
+        // The restore that could not happen inside the helper, now that the frame has been fetched.
+        // This is the documented sequence rather than a workaround: an immediate restore was measured
+        // failing on both settings while the identical write seconds later succeeded first time, the
+        // difference being a frame still awaiting TransferComplete, which only the caller can clear.
+        Log($"\nPending restore after capture: {camera.PendingMirrorLockupRestore?.ToString() ?? "nothing"}");
+        if (camera.PendingMirrorLockupRestore is not null)
+        {
+            var applyErr = await camera.ApplyPendingMirrorLockupRestoreAsync();
+            var (_, finalDrive) = await camera.GetDriveModeAsync();
+            Log($"  ApplyPendingMirrorLockupRestore = {applyErr}");
+            Log($"  now: drive {finalDrive}, lockup {camera.MirrorLockupEnabled?.ToString() ?? "unknown"}");
+            Log($"  still pending: {camera.PendingMirrorLockupRestore?.ToString() ?? "nothing"}");
+            driveRestored = finalDrive == entryDriveMode;
+            Log(driveRestored && camera.MirrorLockupEnabled is not true
+                ? "  => everything the helper changed is back."
+                : "  *** something is STILL not restored.");
+        }
+
+        if (!gotMlu)
+        {
+            Log("\n*** No image. Before blaming the helper, note a control is needed: if a plain");
+            Log("*** TakePictureAsync also fails right now, the body is not exposing at all.");
+            lock (objects) objects.Clear();
+            var ctrlErr = await camera.TakePictureAsync();
+            var (gotCtrl, ctrlBytes) = await CollectAsync("MLUSHOT-CTRL", TimeSpan.FromSeconds(20));
+            Log($"control plain release = {ctrlErr}, {(gotCtrl ? $"IMAGE {ctrlBytes:N0}" : "NO IMAGE")}");
+            Log(gotCtrl
+                ? "=> the body exposes fine, so the mirror-lockup path is what failed."
+                : "=> the body is not exposing at all; this run proves nothing about lockup.");
+            return 1;
+        }
+
+        return driveRestored ? 0 : 1;
     }
 
     if (mode is "power")

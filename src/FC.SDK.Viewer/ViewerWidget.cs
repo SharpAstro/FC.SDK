@@ -161,10 +161,23 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         var busyColor = _state.IsBusy ? ViewerTheme.Warn : ViewerTheme.Palette.DimText;
         var logFile = _log.FilePath is { } path ? Path.GetFileName(path) : "(no log file)";
 
+        // Name the running operation, and say how many clicks are waiting behind it. The queue count
+        // is the answer to "I pressed that and nothing happened": every action shares one gate because
+        // PTP is half-duplex, so during an exposure a click is accepted and queued rather than lost,
+        // and previously nothing on screen said so.
+        var queued = Volatile.Read(ref _state.QueuedOperations);
+        var busyText = (_state.BusyOperation, queued) switch
+        {
+            (null, 0) => "idle",
+            (null, var n) => $"waiting… {n} queued",
+            ({ } op, 0) => op,
+            ({ } op, var n) => $"{op} (+{n} queued)",
+        };
+
         return Layout.Builder.HStack(
-                Glyph(_state.IsBusy ? _glyphs.Busy : " ", busyColor)
+                Glyph(_state.IsBusy || queued > 0 ? _glyphs.Busy : " ", busyColor)
                     .W(Layout.Sizing.Fixed(GlyphColumnWidth)).HStar(),
-                Layout.Builder.Text(_state.BusyOperation ?? "idle", SmallFontSize, busyColor).WStar(0.5f).HStar(),
+                Layout.Builder.Text(busyText, SmallFontSize, busyColor).WStar(0.5f).HStar(),
                 Layout.Builder.Text(_state.StatusMessage, SmallFontSize, ViewerTheme.Palette.BodyText).WStar(2.4f).HStar(),
                 Layout.Builder.Text($"log → {logFile}", SmallFontSize, ViewerTheme.Palette.DimText).WStar(0.9f).HStar())
             .WithGap(ViewerTheme.Metrics.Padding)

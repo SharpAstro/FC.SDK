@@ -174,6 +174,29 @@ Consequences worth remembering:
 - **`SetRequestOLCInfoGroup` (0x913D, mask 0x1fff)** is required on newer bodies before they report Tv/Av/ISO and AF
   state via `OLCInfoChanged` (0xC1A5).
 
+## Mirror-lockup capture, and why its cleanup is the caller's job
+
+`TakePictureWithMirrorLockupAsync` does the verified 6D recipe: arm `0xD13A`, select a self-timer
+drive off the body's **own allowed list**, release, restore. Verified with `FC.SDK.Diagnostics
+mlushot`: 21.9 MB CR2 in ~2.5 s with the lockup marker present.
+
+- **Mirror lockup alone is silently ignored.** In a single-shot drive a 6D just shoots, so the caller
+  gets a frame and believes they had lockup. Lockup engages only in a self-timer drive, where the
+  body's firmware owns raise → settle → expose. The settle is therefore whatever the body offers and
+  cannot be chosen; `0x9128`'s second parameter was the standing hope for an arbitrary delay and turned
+  out to do nothing at all here.
+- **The restore has to happen after the caller fetches the image**, and this is the non-obvious part.
+  Restoring immediately failed on hardware for *both* settings, while the identical write seconds later
+  succeeded first time. `TakePictureAsync` returns when the release finishes, which is before the image
+  arrives, and a frame awaiting `TransferComplete` keeps the body refusing property writes. So the
+  helper does a best effort, records the remainder on `PendingMirrorLockupRestore`, and the caller
+  applies it with `ApplyPendingMirrorLockupRestoreAsync` once they have the frame. Skip that and the
+  body is left on a self-timer, delaying every later exposure in a way that reads as a camera fault.
+- **`0x15` is an OLC group *mask*, not a flag**, so test containment rather than equality. Runs have
+  reported `0x15` and `0x17`; the latter carries every bit of the former, and an equality check called
+  it absent. That also caps what the marker proves: it earns its meaning from having once been
+  corroborated by an audible mirror and a viewfinder black for a whole countdown, not from the number.
+
 ## Canon PTP opcodes reference
 
 | Opcode | Name | Data phase |
@@ -455,6 +478,16 @@ event-stream property cache side by side, and writes a timestamped log of every 
   that accepts a release and produces nothing is a real state, and the tick that refreshes the
   counter is also what enforces it — `CheckNeedsRedraw` only redraws on invalidation, and during an
   exposure nothing else invalidates.
+- **A click during a camera operation is queued, not lost, and the status bar now says so.** This was
+  chased as a "clicks swallowed during the exposure ticker" bug and the input path turned out to be
+  innocent: SDL dispatches input and render on one thread, `BeginFrame` clears and re-registers click
+  regions within a single render pass so a hit test never sees a half-built set, and `NeedsRedraw` is a
+  volatile bool that is only ever set by invalidation and cleared immediately before a render, so no
+  redraw can be lost. What actually happened is that every action serialises on one `SemaphoreSlim`
+  (PTP is half-duplex; two commands in flight is not a thing), so a click during a multi-second
+  operation waits — and with only `BusyOperation` displayed, nothing distinguished "accepted, queued"
+  from "dropped". `ViewerState.QueuedOperations` is counted around the gate wait and rendered as
+  `op (+N queued)`. The lesson generalises: a queue with no depth indicator reads as a lost input.
 - Layout is **declarative only** — `Layout.Node` trees painted through `PixelWidgetBase.RenderLayout`,
   which binds each click region to the rect it drew. No hand-rolled hit rectangles. Row virtualization
   is delegated to `ListScrollController`; the only arithmetic in the widget is letterboxing an image,
