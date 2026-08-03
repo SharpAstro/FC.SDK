@@ -33,6 +33,62 @@ internal static class CanonViewfinderFrame
     /// <summary>Two uint32s — the full sensor dimensions.</summary>
     private const uint SensorSizeRecord = 14;
 
+    /// <summary>Four 256-bin uint32 histograms, 4096 bytes in total.</summary>
+    private const uint HistogramRecord = 17;
+
+    private const int HistogramBins = 256;
+    private const int HistogramChannels = 4;
+
+    /// <summary>
+    /// The live exposure histogram the body computes for its own display, or null when the envelope
+    /// carries no histogram record.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The one piece of live metering an EOS volunteers over PTP. There is no "metered exposure
+    /// value" operation, so on a body in Manual this is the only way to ask whether a frame is
+    /// exposed before spending a shutter actuation on it.
+    /// </para>
+    /// <para>
+    /// The 4096-byte payload is four 256-bin uint32 histograms. That grouping is not assumed: each
+    /// group's bins sum to the same pixel count, which four unrelated arrays would not do, and the
+    /// decode rejects a payload where they disagree. Channel order is checked against the JPEG in
+    /// the same envelope by <c>FC.SDK.Diagnostics meter</c> rather than taken from EDSDK's property
+    /// order.
+    /// </para>
+    /// </remarks>
+    internal static CanonEvfHistogram? TryGetHistogram(List<CanonViewfinderRecord> records)
+    {
+        foreach (var r in records)
+        {
+            if (r.Type is not HistogramRecord) continue;
+
+            var s = r.Payload.Span;
+            if (s.Length < HistogramChannels * HistogramBins * sizeof(uint)) continue;
+
+            var channels = new uint[HistogramChannels][];
+            var totals = new long[HistogramChannels];
+            for (var c = 0; c < HistogramChannels; c++)
+            {
+                var bins = new uint[HistogramBins];
+                for (var b = 0; b < HistogramBins; b++)
+                {
+                    bins[b] = BinaryPrimitives.ReadUInt32LittleEndian(s[((c * HistogramBins + b) * sizeof(uint))..]);
+                    totals[c] += bins[b];
+                }
+                channels[c] = bins;
+            }
+
+            // Four histograms of one image count the same pixels. If the groups disagree the layout
+            // is not what this reads it as, and a wrong exposure readout is worse than none.
+            if (totals[0] is 0 || totals.Any(t => t != totals[0])) return null;
+
+            return new CanonEvfHistogram(channels[0], channels[1], channels[2], channels[3]);
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// The magnified region the body is currently showing, or null when the envelope does not
     /// describe one.
@@ -179,4 +235,69 @@ public readonly record struct CanonEvfZoomRect(
     public double Factor => Width > 0 && SensorWidth > 0 ? (double)SensorWidth / Width : 1.0;
 
     public override string ToString() => $"({X},{Y}) {Width}x{Height} of {SensorWidth}x{SensorHeight} [{Factor:F2}x]";
+}
+
+/// <summary>
+/// The exposure histogram the camera computes for its own live-view display: four 256-bin channels
+/// over the current frame.
+/// </summary>
+/// <remarks>
+/// This is the closest thing an EOS offers to a light meter over PTP. It is the body's own metering
+/// of the live image, so it reflects the aperture, shutter and ISO actually set — which on a body in
+/// Manual is the only feedback there is short of taking the picture.
+/// </remarks>
+/// <param name="Luma">Luminance, the channel to judge overall exposure by.</param>
+/// <param name="Red">Red channel.</param>
+/// <param name="Green">Green channel.</param>
+/// <param name="Blue">Blue channel.</param>
+public readonly record struct CanonEvfHistogram(uint[] Luma, uint[] Red, uint[] Green, uint[] Blue)
+{
+    /// <summary>Total pixels counted — identical across all four channels by construction.</summary>
+    public long PixelCount => Sum(Luma);
+
+    /// <summary>
+    /// Mean luma as a fraction of full scale, 0 to 1. A well-exposed average scene sits near 0.18;
+    /// the frames that made an earlier focus measurement worthless read 0.01.
+    /// </summary>
+    public double MeanLevel => Mean(Luma);
+
+    /// <summary>
+    /// Fraction of pixels in the top bin — blown highlights. Non-zero is not automatically wrong
+    /// (specular highlights and stars are meant to clip), but a large value means detail is gone.
+    /// </summary>
+    public double ClippedHighlights => PixelCount is 0 ? 0 : (double)Luma[^1] / PixelCount;
+
+    /// <summary>Fraction of pixels in the bottom bin — crushed shadows.</summary>
+    public double ClippedShadows => PixelCount is 0 ? 0 : (double)Luma[0] / PixelCount;
+
+    /// <summary>The luma level at or below which <paramref name="fraction"/> of pixels fall, 0 to 1.</summary>
+    public double Percentile(double fraction)
+    {
+        var target = PixelCount * Math.Clamp(fraction, 0, 1);
+        long running = 0;
+        for (var b = 0; b < Luma.Length; b++)
+        {
+            running += Luma[b];
+            if (running >= target) return b / (double)(Luma.Length - 1);
+        }
+        return 1.0;
+    }
+
+    private static long Sum(uint[] bins)
+    {
+        long total = 0;
+        foreach (var v in bins) total += v;
+        return total;
+    }
+
+    private static double Mean(uint[] bins)
+    {
+        long total = 0, weighted = 0;
+        for (var b = 0; b < bins.Length; b++) { total += bins[b]; weighted += (long)bins[b] * b; }
+        return total is 0 ? 0 : weighted / (double)total / (bins.Length - 1);
+    }
+
+    public override string ToString() =>
+        $"mean {MeanLevel:P1}, p50 {Percentile(0.5):P1}, p99 {Percentile(0.99):P1}, "
+        + $"clipped {ClippedShadows:P1} low / {ClippedHighlights:P1} high";
 }

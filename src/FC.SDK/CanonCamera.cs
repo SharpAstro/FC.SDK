@@ -1116,6 +1116,35 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<CanonEvfZoomRect?> GetEvfZoomRectAsync(CancellationToken ct = default) =>
         WaitForZoomRectAsync(_ => true, ZoomReadTimeout, ct);
 
+    /// <summary>
+    /// The camera's own exposure histogram for the current live-view frame — the only live metering
+    /// an EOS offers over PTP. Null when no frame arrives in time, or when the body sends no
+    /// histogram record.
+    /// </summary>
+    /// <remarks>
+    /// Requires live view to be running. There is no PTP operation that reports a metered exposure
+    /// value, so on a body whose dial is at <see cref="EdsAEMode.Manual"/> — where nothing
+    /// compensates for a bad guess — this is how to find out whether a frame is exposed without
+    /// spending a shutter actuation to look.
+    /// </remarks>
+    /// <param name="ct">Cancellation.</param>
+    public async Task<CanonEvfHistogram?> GetEvfHistogramAsync(CancellationToken ct = default)
+    {
+        // Same reason WaitForZoomRectAsync polls: roughly half of all live-view reads answer
+        // "no frame yet" on the bodies measured, so one read is not a reading.
+        var deadline = DateTime.UtcNow + ZoomReadTimeout;
+        while (true)
+        {
+            var (err, records) = await GetLiveViewRecordsAsync(ct);
+            if (err is EdsError.OK && records.Count > 0
+                && CanonViewfinderFrame.TryGetHistogram([.. records]) is { } histogram)
+                return histogram;
+
+            if (DateTime.UtcNow >= deadline) return null;
+            await Task.Delay(50, ct);
+        }
+    }
+
     /// <summary>How long a zoom change is given to show up in the rect before it counts as ignored.</summary>
     private static readonly TimeSpan ZoomSettleTimeout = TimeSpan.FromSeconds(3);
 
