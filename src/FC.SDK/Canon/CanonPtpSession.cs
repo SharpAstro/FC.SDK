@@ -455,6 +455,61 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         return resp.ToEdsError();
     }
 
+    /// <summary>True when the body advertises live-view autofocus (0x9154).</summary>
+    internal bool SupportsDoAf => IsOperationSupported(PtpOperationCode.CanonDoAf);
+
+    /// <summary>
+    /// Canon DoAf (0x9154) — runs contrast-detect autofocus on the live-view image. No parameters,
+    /// no data phase (libgphoto2 <c>ptp_canon_eos_afdrive</c>).
+    /// </summary>
+    /// <remarks>
+    /// This is the live-view counterpart to the mirror-path half-press: 0x9128 with param 1 drives
+    /// the phase-detect sensor, which is blind while the mirror is up. The response returns as soon
+    /// as the camera accepts the command, not when focus is achieved — the result arrives on the
+    /// event stream.
+    /// </remarks>
+    internal async Task<EdsError> DoAfAsync(CancellationToken ct = default)
+    {
+        var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonDoAf, ct);
+        return resp.ToEdsError();
+    }
+
+    /// <summary>True when the body advertises the live-view zoom operation (0x9158).</summary>
+    internal bool SupportsEvfZoom => IsOperationSupported(PtpOperationCode.CanonZoom);
+
+    /// <summary>
+    /// Canon Zoom (0x9158) — sets the live-view magnification. One parameter, no data phase
+    /// (libgphoto2 <c>ptp_canon_eos_zoom</c>).
+    /// </summary>
+    /// <remarks>
+    /// Zoom is an <b>operation</b>, not a property write. Worth stating because EDSDK models it as
+    /// the property <c>kEdsPropID_Evf_Zoom</c> (0x507), and mapping that id onto a 0xD1xx property
+    /// code is the mistake this comment exists to prevent — there is no such property.
+    /// </remarks>
+    internal async Task<EdsError> EvfZoomAsync(uint zoom, CancellationToken ct = default)
+    {
+        var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonZoom, ct, zoom);
+        return resp.ToEdsError();
+    }
+
+    /// <summary>True when the body advertises live-view zoom panning (0x9159).</summary>
+    internal bool SupportsEvfZoomPosition => IsOperationSupported(PtpOperationCode.CanonZoomPosition);
+
+    /// <summary>
+    /// Canon ZoomPosition (0x9159) — moves the magnified crop across the sensor. Two parameters,
+    /// x and y, no data phase (libgphoto2 <c>ptp_canon_eos_zoomposition</c>).
+    /// </summary>
+    /// <remarks>
+    /// Coordinates are in the body's own sensor-coordinate space and the units are not the same
+    /// across generations, so a caller that needs a pixel-accurate pan has to calibrate against the
+    /// zoom rect the viewfinder envelope reports rather than assume.
+    /// </remarks>
+    internal async Task<EdsError> EvfZoomPositionAsync(uint x, uint y, CancellationToken ct = default)
+    {
+        var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonZoomPosition, ct, x, y);
+        return resp.ToEdsError();
+    }
+
     internal async Task<EdsError> ResetMirrorLockupStateAsync(CancellationToken ct = default)
     {
         var resp = await ptp.SendCommandAsync(PtpOperationCode.CanonResetMirrorLockupState, ct);
@@ -515,6 +570,19 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
 
     internal async Task<(EdsError Error, byte[] JpegData)> GetViewfinderDataAsync(CancellationToken ct = default)
     {
+        var (err, envelope) = await GetViewfinderEnvelopeAsync(ct);
+        if (err is not EdsError.OK || envelope.Length is 0) return (err, []);
+
+        // The payload is a record envelope, not a bare JPEG — see CanonViewfinderFrame.
+        return (EdsError.OK, CanonViewfinderFrame.ExtractJpeg(envelope));
+    }
+
+    /// <summary>
+    /// The undecoded live-view payload — every record, not just the image. For identifying the
+    /// metadata records; ordinary streaming wants <see cref="GetViewfinderDataAsync"/>.
+    /// </summary>
+    internal async Task<(EdsError Error, byte[] Envelope)> GetViewfinderEnvelopeAsync(CancellationToken ct = default)
+    {
         var (resp, data) = await ptp.SendCommandReceiveDataAsync(
             PtpOperationCode.CanonGetViewfinderData, ct, 0x00200000, 0, 0);
 
@@ -525,10 +593,7 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         // condition, since it sees a zero declared size and never gets as far as the response code.
         if (resp.Code is PtpResponseCode.CanonObjectNotReady) return (EdsError.OK, []);
 
-        if (!resp.IsSuccess) return (resp.ToEdsError(), []);
-
-        // The payload is a record envelope, not a bare JPEG — see CanonViewfinderFrame.
-        return (EdsError.OK, CanonViewfinderFrame.ExtractJpeg(data));
+        return resp.IsSuccess ? (EdsError.OK, data) : (resp.ToEdsError(), []);
     }
 
     internal async Task<EdsError> TerminateViewfinderAsync(CancellationToken ct = default)

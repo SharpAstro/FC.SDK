@@ -287,6 +287,75 @@ public enum EdsWhiteBalance : uint
 }
 
 /// <summary>Depth of field preview during live view. Set via <see cref="EdsPropertyId.Evf_DepthOfFieldPreview"/>.</summary>
+/// <summary>
+/// Live-view AF method (PTP 0xD1BA, libgphoto2 <c>LvAfSystem</c> / "AF Method").
+/// </summary>
+/// <remarks>
+/// <para>
+/// Worth setting deliberately, because <b>it can gate live-view magnification</b>. Measured on an
+/// EOS 6D with an EF lens attached: with <see cref="LiveFace"/> selected — the factory default — the
+/// zoom operation answers OK and the feed stays at full frame, while <see cref="Quick"/> and
+/// <see cref="Live"/> crop as asked. This mirrors the camera's own UI, where the magnify button is
+/// disabled in face-tracking AF.
+/// </para>
+/// <para>
+/// It is <b>not</b> an absolute rule: with no lens mounted, the same body magnifies happily in
+/// <see cref="LiveFace"/>, and the pan range loses its inset as well. So the condition depends on
+/// what is on the mount, and code should not encode it —
+/// <c>CanonCamera.SetEvfZoomAsync</c> verifies the resulting zoom rect instead, which gets both
+/// cases right without knowing which one it is in. <see cref="Live"/> worked in every configuration
+/// measured, so it remains the one to set before zooming.
+/// </para>
+/// <para>
+/// Values from libgphoto2's <c>canon_eos_afmethod</c> table. A given body offers only a subset —
+/// the 6D announces 0, 1 and 2 — so take the choice from the allowed-value list, not from this enum.
+/// </para>
+/// </remarks>
+public enum CanonEvfAfSystem : uint
+{
+    /// <summary>Phase-detect: the mirror drops to focus. Allows magnification.</summary>
+    Quick = 0,
+
+    /// <summary>Contrast-detect on a single movable point (FlexiZone-Single). Allows magnification.</summary>
+    Live = 1,
+
+    /// <summary>Face detection and tracking. <b>Silently blocks magnification.</b></summary>
+    LiveFace = 2,
+
+    LiveMulti = 3,
+    LiveZone = 4,
+    LiveSingleExpandCross = 5,
+    LiveSingleExpandSurround = 6,
+    LiveZoneLargeH = 7,
+    LiveZoneLargeV = 8,
+    LiveCatchAF = 9,
+    LiveSpotAF = 10,
+    FlexibleZoneAF1 = 11,
+    FlexibleZoneAF2 = 12,
+    FlexibleZoneAF3 = 13,
+    WholeAreaAF = 14,
+}
+
+/// <summary>
+/// Live-view magnification factors, as EDSDK numbers them for <c>kEdsPropID_Evf_Zoom</c>.
+/// </summary>
+/// <remarks>
+/// The wire mechanism is an operation (0x9158) rather than the property EDSDK exposes, but the
+/// value set is the same. A body may accept factors outside this enum — libgphoto2 passes whatever
+/// it is given — so <c>SetEvfZoomAsync</c> has a raw <see cref="uint"/> overload.
+/// </remarks>
+public enum CanonEvfZoom : uint
+{
+    /// <summary>Whole frame, downscaled. The framing view.</summary>
+    Fit = 1,
+
+    /// <summary>5× — a near-1:1-pixel crop. The usable focusing and planetary regime.</summary>
+    X5 = 5,
+
+    /// <summary>10×.</summary>
+    X10 = 10,
+}
+
 public enum EdsEvfDepthOfFieldPreview : uint
 {
     Off = 0,
