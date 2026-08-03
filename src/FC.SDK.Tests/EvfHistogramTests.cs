@@ -146,6 +146,23 @@ public class EvfHistogramTests
         h.Value.ClippedHighlights.ShouldBe(0.25, 0.001);
     }
 
+    /// <summary>
+    /// A public struct can always be default-constructed, so every member has to survive null bin
+    /// arrays. Nothing in the SDK produces one, which is exactly why it would go unnoticed.
+    /// </summary>
+    [Fact]
+    public void A_default_histogram_answers_zeroes_rather_than_throwing()
+    {
+        var h = default(CanonEvfHistogram);
+
+        h.PixelCount.ShouldBe(0);
+        h.MeanLevel.ShouldBe(0);
+        h.ClippedHighlights.ShouldBe(0);
+        h.ClippedShadows.ShouldBe(0);
+        h.Percentile(0.5).ShouldBe(0);
+        h.ToString().ShouldNotBeNull();
+    }
+
     [Fact]
     public void Percentiles_walk_the_cumulative_distribution()
     {

@@ -1,8 +1,9 @@
 # Live-view magnification: an operation, a hidden gate, and the only honest read-out
 
 Measured on an EOS 6D (firmware as shipped, `EF50mm f/1.8 STM`) on 2026-08-03 with
-`FC.SDK.Diagnostics --zoom` and `--evf`. Every claim below is judged on the zoom rect the body
-itself reports, never on a response code — because **0x9158 answers `OK` whether or not it acts**.
+`FC.SDK.Diagnostics zoom` and `evf` (subcommands now, not `--zoom`/`--evf`; the flag form was
+replaced by System.CommandLine and errors today). Every claim below is judged on the zoom rect the
+body itself reports, never on a response code, because **0x9158 answers `OK` whether or not it acts**.
 
 ## Zoom is an operation, not a property
 
@@ -48,7 +49,17 @@ answers `OperationRefused` only when the frame really did not crop — the same 
 mirror-lockup refusal. That gets both cases right without knowing which one it is in.
 
 `Live` worked in every configuration measured, so it stays the recommended setting before zooming.
-`--evf` exercises both directions; a guard that always refused would pass a one-sided test.
+`evf` exercises both directions; a guard that always refused would pass a one-sided test.
+
+### Verifying a step between two magnified levels needs the crop width
+
+`IsMagnified` cannot mark a 5x → 10x change: it is already true before the body acts, so a stale
+pre-zoom frame satisfies it instantly and a body that ignored the step would still be reported as
+having honoured it. `SetEvfZoomAsync` therefore reads the rect first and, when both sides are
+magnified, waits for `Width` to move instead. One case stays genuinely undecidable: because the
+factor is a threshold, asking for 6 while already at 5x legitimately changes nothing, and that is
+indistinguishable from being ignored without a per-body factor table. It logs and returns `OK` rather
+than inventing a refusal.
 
 ## The factor is a threshold, not a value
 
@@ -127,7 +138,7 @@ and watching which tracked:
 | **14** | `5472, 3648` | **full sensor size** |
 | **18** | `x, y, w, h` | **the zoom rect** |
 | 13 | `2184, 1456, 1104, 736` | LV readout size, then display size |
-| 17 | 4096 bytes | histogram — 4 channels × 256 bins × uint32 |
+| **17** | 4096 bytes | **exposure histogram** — 4 channels × 256 bins × uint32, decoded and confirmed |
 | 10 | `0x6A70974B, …` | a Unix timestamp and a counter |
 | 0xFFFFFFFF | 32 bytes | frame header |
 | 4, 5, 7, 12 | small | not identified |
@@ -138,6 +149,31 @@ them** — its `camera_capture_preview` logs every non-JPEG record without inter
 is no second implementation to check against. A body that numbers its records differently gets
 `null` rather than a wrong answer, and `IsMagnified` stays false when the sensor record is missing
 rather than being inferred from the crop alone.
+
+### Record 17 is a real light meter, and it is linear
+
+Decoded as `CanonEvfHistogram` and confirmed on the 6D by `FC.SDK.Diagnostics meter`, which tests it
+three ways so a plausible-looking blob cannot pass:
+
+- **Structure.** All four groups counted **345,600** pixels, so they are four histograms of one image
+  rather than four unrelated arrays. Note that is 720×480, a reduction of its own: not the streamed
+  JPEG's 960×640, and not the sensor. The decode returns `null` when the groups disagree.
+- **Channel order.** Luma is a fixed blend, so of the 24 assignments only one satisfies
+  `Y = 0.299R + 0.587G + 0.114B`. Y,R,G,B won with a residual of **0.03%** against 1.49% for the
+  runner-up. Corroborated physically: the means read R 71.8% / G 47.6% / B 18.0% under a warm LED,
+  which is the ordering that light demands.
+- **Liveness.** An ISO sweep moved the mean **2.49% → 9.87% → 33.22% → 70.82%**, monotonically. The
+  first step is **3.96× for a 4× light increase**, so the histogram is **linear in light, not gamma
+  encoded**; later steps compress only because p99 approaches clipping. That is what makes two
+  `MeanLevel` readings comparable as an exposure ratio, with stops being `log2` of it.
+
+This matters beyond diagnostics: it is the only live metering an EOS offers over PTP. `MeteringMode`
+(0xD107) and `ExposureCompensation` (0xD104) say how the body is *configured* to meter; nothing
+reports a metered value. On a dial at Manual, this is the only way to know a frame is exposed without
+spending a shutter actuation to find out.
+
+**Still unknown: whether the histogram covers the magnified crop or the full field when zoomed.** That
+is exactly the question for metering a star at 10×, and one `meter` run while magnified answers it.
 
 ## Detecting whether autofocus is possible at all
 

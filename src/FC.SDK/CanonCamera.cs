@@ -1119,6 +1119,11 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </remarks>
     public async Task<EdsError> SetEvfZoomAsync(uint zoom, bool verify = true, CancellationToken ct = default)
     {
+        // Read where the crop is before asking it to move. Needed because IsMagnified alone cannot
+        // mark a change between two magnified levels: going 5x -> 10x, the flag is already true, so a
+        // stale pre-zoom frame satisfies it instantly and a body that ignored the step still passes.
+        var before = verify ? await GetEvfZoomRectAsync(ct) : null;
+
         var err = await _canon.EvfZoomAsync(zoom, ct);
         if (err is not EdsError.OK)
         {
@@ -1132,7 +1137,13 @@ public sealed class CanonCamera : IAsyncDisposable
         // takes about a second to apply a zoom and keeps streaming pre-zoom frames meanwhile, so a
         // single read reliably catches the old rect and calls a working zoom refused.
         var want = zoom > 1;
-        var rect = await WaitForZoomRectAsync(r => r.IsMagnified == want, ZoomSettleTimeout, ct);
+        var steppingBetweenLevels = want && before is { IsMagnified: true };
+        var startWidth = before?.Width ?? 0;
+        var rect = await WaitForZoomRectAsync(
+            steppingBetweenLevels
+                ? r => r.IsMagnified && r.Width != startWidth
+                : r => r.IsMagnified == want,
+            ZoomSettleTimeout, ct);
 
         if (rect is null)
         {
@@ -1141,6 +1152,17 @@ public sealed class CanonCamera : IAsyncDisposable
             _logger.LogDebug("SetEvfZoom({Zoom}): no live-view frame to verify against", zoom);
             return EdsError.OK;
         }
+
+        // Both magnified and the crop never moved. Two indistinguishable causes: the body ignored the
+        // request, or the factor collapsed onto the step already in force (a 6D gives 5x for anything
+        // in 5-8, so asking 6 while at 5 legitimately changes nothing). Neither can be told from the
+        // other without a per-body factor table, which CLAUDE.md forbids guessing at, so this reports
+        // OK and says why rather than inventing a refusal.
+        if (steppingBetweenLevels && rect.Value.Width == startWidth)
+            _logger.LogInformation(
+                "SetEvfZoom({Zoom}): the crop stayed {Rect}. Either the body ignored the step, or that "
+                + "value maps to the factor already in force. Read GetEvfZoomRectAsync for the truth.",
+                zoom, rect.Value);
 
         if (zoom > 1 && !rect.Value.IsMagnified)
         {
@@ -1246,10 +1268,29 @@ public sealed class CanonCamera : IAsyncDisposable
     /// Moves the magnified crop across the sensor.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Coordinates are the body's own sensor-coordinate space, and the units differ across
-    /// generations — libgphoto2 measured "approx 64 pixel steps on the EOS 1000D". Treat a value as
+    /// generations: libgphoto2 measured "approx 64 pixel steps on the EOS 1000D". Treat a value as
     /// calibrated only against the zoom rect the viewfinder envelope reports on the same body; do
-    /// not carry a constant between models. Has no visible effect unless zoom is above 1×.
+    /// not carry a constant between models.
+    /// </para>
+    /// <para>
+    /// <b>Set this only while magnified.</b> The accepted range is <c>[0, sensor - crop]</c> per axis,
+    /// so at 1x the crop is the whole frame, the range collapses to <c>[0, 0]</c>, and there is
+    /// nowhere to pan to. To centre the frame, magnify first, set the position, then zoom back out:
+    /// the position persists across zoom changes. (That the range collapses is arithmetic from the
+    /// measured accept/discard rule rather than a separate measurement; a pan at 1x was never
+    /// actually sent.)
+    /// </para>
+    /// <para>
+    /// <b>In <see cref="CanonEvfAfSystem.Live"/> this is also the autofocus point</b>, because the
+    /// magnification frame and the AF frame are the same rectangle. So a pan left over from earlier
+    /// in a session silently redirects every later <see cref="AutoFocusLiveViewAsync"/> call, which
+    /// still answers <c>OK</c> while focusing on whatever happens to be under the stale position.
+    /// That cost a debugging session: a frame parked in the bottom-right corner had AF hunting on the
+    /// corner of the room, and centring it moved the live-view JPEG from 112K to 138K. If focus
+    /// matters and the position is not known, set it rather than inherit it.
+    /// </para>
     /// </remarks>
     /// <param name="verify">
     /// Wait for the move to appear in the zoom rect and return where it landed. On by default: the

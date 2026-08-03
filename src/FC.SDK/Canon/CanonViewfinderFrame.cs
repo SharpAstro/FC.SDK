@@ -264,7 +264,11 @@ public readonly record struct CanonEvfZoomRect(
 /// <param name="Blue">Blue channel.</param>
 public readonly record struct CanonEvfHistogram(uint[] Luma, uint[] Red, uint[] Green, uint[] Blue)
 {
-    /// <summary>Total pixels counted — identical across all four channels by construction.</summary>
+    /// <summary>
+    /// Total pixels counted, identical across all four channels by construction. Zero for a
+    /// <c>default</c> value, which a struct cannot prevent being created even though nothing in this
+    /// assembly produces one: every member below tolerates it rather than throwing.
+    /// </summary>
     public long PixelCount => Sum(Luma);
 
     /// <summary>
@@ -279,17 +283,19 @@ public readonly record struct CanonEvfHistogram(uint[] Luma, uint[] Red, uint[] 
     public double MeanLevel => Mean(Luma);
 
     /// <summary>
-    /// Fraction of pixels in the top bin — blown highlights. Non-zero is not automatically wrong
-    /// (specular highlights and stars are meant to clip), but a large value means detail is gone.
+    /// Fraction of pixels in the top bin, meaning blown highlights. Non-zero is not automatically
+    /// wrong (specular highlights and stars are meant to clip), but a large value means detail is gone.
     /// </summary>
     public double ClippedHighlights => PixelCount is 0 ? 0 : (double)Luma[^1] / PixelCount;
 
-    /// <summary>Fraction of pixels in the bottom bin — crushed shadows.</summary>
+    /// <summary>Fraction of pixels in the bottom bin, meaning crushed shadows.</summary>
     public double ClippedShadows => PixelCount is 0 ? 0 : (double)Luma[0] / PixelCount;
 
     /// <summary>The luma level at or below which <paramref name="fraction"/> of pixels fall, 0 to 1.</summary>
     public double Percentile(double fraction)
     {
+        if (Luma is not { Length: > 1 }) return 0;
+
         var target = PixelCount * Math.Clamp(fraction, 0, 1);
         long running = 0;
         for (var b = 0; b < Luma.Length; b++)
@@ -300,15 +306,17 @@ public readonly record struct CanonEvfHistogram(uint[] Luma, uint[] Red, uint[] 
         return 1.0;
     }
 
-    private static long Sum(uint[] bins)
+    private static long Sum(uint[]? bins)
     {
+        if (bins is null) return 0;
         long total = 0;
         foreach (var v in bins) total += v;
         return total;
     }
 
-    private static double Mean(uint[] bins)
+    private static double Mean(uint[]? bins)
     {
+        if (bins is not { Length: > 1 }) return 0;
         long total = 0, weighted = 0;
         for (var b = 0; b < bins.Length; b++) { total += bins[b]; weighted += (long)bins[b] * b; }
         return total is 0 ? 0 : weighted / (double)total / (bins.Length - 1);

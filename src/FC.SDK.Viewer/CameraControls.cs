@@ -141,8 +141,14 @@ public static class CameraControls
         ("Session / body",
         [
             new("Save to", EdsPropertyId.SaveTo, typeof(CanonCaptureDestination)),
-            // 0 disables the timer entirely, which is what a long imaging run wants.
-            new("Auto power-off", EdsPropertyId.AutoPowerOffSetting, Step: 60, Min: 0, Max: 1800, Unit: "s"),
+            // Auto power-off is read-only here, and that is measured rather than assumed: a 6D
+            // refuses every write to 0xD114 with DeviceBusy, with the event queue drained, under
+            // UILock and in live view alike, writing a value that differed from the one held. It
+            // announces no allowed values for the property either. It used to be a spinner with a
+            // 0-1800s range, so every click was a no-op that reported an error. Use the
+            // "Keep device on" button (0x911D) to hold a body awake; that one works, and live view
+            // already feeds it automatically every ~8 s.
+            new("Auto power-off", EdsPropertyId.AutoPowerOffSetting, Writable: false, Unit: "s"),
             new("Available shots", EdsPropertyId.AvailableShots, Writable: false),
             new("Temp. status", EdsPropertyId.TempStatus, Writable: false),
             new("Battery", EdsPropertyId.BatteryLevel, Writable: false),
