@@ -68,9 +68,12 @@ also unblocks §2.
 > clipping. This is the *only* live metering an EOS offers over PTP: `MeteringMode` (0xD107) and
 > `ExposureCompensation` (0xD104) report how the body is configured to meter, but nothing reports a
 > metered value, so on a dial at Manual the histogram is the only way to know a frame is exposed
-> without spending a shutter actuation. **Awaiting hardware confirmation** via
-> `FC.SDK.Diagnostics meter`; until it runs, the channel labels are inferred from EDSDK's property
-> order rather than measured.
+> without spending a shutter actuation. **Confirmed on a 6D** by `FC.SDK.Diagnostics meter`: all four
+> groups count 345,600 pixels (a 720x480 reduction, not the JPEG's size); the channel order is Y,R,G,B
+> at a 0.03% luma residual against 1.49% for the runner-up, corroborated by the means reading
+> R 71.8% / G 47.6% / B 18.0% under a warm LED; and an ISO sweep moved the mean 2.49% to 70.82%
+> monotonically. The first step gave 3.96x for a 4x light increase, so it is **linear in light, not
+> gamma encoded**, which is what makes it usable for exposure arithmetic.
 
 Functionally the biggest gap, and the one a consumer has already hit (see below): **5×/10× EVF zoom
 is how you focus on a star, and it is the only planetary regime a DSLR has.**

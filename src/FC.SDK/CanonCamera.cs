@@ -673,9 +673,10 @@ public sealed class CanonCamera : IAsyncDisposable
     /// Whether the camera can autofocus at all right now, and why not if it cannot.
     /// </summary>
     /// <remarks>
-    /// Worth asking before any operation that implies autofocus — a half-press release, or
-    /// <see cref="AutoFocusLiveViewAsync"/> — because neither reports the absence of a focus motor
-    /// as an error. On a telescope both answer <c>OK</c> and do nothing.
+    /// Worth asking before <see cref="AutoFocusLiveViewAsync"/>, which does not report the absence of
+    /// a focus motor as an error: on a telescope it answers <c>OK</c> and does nothing. Note the
+    /// release paths (<see cref="TakePictureAsync"/>, <see cref="PressShutterHalfwayAsync"/>) do not
+    /// autofocus at all on the body measured, so this says nothing about whether they will work.
     /// <para>
     /// Verified on an EOS 6D across all three configurations. <see cref="EdsPropertyId.AFMode"/>
     /// (0xD108) tracks the <b>lens's own AF/MF switch</b>, reading <see cref="EdsAFMode.ManualFocus"/>
@@ -709,6 +710,25 @@ public sealed class CanonCamera : IAsyncDisposable
         GetPropertyStringAsync(EdsPropertyId.BodyIDEx, ct: ct);
 
 
+    /// <summary>
+    /// Takes a single photograph. Returns when the body has finished the release, which is before the
+    /// image arrives: watch <see cref="ObjectAdded"/> for that.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This does not autofocus</b>, on an EOS 6D at least, even though it issues a half press
+    /// before the full one. Measured rather than assumed: with a lens at AF, deliberately defocused
+    /// first, the delivered frame is exactly as soft as one released with no focus command, while
+    /// calling <see cref="AutoFocusLiveViewAsync"/> beforehand recovers focus and scores 1.9x higher
+    /// on the same measure. Call that explicitly if focus matters. Neither the response code nor the
+    /// release duration distinguishes the two cases.
+    /// </para>
+    /// <para>
+    /// Refuses with <see cref="EdsError.OperationRefused"/>, before anything reaches the wire, when
+    /// mirror lockup is armed on a body that discards releases in that state: see
+    /// <see cref="SupportsMirrorLockupCapture"/>.
+    /// </para>
+    /// </remarks>
     public async Task<EdsError> TakePictureAsync(CancellationToken ct = default)
     {
         _logger.LogDebug("Taking picture");
@@ -733,7 +753,11 @@ public sealed class CanonCamera : IAsyncDisposable
             return singleShot;
         }
 
-        // Half-press AF
+        // Half press. NOT an autofocus, despite libgphoto2 naming 0x9128's second parameter AF/MF:
+        // on a 6D this sequence demonstrably does not focus. Measured with a lens at AF, defocused by
+        // a known amount first and judged on the delivered CR2's sharpness, it comes back exactly as
+        // soft as a release with no focus command at all, while an explicit 0x9154 recovers focus and
+        // scores 1.9x higher. See the 0x9128 section in CLAUDE.md.
         var err = await _canon.RemoteReleaseOnAsync(0x01, ct);
         if (err is not EdsError.OK) return err;
 
@@ -749,6 +773,17 @@ public sealed class CanonCamera : IAsyncDisposable
         return await _canon.RemoteReleaseOffAsync(0x01, ct);
     }
 
+    /// <summary>
+    /// Half-presses the shutter button (0x9128 with param 1). Release it with
+    /// <see cref="ReleaseShutterAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Do not treat this as an autofocus trigger.</b> A physical half press drives the phase-detect
+    /// AF sensor, but the PTP equivalent did not focus on the one body measured: an EOS 6D with a lens
+    /// at AF, defocused first, delivered a frame no sharper than one released with no focus command.
+    /// Use <see cref="AutoFocusLiveViewAsync"/> (0x9154) to actually focus, and
+    /// <see cref="GetFocusStateAsync"/> to find out whether focusing is possible at all.
+    /// </remarks>
     public Task<EdsError> PressShutterHalfwayAsync(CancellationToken ct = default) =>
         _canon.RemoteReleaseOnAsync(0x01, ct);
 
@@ -1269,10 +1304,19 @@ public sealed class CanonCamera : IAsyncDisposable
     /// Runs contrast-detect autofocus on the live-view image (0x9154).
     /// </summary>
     /// <remarks>
-    /// The live-view counterpart to the mirror-path half-press: <see cref="PressShutterHalfwayAsync"/>
-    /// drives the phase-detect sensor, which is blind while the mirror is up for live view. Returns
-    /// when the camera accepts the command, not when focus is achieved — watch the event stream, and
-    /// <see cref="CancelAutoFocusAsync"/> to abort a hunt.
+    /// <para>
+    /// <b>The only focus command measured to work over PTP.</b> This used to be described as the
+    /// live-view counterpart to a mirror-path half press, implying
+    /// <see cref="PressShutterHalfwayAsync"/> focused too. It does not, on an EOS 6D: only 0x9154
+    /// moves the lens, and it does so by 1.9x on a sharpness measure where the release paths score
+    /// the same as no focus command at all.
+    /// </para>
+    /// <para>
+    /// Returns when the camera accepts the command, not when focus is achieved. That distinction
+    /// matters: tearing down live view while a hunt is still running left a 6D answering
+    /// <see cref="EdsError.DeviceBusy"/> to every release for three minutes. Watch the event stream,
+    /// and call <see cref="CancelAutoFocusAsync"/> before stopping live view.
+    /// </para>
     /// </remarks>
     public async Task<EdsError> AutoFocusLiveViewAsync(CancellationToken ct = default)
     {
@@ -1362,8 +1406,13 @@ public sealed class CanonCamera : IAsyncDisposable
     }
 
     /// <summary>
-    /// Cancels a running autofocus operation. Useful after a half-press that never resolved.
+    /// Cancels a running autofocus operation (0x9160).
     /// </summary>
+    /// <remarks>
+    /// Required, not optional, after <see cref="AutoFocusLiveViewAsync"/>: that call returns on
+    /// acceptance rather than on focus, and stopping live view with a hunt still in flight left a 6D
+    /// answering <see cref="EdsError.DeviceBusy"/> to every release for three minutes.
+    /// </remarks>
     public Task<EdsError> CancelAutoFocusAsync(CancellationToken ct = default) => _canon.AfCancelAsync(ct);
 
     /// <summary>

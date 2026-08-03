@@ -52,9 +52,18 @@ internal static class CanonViewfinderFrame
     /// <para>
     /// The 4096-byte payload is four 256-bin uint32 histograms. That grouping is not assumed: each
     /// group's bins sum to the same pixel count, which four unrelated arrays would not do, and the
-    /// decode rejects a payload where they disagree. Channel order is checked against the JPEG in
-    /// the same envelope by <c>FC.SDK.Diagnostics meter</c> rather than taken from EDSDK's property
-    /// order.
+    /// decode rejects a payload where they disagree.
+    /// </para>
+    /// <para>
+    /// <b>Confirmed on an EOS 6D</b> by <c>FC.SDK.Diagnostics meter</c>, three ways. Structure: all
+    /// four groups counted 345,600 pixels, so the histogram is computed on a 720x480 reduction rather
+    /// than the streamed JPEG's own size. Channel order: only one assignment of the four groups
+    /// satisfies <c>Y = 0.299R + 0.587G + 0.114B</c>, and the winner was Y,R,G,B with a residual of
+    /// 0.03% against 1.49% for the runner-up. That was corroborated physically, the means reading
+    /// R 71.8% / G 47.6% / B 18.0% under a warm LED. Liveness: an ISO sweep moved the mean 2.49% to
+    /// 70.82% monotonically, and the first step gave 3.96x for a 4x light increase, so the histogram
+    /// looks <b>linear in light rather than gamma encoded</b>. Later steps compress only because the
+    /// 99th percentile approaches clipping.
     /// </para>
     /// </remarks>
     internal static CanonEvfHistogram? TryGetHistogram(List<CanonViewfinderRecord> records)
@@ -246,7 +255,10 @@ public readonly record struct CanonEvfZoomRect(
 /// of the live image, so it reflects the aperture, shutter and ISO actually set — which on a body in
 /// Manual is the only feedback there is short of taking the picture.
 /// </remarks>
-/// <param name="Luma">Luminance, the channel to judge overall exposure by.</param>
+/// <param name="Luma">
+/// Luminance, the channel to judge overall exposure by. Confirmed to be the first of the four groups
+/// on an EOS 6D, and to satisfy the Rec.601 blend of the other three to within 0.03%.
+/// </param>
 /// <param name="Red">Red channel.</param>
 /// <param name="Green">Green channel.</param>
 /// <param name="Blue">Blue channel.</param>
@@ -259,6 +271,11 @@ public readonly record struct CanonEvfHistogram(uint[] Luma, uint[] Red, uint[] 
     /// Mean luma as a fraction of full scale, 0 to 1. A well-exposed average scene sits near 0.18;
     /// the frames that made an earlier focus measurement worthless read 0.01.
     /// </summary>
+    /// <remarks>
+    /// Measured to be linear in light on an EOS 6D, not gamma encoded: a 4x ISO increase moved this
+    /// 3.96x. So two of these can be compared as an exposure ratio directly, and the stops between
+    /// them are <c>log2</c> of the ratio, provided neither is near clipping.
+    /// </remarks>
     public double MeanLevel => Mean(Luma);
 
     /// <summary>
