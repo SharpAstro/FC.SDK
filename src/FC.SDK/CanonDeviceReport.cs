@@ -50,12 +50,51 @@ public static class CanonDeviceReport
         report.AppendLine($"- Battery: {(camera.BatteryLevelPercent is { } b ? $"{b}%" : "not reported")}");
         report.AppendLine();
 
+        await AppendBodyStringsAsync(report, camera, ct).ConfigureAwait(false);
         AppendOperations(report, camera);
         var properties = await AppendPropertiesAsync(report, camera, ct).ConfigureAwait(false);
         AppendBatteryWarning(report, properties);
         await AppendCustomFunctionsAsync(report, camera, ct).ConfigureAwait(false);
 
         return report.ToString();
+    }
+
+    /// <summary>
+    /// The body's string properties. Mostly useful for the lens: a report from someone whose
+    /// autofocus or live-view behaviour is odd is far easier to read when the glass is named.
+    /// </summary>
+    /// <remarks>
+    /// The serial is reported twice on purpose — once here from property 0xD1AF and once in the
+    /// header from GetDeviceInfo. They come from different places in the firmware, so a disagreement
+    /// is itself worth seeing.
+    /// </remarks>
+    private static async Task AppendBodyStringsAsync(StringBuilder report, CanonCamera camera, CancellationToken ct)
+    {
+        (string Label, EdsPropertyId Id)[] strings =
+        [
+            ("Lens", EdsPropertyId.LensName),
+            ("Body ID", EdsPropertyId.BodyIDEx),
+            ("Owner", EdsPropertyId.OwnerName),
+            ("Artist", EdsPropertyId.Artist),
+            ("Copyright", EdsPropertyId.Copyright),
+        ];
+
+        var lines = new List<string>();
+        foreach (var (label, id) in strings)
+        {
+            var (err, value) = await camera.GetPropertyStringAsync(id, ct: ct).ConfigureAwait(false);
+            if (err is EdsError.OK && !string.IsNullOrWhiteSpace(value))
+                lines.Add($"- {label}: `{value}`");
+            else if (err is not EdsError.OK)
+                lines.Add($"- {label}: not reported ({err})");
+        }
+
+        if (lines.Count is 0) return;
+
+        report.AppendLine("## Body strings");
+        report.AppendLine();
+        foreach (var line in lines) report.AppendLine(line);
+        report.AppendLine();
     }
 
     /// <summary>

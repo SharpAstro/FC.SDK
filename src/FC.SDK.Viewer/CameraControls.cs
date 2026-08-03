@@ -146,7 +146,9 @@ public static class CameraControls
             new("Available shots", EdsPropertyId.AvailableShots, Writable: false),
             new("Temp. status", EdsPropertyId.TempStatus, Writable: false),
             new("Battery", EdsPropertyId.BatteryLevel, Writable: false),
-            new("Lens (raw)", EdsPropertyId.LensName, Writable: false),
+            // No "Lens (raw)" here any more: this panel renders uint32s, and the lens name is a
+            // string, so the control could only ever show the first four characters as a number.
+            // The lens is in the device report instead, which is text.
         ]),
     ];
 
