@@ -302,12 +302,74 @@ public sealed class CanonCamera : IAsyncDisposable
     public async Task<(EdsError Error, uint Value)> GetPropertyAsync(EdsPropertyId id, CancellationToken ct = default)
     {
         var ptpCode = CanonPropertyMap.GetPtpCodeOrThrow(id);
+
+        // Refuse rather than answer with the first four bytes of a string read as an integer, which
+        // is what this returned before the map carried a type. It was not a visible failure: the
+        // call answered OK with a plausible-looking number.
+        if (CanonPropertyMap.TypeOf(id) is var type && type is not CanonPropertyType.UInt32)
+        {
+            _logger.LogWarning(
+                "GetProperty {PropertyId} is a {Type} property — use {Alternative} instead", id, type,
+                type is CanonPropertyType.String ? nameof(GetPropertyStringAsync) : nameof(GetPropertyBytesAsync));
+            return (EdsError.PropertiesMismatch, 0);
+        }
+
         var (err, value) = await _canon.GetPropertyUInt32Async(ptpCode, ct);
         if (err is not EdsError.OK)
         {
             _logger.LogDebug("GetProperty {PropertyId} failed: {Error}", id, err);
         }
         return (err, value);
+    }
+
+    /// <summary>
+    /// The full value bytes of a property. Needed for anything the uint32 accessor cannot express —
+    /// strings and packed structures, where the first word is meaningless.
+    /// </summary>
+    /// <param name="refresh">
+    /// Bypass the mirror and ask the camera to re-emit the value first. Needed to verify a write:
+    /// the camera echoes a written value before deciding whether to keep it.
+    /// </param>
+    public Task<(EdsError Error, byte[] Value)> GetPropertyBytesAsync(
+        EdsPropertyId id, bool refresh = false, CancellationToken ct = default) =>
+        _canon.GetPropertyBytesAsync(CanonPropertyMap.GetPtpCodeOrThrow(id), refresh, ct);
+
+    /// <summary>Writes a property whose value is not a scalar — a string, or a packed structure.</summary>
+    public Task<EdsError> SetPropertyBytesAsync(
+        EdsPropertyId id, ReadOnlyMemory<byte> value, CancellationToken ct = default) =>
+        _canon.SetPropertyBytesAsync(CanonPropertyMap.GetPtpCodeOrThrow(id), value, ct);
+
+    /// <summary>
+    /// Reads a string property — owner, artist, copyright, lens name, body serial.
+    /// </summary>
+    /// <remarks>
+    /// EOS bodies store these as plain null-terminated ASCII, <b>not</b> the PTP length-prefixed
+    /// UTF-16 form; see <see cref="CanonPropertyType.String"/> for the corroboration. Trailing bytes
+    /// after the terminator are padding and are discarded.
+    /// </remarks>
+    public async Task<(EdsError Error, string? Value)> GetPropertyStringAsync(
+        EdsPropertyId id, bool refresh = false, CancellationToken ct = default)
+    {
+        var (err, bytes) = await GetPropertyBytesAsync(id, refresh, ct);
+        if (err is not EdsError.OK) return (err, null);
+
+        return (EdsError.OK, DecodeAsciiZ(bytes));
+    }
+
+    /// <summary>Writes a string property, null-terminated, ASCII.</summary>
+    public Task<EdsError> SetPropertyStringAsync(EdsPropertyId id, string value, CancellationToken ct = default)
+    {
+        // The terminator is part of the value: a body handed an unterminated buffer keeps reading
+        // into whatever follows.
+        var bytes = new byte[System.Text.Encoding.ASCII.GetByteCount(value) + 1];
+        System.Text.Encoding.ASCII.GetBytes(value, bytes);
+        return SetPropertyBytesAsync(id, bytes, ct);
+    }
+
+    private static string DecodeAsciiZ(ReadOnlySpan<byte> bytes)
+    {
+        var end = bytes.IndexOf((byte)0);
+        return System.Text.Encoding.ASCII.GetString(end < 0 ? bytes : bytes[..end]);
     }
 
     public async Task<EdsError> SetPropertyAsync(EdsPropertyId id, uint value, CancellationToken ct = default)
@@ -592,9 +654,17 @@ public sealed class CanonCamera : IAsyncDisposable
     public async Task<(EdsError Error, uint Value)> GetTempStatusAsync(CancellationToken ct = default) =>
         await GetPropertyAsync(EdsPropertyId.TempStatus, ct);
 
-    /// <summary>Current lens name string. Read-only. Returns raw uint — use GetDeviceInfo for string.</summary>
-    public async Task<(EdsError Error, uint Value)> GetLensNameRawAsync(CancellationToken ct = default) =>
-        await GetPropertyAsync(EdsPropertyId.LensName, ct);
+    /// <summary>The attached lens, as the body names it. Read-only.</summary>
+    public Task<(EdsError Error, string? Value)> GetLensNameAsync(CancellationToken ct = default) =>
+        GetPropertyStringAsync(EdsPropertyId.LensName, ct: ct);
+
+    /// <summary>
+    /// The body serial from property 0xD1AF. <see cref="SerialNumber"/> reports the same thing from
+    /// GetDeviceInfo; this is the independent second source.
+    /// </summary>
+    public Task<(EdsError Error, string? Value)> GetBodyIdAsync(CancellationToken ct = default) =>
+        GetPropertyStringAsync(EdsPropertyId.BodyIDEx, ct: ct);
+
 
     public async Task<EdsError> TakePictureAsync(CancellationToken ct = default)
     {
@@ -1057,6 +1127,37 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </summary>
     public Task<EdsError> SetRawPropertyAsync(ushort ptpPropertyCode, uint value, CancellationToken ct = default) =>
         _canon.SetPropertyUInt32Async(ptpPropertyCode, value, ct);
+
+    /// <summary>
+    /// The values the camera accepts for a raw PTP property code. The raw counterpart to
+    /// <see cref="GetAllowedValuesAsync"/> — for a code with no <see cref="EdsPropertyId"/> mapping,
+    /// which is where guessing a value space is most tempting and least safe.
+    /// </summary>
+    public async Task<uint[]?> GetRawAllowedValuesAsync(ushort ptpPropertyCode, CancellationToken ct = default)
+    {
+        if (_canon.Properties.GetAllowedValues(ptpPropertyCode) is { } known) return known;
+
+        await _canon.RequestDevicePropValueAsync(ptpPropertyCode, ct);
+        await _canon.DrainEventsAsync(ct);
+        return _canon.Properties.GetAllowedValues(ptpPropertyCode);
+    }
+
+    /// <summary>
+    /// Reads the full value bytes of a raw Canon PTP property code, bypassing the
+    /// <see cref="EdsPropertyId"/> mapping. The byte-level counterpart to
+    /// <see cref="GetRawPropertyAsync"/>, for probing a code whose layout is not known yet.
+    /// </summary>
+    public Task<(EdsError Error, byte[] Value)> GetRawPropertyBytesAsync(
+        ushort ptpPropertyCode, bool refresh = false, CancellationToken ct = default) =>
+        _canon.GetPropertyBytesAsync(ptpPropertyCode, refresh, ct);
+
+    /// <summary>
+    /// Writes arbitrary value bytes to a raw Canon PTP property code, bypassing the
+    /// <see cref="EdsPropertyId"/> mapping.
+    /// </summary>
+    public Task<EdsError> SetRawPropertyBytesAsync(
+        ushort ptpPropertyCode, ReadOnlyMemory<byte> value, CancellationToken ct = default) =>
+        _canon.SetPropertyBytesAsync(ptpPropertyCode, value, ct);
 
     /// <summary>
     /// Asks the camera to push a property value into the event stream (Canon 0x9127) without

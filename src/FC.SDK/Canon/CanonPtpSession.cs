@@ -244,12 +244,30 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
     /// — the leading size word covers the whole record (12 bytes for a scalar) and the camera
     /// rejects the record without it. Retries while the camera reports DeviceBusy.
     /// </summary>
-    internal async Task<EdsError> SetPropertyUInt32Async(ushort ptpPropCode, uint value, CancellationToken ct = default)
+    internal Task<EdsError> SetPropertyUInt32Async(ushort ptpPropCode, uint value, CancellationToken ct = default)
     {
-        var data = new byte[12];
+        var payload = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(payload, value);
+        return SetPropertyBytesAsync(ptpPropCode, payload, ct);
+    }
+
+    /// <summary>
+    /// Canon SetDevicePropValueEx (0x9110) with a payload of any length. Same record framing as a
+    /// scalar write — <c>[size:u32][propCode:u32][payload…]</c>, where <c>size</c> covers the whole
+    /// record — which is what makes strings, packed structures and the Custom Function block all one
+    /// operation rather than three.
+    /// </summary>
+    /// <param name="mirrorToCache">
+    /// Whether a successful write updates the local mirror. On by default because the alternative is
+    /// a read that lags the camera by a poll interval.
+    /// </param>
+    internal async Task<EdsError> SetPropertyBytesAsync(
+        ushort ptpPropCode, ReadOnlyMemory<byte> value, CancellationToken ct = default, bool mirrorToCache = true)
+    {
+        var data = new byte[8 + value.Length];
         BinaryPrimitives.WriteUInt32LittleEndian(data, (uint)data.Length);
         BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(4), ptpPropCode);
-        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(8), value);
+        value.Span.CopyTo(data.AsSpan(8));
 
         EdsError err = EdsError.DeviceBusy;
         for (int attempt = 0; attempt <= SetPropertyBusyRetries; attempt++)
@@ -267,15 +285,59 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
             if (err is not EdsError.DeviceBusy) break;
         }
 
-        if (err is EdsError.OK && Properties.TryGetValue(ptpPropCode, out _))
+        if (err is EdsError.OK && mirrorToCache && Properties.TryGetValue(ptpPropCode, out _))
         {
             // Mirror the write immediately; the camera also echoes it back as a PropertyChanged
             // event. Only for properties the camera itself has announced, though: a 450D answers OK
             // to a write of a property it does not have, and mirroring that phantom would make every
             // later read answer the value we invented rather than fail honestly.
-            Properties.SetValue(ptpPropCode, value);
+            var bytes = value.ToArray();
+            uint scalar = bytes.Length switch
+            {
+                0 => 0,
+                1 => bytes[0],
+                2 or 3 => BinaryPrimitives.ReadUInt16LittleEndian(bytes),
+                _ => BinaryPrimitives.ReadUInt32LittleEndian(bytes),
+            };
+            Properties.SetValue(ptpPropCode, scalar, bytes);
         }
         return err;
+    }
+
+    /// <summary>
+    /// The full value bytes of a property, from the event-fed mirror.
+    /// </summary>
+    /// <remarks>
+    /// The uint32 accessor above answers the first word of exactly these bytes, so this is the same
+    /// read one layer earlier — necessary for strings and packed structures, where that first word
+    /// is meaningless. Non-vendor codes fall through to standard PTP GetDevicePropValue, whose data
+    /// phase already <i>is</i> the value bytes.
+    /// </remarks>
+    /// <param name="refresh">
+    /// Ask the camera to re-emit the value before reading, bypassing the mirror. Needed to verify a
+    /// write: the camera echoes a written value on the event stream before deciding whether to keep
+    /// it, so straight after a set the mirror can hold a value the camera is about to revert.
+    /// </param>
+    internal async Task<(EdsError Error, byte[] Value)> GetPropertyBytesAsync(
+        ushort ptpPropCode, bool refresh = false, CancellationToken ct = default)
+    {
+        if (CanonPropertyCache.IsEosVendorProperty(ptpPropCode))
+        {
+            if (!refresh && Properties.GetRawValue(ptpPropCode) is { } cached)
+                return (EdsError.OK, cached);
+
+            await RequestDevicePropValueAsync(ptpPropCode, ct);
+            await DrainEventsAsync(ct);
+
+            if (Properties.GetRawValue(ptpPropCode) is { } pushed)
+                return (EdsError.OK, pushed);
+
+            if (!IsOperationSupported(PtpOperationCode.GetDevicePropValue))
+                return (EdsError.DevicePropNotSupported, []);
+        }
+
+        var (resp, data) = await ptp.SendCommandReceiveDataAsync(PtpOperationCode.GetDevicePropValue, ct, ptpPropCode);
+        return resp.IsSuccess ? (EdsError.OK, data) : (resp.ToEdsError(), []);
     }
 
     /// <summary>
@@ -594,21 +656,12 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
     /// <summary>
     /// Writes a modified Custom Function data block back to the camera.
     /// </summary>
-    internal async Task<EdsError> SetCustomFunctionBlockAsync(CanonCustomFunctionBlock block, CancellationToken ct = default)
-    {
-        // Write via Canon SetPropValue (0x9110) with the C.Fn property code.
-        // Same record framing as a scalar write: [size:u32][propcode:u32][payload...]
-        // Try 0xD1A0 first.
-        ushort cfnPropCode = CustomFuncExPropertyCode;
-        var rawData = block.RawData;
-        var data = new byte[8 + rawData.Length];
-        BinaryPrimitives.WriteUInt32LittleEndian(data, (uint)data.Length);
-        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(4), cfnPropCode);
-        rawData.CopyTo(data, 8);
-
-        var resp = await ptp.SendCommandWithDataAsync(PtpOperationCode.CanonSetPropValue, data, ct);
-        return resp.ToEdsError();
-    }
+    internal Task<EdsError> SetCustomFunctionBlockAsync(CanonCustomFunctionBlock block, CancellationToken ct = default)
+        // The generic byte writer is exactly this operation — 0x9110 with the whole block as the
+        // payload. Deliberately NOT mirrored into the cache: a body can ACK a C.Fn write and keep
+        // its old value, and the only way to tell is a fresh read-back, which a mirrored write would
+        // answer with the value we sent.
+        => SetPropertyBytesAsync(CustomFuncExPropertyCode, block.RawData, ct, mirrorToCache: false);
 
     /// <summary>
     /// One GetEvent round trip. Decoded events update <see cref="Properties"/> and are published
