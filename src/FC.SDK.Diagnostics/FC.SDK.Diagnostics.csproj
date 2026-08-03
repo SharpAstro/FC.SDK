@@ -15,4 +15,8 @@
     <ProjectReference Include="..\FC.SDK\FC.SDK.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.10" />
+  </ItemGroup>
+
 </Project>
