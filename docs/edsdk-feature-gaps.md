@@ -62,6 +62,15 @@ also unblocks §2.
 > needed. What actually blocks magnification is `Evf_AFMode` (0xD1BA), which silently discards the
 > zoom in its default setting. Full measurements in **`docs/canon-live-view-zoom.md`**. Live-view AF
 > (`AutoFocusLiveViewAsync`, 0x9154) works too. Still undecoded: envelope record types 4, 5, 7, 12.
+>
+> **The histogram (record 17) is now decoded too** — `CanonEvfHistogram` /
+> `CanonCamera.GetEvfHistogramAsync`, four 256-bin channels with mean level, percentiles and
+> clipping. This is the *only* live metering an EOS offers over PTP: `MeteringMode` (0xD107) and
+> `ExposureCompensation` (0xD104) report how the body is configured to meter, but nothing reports a
+> metered value, so on a dial at Manual the histogram is the only way to know a frame is exposed
+> without spending a shutter actuation. **Awaiting hardware confirmation** via
+> `FC.SDK.Diagnostics meter`; until it runs, the channel labels are inferred from EDSDK's property
+> order rather than measured.
 
 Functionally the biggest gap, and the one a consumer has already hit (see below): **5×/10× EVF zoom
 is how you focus on a star, and it is the only planetary regime a DSLR has.**
@@ -147,7 +156,7 @@ guessing codes from EDSDK property IDs — which `CLAUDE.md` forbids for good re
 | Hotplug notification | `EnumerateUsbCameras` / `EnumerateWpdCameras` are polls; EDSDK has `EdsSetCameraAddedHandler` |
 | Direct transfer | `Enter`/`ExitDirectTransfer` status commands absent |
 | `CanonGetDeviceInfoEx` | 0x9108, declared (`PtpOperationCode.cs:28`), zero uses |
-| `0x9128` second parameter | We send one of two. libgphoto2 documents p1 = half/full/half+full press and **p2 = 0 AF / 1 MF** — so it is *not* the mirror-settle control it was hoped to be, but `p2=1` does give a release that skips autofocus, which is what a manual lens or a telescope needs |
+| `0x9128` second parameter | We send one of two. libgphoto2 documents p1 = half/full/half+full press and **p2 = 0 AF / 1 MF** — so it is *not* the mirror-settle control it was hoped to be, but `p2=1` would give a release that skips autofocus, which is what a manual lens or a telescope needs. **p1 is measured, p2 is not** — see below |
 | Property size metadata | No equivalent of `EdsGetPropertySize`; the fixed size in `CanonPropertyMap` is our own assertion, and §1 shows it can be wrong |
 
 ## Not gaps
@@ -177,6 +186,20 @@ Not EDSDK-parity, but tracked here so there is one list:
   → restore drive. Held because the settle is the body's own timer rather than a parameter, and the
   `0x9128` second-parameter lead is now closed and was a dead end (it selects AF vs MF, not a delay),
   so the settle really is only ever the body's own timer and the API should say so plainly.
+- **`0x9128`'s second parameter is still unmeasured after two attempts**, and both failures are worth
+  recording because they are about method, not the camera. On a 6D with an `EF50mm f/1.8 STM` at AF,
+  `(3,0)` and `(3,1)` are indistinguishable on everything cheap: both answer `OK`, both deliver a
+  ~20 MB CR2, and press durations overlap (147–302 ms either way). That leaves the lens motor as the
+  observable.
+  - **Listening failed as a method.** No motor was heard on any row — but a null from a listening
+    test cannot separate "it did not run" from "I missed it", so it is not evidence either way.
+  - **Sharpness needs a control, which the first run lacked.** Four frames, each preceded by the
+    same 6-step `DriveLens` defocus, scored 0.0528 / 0.0526 / 0.0525 / 0.0523 — flat. That looks
+    conclusive and is not: with no in-focus frame in the set, a measurement that cannot detect focus
+    at all would produce exactly those numbers. `afpress` now shoots `blur` and `doaf` controls per
+    round and declares the p2 rows void unless those two separate.
+  - Note the frames also metered ~1% of full scale, so the comparison was reading noise, not detail.
+    A `meter` check before the run is cheaper than discovering that afterwards.
 - **`EdsDriveMode.Timer_10sec_RemoteControl` (0x07) ships with an unverified name.** Only the 450D
   offers it; it produced a ~10 s delay and then a **six-frame burst**, which is not understood.
   Its two neighbours were renamed in 2.0 from measurement; this one was not.
