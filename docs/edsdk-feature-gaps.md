@@ -147,7 +147,7 @@ guessing codes from EDSDK property IDs — which `CLAUDE.md` forbids for good re
 | Hotplug notification | `EnumerateUsbCameras` / `EnumerateWpdCameras` are polls; EDSDK has `EdsSetCameraAddedHandler` |
 | Direct transfer | `Enter`/`ExitDirectTransfer` status commands absent |
 | `CanonGetDeviceInfoEx` | 0x9108, declared (`PtpOperationCode.cs:28`), zero uses |
-| `0x9128` second parameter | We send one where EDSDK sends two — the standing lead for an arbitrary mirror settle (see below) |
+| `0x9128` second parameter | We send one of two. libgphoto2 documents p1 = half/full/half+full press and **p2 = 0 AF / 1 MF** — so it is *not* the mirror-settle control it was hoped to be, but `p2=1` does give a release that skips autofocus, which is what a manual lens or a telescope needs |
 | Property size metadata | No equivalent of `EdsGetPropertySize`; the fixed size in `CanonPropertyMap` is our own assertion, and §1 shows it can be wrong |
 
 ## Not gaps
@@ -175,8 +175,8 @@ Not EDSDK-parity, but tracked here so there is one list:
   a body that discards the release, but nothing performs a lockup exposure where it works. The 6D
   recipe is verified: `0xD13A` = 1 → drive = `Timer_2sec` (0x11, ~2.9 s settle) → `TakePictureAsync`
   → restore drive. Held because the settle is the body's own timer rather than a parameter, and the
-  `0x9128` second-parameter lead above may offer an arbitrary one — worth resolving before freezing
-  an API around the timer.
+  `0x9128` second-parameter lead is now closed and was a dead end (it selects AF vs MF, not a delay),
+  so the settle really is only ever the body's own timer and the API should say so plainly.
 - **`EdsDriveMode.Timer_10sec_RemoteControl` (0x07) ships with an unverified name.** Only the 450D
   offers it; it produced a ~10 s delay and then a **six-frame burst**, which is not understood.
   Its two neighbours were renamed in 2.0 from measurement; this one was not.
