@@ -48,6 +48,10 @@ var waitOpt = new Option<int>("--wait") { Description = "Seconds to watch before
 var hostOpt = new Option<bool>("--host") { Description = "Capture into the body's RAM instead of to the card." };
 var releaseOpt = new Option<uint[]>("--release") { Description = "Object handles (hex) a crashed run left the camera holding.", AllowMultipleArgumentsPerToken = true, CustomParser = r => [.. r.Tokens.Select(t => uint.Parse(t.Value.TrimStart('0', 'x', 'X'), NumberStyles.HexNumber, CultureInfo.InvariantCulture))] };
 
+// Declaring the cap is on is a claim about the physical world that the harness cannot check, so it
+// has to be asserted deliberately rather than defaulted to.
+var cappedOpt = new Option<bool>("--capped") { Description = "The lens cap is ON — enables the phase that discriminates AF from MF." };
+
 var avOpt = new Option<EdsAv>("--av") { Description = "Aperture.", DefaultValueFactory = _ => EdsAv.Av_5_6 , HelpName = "aperture" };
 var tvOpt = new Option<EdsTv>("--tv") { Description = "Shutter speed.", DefaultValueFactory = _ => EdsTv.Tv_1_125 , HelpName = "shutter" };
 var isoOpt = new Option<EdsISOSpeed>("--iso") { Description = "ISO.", DefaultValueFactory = _ => EdsISOSpeed.ISO_400 , HelpName = "iso" };
@@ -70,6 +74,9 @@ hostOpt.Recursive = releaseOpt.Recursive = true;
     ("zoom",     "Why a zoom is ignored: sweep factors and LV AF systems against the zoom rect.", []),
     ("zoompix",  "Visual proof of magnification and panning — writes JPEGs to compare.", [avOpt, tvOpt, isoOpt]),
     ("lens",     "Dump the lens / focus properties. Run with no lens, lens at AF, lens at MF and diff.", []),
+    ("press",    "0x9128's two parameters: press stage x AF/MF, judged on delivered files.", [avOpt, tvOpt, isoOpt, cappedOpt]),
+    ("afpress",  "Does 0x9128's p2 drive the focus motor? Judged on frame sharpness, against controls.", [avOpt, tvOpt, isoOpt]),
+    ("meter",    "Live-view histogram: is it real metering? Structure, channel order, exposure sweep.", [avOpt, tvOpt, isoOpt]),
 ];
 
 string? mode = null;
@@ -346,6 +353,378 @@ try
             Log($"  => the write {(after == (uint)want ? "LANDED" : "DID NOT LAND — the ACK was empty")}");
         }
         return 0;
+    }
+
+    if (mode is "meter")
+    {
+        // Is live-view record 17 real metering? Three questions, each with a way to fail.
+        //
+        // The record has been called "histogram — 4 channels x 256 bins x uint32" on the strength of
+        // its size alone, which 4096 bytes of anything would satisfy. Structure, identity and
+        // liveness all have to be shown separately.
+        await camera.StartLiveViewAsync();
+        await Task.Delay(1500);
+        await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
+
+        var hist = await camera.GetEvfHistogramAsync();
+        if (hist is not { } h)
+        {
+            Log("*** No histogram record. Either this body sends none, or the 4x256 grouping was");
+            Log("*** rejected because the four channels did not count the same pixels.");
+            await camera.StopLiveViewAsync();
+            return 1;
+        }
+
+        // 1. Structure. The decoder already refused a payload whose four groups disagreed on the
+        //    pixel count, so reaching here is itself the check; print it so it is visible.
+        Log($"Structure: 4 x 256 bins, {h.PixelCount:N0} pixels per channel (all four agree)");
+        Log($"Luma: {h}");
+
+        // 2. Identity. Luma is a fixed blend of the colour channels, so of the 24 ways to assign four
+        //    groups to (Y,R,G,B) only the right one satisfies Y = 0.299R + 0.587G + 0.114B. A scene
+        //    where the channels differ — any indoor light is warm enough — makes that decisive.
+        //    If the best fit is not clearly better than the next, this says so instead of asserting.
+        double[] means = [Mean(h.Luma), Mean(h.Red), Mean(h.Green), Mean(h.Blue)];
+        var fits = new List<(double Err, string Order)>();
+        for (var y = 0; y < 4; y++)
+        foreach (var (r, g, b) in Permutations(Enumerable.Range(0, 4).Where(i => i != y).ToArray()))
+            fits.Add((Math.Abs(means[y] - (0.299 * means[r] + 0.587 * means[g] + 0.114 * means[b])),
+                      $"Y={y} R={r} G={g} B={b}"));
+        fits.Sort((a, b) => a.Err.CompareTo(b.Err));
+
+        Log($"Channel means (as decoded Y,R,G,B): {string.Join(", ", means.Select(m => m.ToString("P1")))}");
+        Log($"Best luma fit:   {fits[0].Order}  residual {fits[0].Err:P2}");
+        Log($"Runner-up:       {fits[1].Order}  residual {fits[1].Err:P2}");
+        Log(fits[0].Order is "Y=0 R=1 G=2 B=3"
+            ? "  => the decoded order is confirmed."
+            : "  *** the decoded order is WRONG — CanonEvfHistogram is mislabelling its channels.");
+        if (fits[1].Err < fits[0].Err * 3)
+            Log("  *** but the margin is thin. A scene with more colour separation would settle it.");
+
+        // 3. Liveness. A static blob would survive every check above. Sweeping ISO must move it, and
+        //    monotonically: this is the property that makes it a light meter rather than a constant.
+        Log("\nExposure sweep — the histogram must track ISO, or it is not metering anything:");
+        var sweep = new List<(EdsISOSpeed Iso, double Mean)>();
+        foreach (var iso in new[] { EdsISOSpeed.ISO_100, EdsISOSpeed.ISO_400, EdsISOSpeed.ISO_1600, EdsISOSpeed.ISO_6400 })
+        {
+            var setErr = await camera.SetISOAsync(iso);
+            await Task.Delay(1200);
+            var s = await camera.GetEvfHistogramAsync();
+            if (s is not { } sh) { Log($"  {iso}: {setErr}, no frame"); continue; }
+            sweep.Add((iso, sh.MeanLevel));
+            Log($"  {iso,-12} mean {sh.MeanLevel,7:P2}   p99 {sh.Percentile(0.99),7:P1}   clipped high {sh.ClippedHighlights,6:P1}");
+        }
+
+        var rising = sweep.Count >= 3 && sweep.Zip(sweep.Skip(1)).All(p => p.Second.Mean >= p.First.Mean);
+        Log(rising
+            ? "  => monotonic in ISO. This is live metering of the actual exposure."
+            : "  *** NOT monotonic — either the sweep clipped, or this record is not what it looks like.");
+
+        await camera.StopLiveViewAsync();
+
+        static double Mean(uint[] bins)
+        {
+            long total = 0, weighted = 0;
+            for (var i = 0; i < bins.Length; i++) { total += bins[i]; weighted += (long)bins[i] * i; }
+            return total is 0 ? 0 : weighted / (double)total / (bins.Length - 1);
+        }
+
+        static IEnumerable<(int, int, int)> Permutations(int[] v) =>
+        [
+            (v[0], v[1], v[2]), (v[0], v[2], v[1]), (v[1], v[0], v[2]),
+            (v[1], v[2], v[0]), (v[2], v[0], v[1]), (v[2], v[1], v[0]),
+        ];
+        return 0;
+    }
+
+    if (mode is "afpress")
+    {
+        // Does 0x9128's p2 drive autofocus? Neither timing nor delivery could tell: with the cap on,
+        // an "AF" press delivered a frame in 146 ms, far too quick to be a failed hunt, so probably
+        // no AF was attempted — but "probably" is not a measurement. Listening did not settle it
+        // either: no motor was heard on any row, and "I heard nothing" is the one report a listening
+        // test cannot distinguish from "I missed it".
+        //
+        // So the observable is the delivered frame's own sharpness. Every row is preceded by the
+        // same 6-step DriveLens defocus, and a row that autofocused comes back sharp.
+        //
+        // That only means something against controls, because a sharpness measure that cannot see
+        // focus would rank four defocused frames "all equal" and look exactly like a null result.
+        // Each round therefore carries both ends of the scale:
+        //
+        //   blur — defocus, then release with no focus command at all   (known soft)
+        //   doaf — defocus, then 0x9154 DoAf, which is proven on this   (known sharp)
+        //          body: the STM is audible and the LV JPEG jumps 51->120 KB
+        //
+        // If blur and doaf do not separate, the instrument is blind and the p2 rows are void.
+        // Cap OFF for this one, and the lens switch at AF.
+        const ushort RemoteReleaseOn = 0x9128, RemoteReleaseOff = 0x9129;
+
+        var (_, focus) = await camera.GetFocusStateAsync();
+        Log($"Focus: {focus}");
+        if (!focus.AutoFocusAvailable) { Log("*** Autofocus unavailable — mount a lens, switch to AF."); return 1; }
+
+        // The first pass ran f/5.6 1/125 at whatever ISO the body held and came back nearly black.
+        // Underexposure is not neutral here: it buries scene structure under read noise, which is
+        // the one thing a sharpness measure must not be reading.
+        Log($"Av={parse.GetValue(avOpt)}: {await camera.SetApertureAsync(parse.GetValue(avOpt))}");
+        Log($"Tv={parse.GetValue(tvOpt)}: {await camera.SetShutterSpeedAsync(parse.GetValue(tvOpt))}");
+        Log($"ISO={parse.GetValue(isoOpt)}: {await camera.SetISOAsync(parse.GetValue(isoOpt))}");
+
+        // Returns how many of the six steps the body acknowledged. An ACK is not motion, but a zero
+        // is conclusive the other way: nothing moved, so there is nothing for a focus command to
+        // correct and the row cannot answer anything.
+        async Task<int> DefocusReported()
+        {
+            await camera!.StartLiveViewAsync();
+            await Task.Delay(1200);
+            await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
+            int ok = 0;
+            for (int i = 0; i < 6; i++)
+            {
+                if (await camera.DriveLensAsync(EdsDriveLensStep.NearLarge) is EdsError.OK) ok++;
+                await Task.Delay(250);
+            }
+            return ok;
+        }
+
+        int busyRows = 0;
+        foreach (var round in new[] { 1, 2 })
+        foreach (var (tag, p2) in new (string, uint?)[] { ("blur", null), ("doaf", null), ("p2is0", 0), ("p2is1", 1) })
+        {
+            var defocused = await DefocusReported();
+            Log($"\nround {round}, {tag} — defocus drove the lens {defocused}/6");
+            if (defocused is 0) { Log("  *** the lens did not move — void"); await camera.StopLiveViewAsync(); continue; }
+
+            // DoAf needs live view; the other rows must not have it, since entering live view is
+            // itself a focus opportunity on a body doing contrast AF.
+            //
+            // The hunt MUST be cancelled before live view goes away. Tearing down live view with a
+            // hunt still in flight wedged this body for three solid minutes — every subsequent
+            // release answered DeviceBusy, including the controls, which invalidated a whole run.
+            // 0x9154 returns on acceptance, not on focus, so its OK says nothing about whether the
+            // lens has stopped moving; in a dim room at the near limit the hunt outlasts any delay
+            // worth waiting. AfCancel is not a tidy-up here, it is what keeps the body usable.
+            string focusNote = "none";
+            if (tag is "doaf")
+            {
+                var afErr = await camera.AutoFocusLiveViewAsync();
+                await Task.Delay(4000);
+                var cancelErr = await camera.CancelAutoFocusAsync();
+                await Task.Delay(500);
+                focusNote = $"0x9154 = {afErr}, 0x9160 = {cancelErr}";
+            }
+            await camera.StopLiveViewAsync();
+            await Task.Delay(1500);
+            await camera.DrainEventsAsync();
+
+            var pressMs = 0d;
+            if (p2 is { } stage)
+            {
+                Log("  LISTEN NOW (3 beeps, then the press)");
+                for (int i = 0; i < 3; i++)
+                {
+                    if (OperatingSystem.IsWindows()) Console.Beep(1200, 120);
+                    await Task.Delay(700);
+                }
+            }
+
+            lock (objects) objects.Clear();
+            await camera.DrainEventsAsync();
+            var sw = Stopwatch.StartNew();
+            EdsError e1;
+            if (p2 is { } s2)
+            {
+                e1 = await camera.SendRawCommandAsync(RemoteReleaseOn, 3, s2);
+                pressMs = sw.Elapsed.TotalMilliseconds;
+                await Task.Delay(2500);
+                await camera.SendRawCommandAsync(RemoteReleaseOff, 2);
+                await camera.SendRawCommandAsync(RemoteReleaseOff, 1);
+            }
+            else
+            {
+                // The controls release the ordinary way, so the only thing that differs between a
+                // control and a p2 row is the focus command under test.
+                e1 = await camera.TakePictureAsync();
+                pressMs = sw.Elapsed.TotalMilliseconds;
+            }
+            var (got, bytes) = await CollectAsync($"{round}{tag}", TimeSpan.FromSeconds(12));
+            Log($"  {tag}: release = {e1}   focus {focusNote}   {pressMs:F0} ms   {(got ? $"IMAGE {bytes:N0}" : "no image")}");
+
+            // A wedged body answers DeviceBusy to everything, and the rows keep printing as if they
+            // were results. That is the shape of a run that reads like six tidy findings and is
+            // really one fault repeated, so it stops here instead.
+            if (e1 is EdsError.DeviceBusy)
+            {
+                Log("  *** DeviceBusy — attempting recovery (AfCancel + drain)");
+                await camera.CancelAutoFocusAsync();
+                await camera.DrainEventsAsync();
+                await Task.Delay(2000);
+                if (++busyRows >= 2)
+                {
+                    Log("*** Two busy releases: the body is wedged and every later row would be void.");
+                    Log("*** Aborting. Nothing above the first busy row is affected.");
+                    break;
+                }
+            }
+            else busyRows = 0;
+        }
+
+        Log("\nNow measure sharpness across the eight frames.");
+        Log("If blur and doaf do not separate, the measurement is blind and nothing here is evidence.");
+        Log("If they do, p2=0 landing on doaf means p2 selects AF; landing on blur means it does not.");
+        return 0;
+    }
+
+    if (mode is "press")
+    {
+        // What are 0x9128's two parameters? libgphoto2 documents them as
+        //   p1: 1 = half press, 2 = full press, 3 = half+full in one go
+        //   p2: 0 = AF, 1 = MF
+        // but that is someone else's source read, not a measurement, and this repo has been wrong
+        // before by trusting a claim it did not test. We send only p1 today, so if p2=1 really does
+        // release without autofocus it is exactly what a telescope needs and we are not using it.
+        const ushort RemoteReleaseOn = 0x9128, RemoteReleaseOff = 0x9129;
+
+        // The matrix is void unless autofocus is actually possible: with the lens at MF or absent,
+        // p2=0 and p2=1 would both do nothing about focus and the rows would look identical for a
+        // reason that has nothing to do with the parameter.
+        var (_, focus) = await camera.GetFocusStateAsync();
+        Log($"Focus: {focus}");
+        if (!focus.AutoFocusAvailable)
+        {
+            Log("*** Autofocus is unavailable, so the AF/MF parameter cannot show a difference.");
+            Log("*** Mount a lens and set its switch to AF. Refusing to run a matrix that cannot answer.");
+            return 1;
+        }
+        if (!camera.SupportedOperations.Contains(RemoteReleaseOn))
+        {
+            Log("*** This body has no 0x9128 (it is a DIGIC III single-shot-release body). Nothing to test.");
+            return 1;
+        }
+
+        Log($"Av={parse.GetValue(avOpt)}: {await camera.SetApertureAsync(parse.GetValue(avOpt))}");
+        Log($"Tv={parse.GetValue(tvOpt)}: {await camera.SetShutterSpeedAsync(parse.GetValue(tvOpt))}");
+        Log($"ISO={parse.GetValue(isoOpt)}: {await camera.SetISOAsync(parse.GetValue(isoOpt))}");
+
+        // Autofocus with nothing to do completes instantly and hides the very difference being
+        // measured, so the lens is driven off focus before each AF row. DriveLens only works in
+        // live view, hence the start/stop around it.
+        async Task Defocus()
+        {
+            await camera!.StartLiveViewAsync();
+            await Task.Delay(1200);
+            await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
+
+            // Reported, not assumed. A defocus that quietly failed would leave autofocus with
+            // nothing to do, and then the AF and MF rows would agree for a reason that has nothing
+            // to do with p2 — which is exactly how the first run of this matrix proved nothing.
+            var results = new List<EdsError>();
+            for (int i = 0; i < 6; i++)
+            {
+                results.Add(await camera.DriveLensAsync(EdsDriveLensStep.NearLarge));
+                await Task.Delay(250);
+            }
+            var ok = results.Count(r => r is EdsError.OK);
+            Log($"  defocus: DriveLens NearLarge x6 -> {ok}/6 OK"
+                + (ok == 0 ? "   *** the lens did not move; the AF row below is void" : ""));
+
+            await camera.StopLiveViewAsync();
+            await Task.Delay(1200);
+        }
+
+        async Task<(bool Delivered, long Bytes, double PressMs, double TotalMs)> Press(string id, uint p1, uint p2)
+        {
+            lock (objects) objects.Clear();
+            await camera!.DrainEventsAsync();
+
+            // The event stream is the instrument that settled mirror lockup, and it is the right one
+            // here too: if p2 selects autofocus, an AF row emits focus records that an MF row does
+            // not, whatever the timings say.
+            var seen = new List<string>();
+            void OnProp(object? _, CanonPropertyChangedEventArgs e)
+            { lock (seen) seen.Add($"prop {(uint)e.PropertyId:X4}=0x{e.Value:X}"); }
+            void OnState(object? _, CanonStateChangedEventArgs e)
+            { lock (seen) seen.Add($"{e.EventType}=0x{e.Param:X}"); }
+            camera.PropertyChanged += OnProp;
+            camera.StateChanged += OnState;
+
+            var sw = Stopwatch.StartNew();
+            var onErr = await camera.SendRawCommandAsync(RemoteReleaseOn, p1, p2);
+            var pressMs = sw.Elapsed.TotalMilliseconds;
+
+            await Task.Delay(1500);
+
+            // Mirror the press: full then half, so a half-press left over cannot hold the body.
+            if (p1 is 2 or 3) await camera.SendRawCommandAsync(RemoteReleaseOff, 2);
+            if (p1 is 1 or 3) await camera.SendRawCommandAsync(RemoteReleaseOff, 1);
+
+            var (delivered, bytes) = await CollectAsync(id, TimeSpan.FromSeconds(12));
+            Log($"  0x9128({p1},{p2}) = {onErr,-12} press {pressMs,7:F0} ms   "
+                + $"{(delivered ? $"IMAGE {bytes:N0} bytes" : "no image")}   total {sw.Elapsed.TotalSeconds:F1}s");
+            return (delivered, bytes, pressMs, sw.Elapsed.TotalMilliseconds);
+        }
+
+        Log("\n--- control: the ordinary path must deliver, or nothing below means anything ---");
+        lock (objects) objects.Clear();
+        await camera.DrainEventsAsync();
+        Log($"TakePicture = {await camera.TakePictureAsync()}");
+        var (c1, c1Bytes) = await CollectAsync("CTRL-1", TimeSpan.FromSeconds(15));
+        Log($"  control 1: {(c1 ? $"IMAGE {c1Bytes:N0} bytes" : "*** NO IMAGE — matrix is void")}");
+        if (!c1) { Log("Aborting: the body is not delivering at all."); return 1; }
+
+        Log("\n--- phase 1: what p1 does ---");
+        Log("    p1: 1=half 2=full 3=half+full     p2: 0=AF 1=MF   (per libgphoto2 — under test)");
+        foreach (var (p1, p2) in new (uint, uint)[] { (1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1) })
+        {
+            // Only the AF rows need the lens moved off focus; doing it for the MF rows too keeps the
+            // starting state identical, so a timing difference cannot be blamed on the setup.
+            await Defocus();
+            await Press($"P{p1}{p2}", p1, p2);
+        }
+
+        // Phase 2 exists because phase 1 cannot answer p2. Both AF and MF rows delivered a frame in
+        // ~290 ms, which is what you get whenever autofocus has nothing to do — and timing was
+        // always the weaker instrument anyway.
+        //
+        // The discriminating question is what happens when autofocus CANNOT succeed. In One-Shot the
+        // body is focus-priority: no lock, no shutter. So with the lens capped, a press that really
+        // uses AF should deliver nothing, while a press that skips AF should still expose (a black
+        // frame is still a frame — this is judged on delivery, not on content). AI Servo is
+        // release-priority and should expose either way, which is the control that proves the cap
+        // itself is not what stopped the shutter.
+        if (parse.GetValue(cappedOpt))
+        {
+            Log("\n--- phase 2: p2 where autofocus CANNOT lock (lens capped) ---");
+            Log("    expectation if p2 selects AF:  OneShot+AF fails, everything else delivers");
+
+            foreach (var af in new[] { EdsAFMode.OneShot, EdsAFMode.AIServo })
+            {
+                var setErr = await camera.SetPropertyAsync(EdsPropertyId.AFMode, (uint)af);
+                await Task.Delay(700);
+                var (_, nowRaw) = await camera.GetPropertyAsync(EdsPropertyId.AFMode);
+                var now = (EdsAFMode)nowRaw;
+                Log($"\n  AFMode -> {af} ({setErr}), reads {now}"
+                    + (now == af ? "" : "   *** DID NOT TAKE, these two rows are void"));
+
+                foreach (uint p2 in new uint[] { 0, 1 })
+                    await Press($"CAP-{af}-{p2}", 3, p2);
+            }
+            await camera.SetPropertyAsync(EdsPropertyId.AFMode, (uint)EdsAFMode.OneShot);
+        }
+        else
+        {
+            Log("\n(phase 2 skipped — pass --capped, with the lens cap ON, to discriminate p2)");
+        }
+
+        Log("\n--- control: same again at the end ---");
+        lock (objects) objects.Clear();
+        await camera.DrainEventsAsync();
+        Log($"TakePicture = {await camera.TakePictureAsync()}");
+        var (c2, c2Bytes) = await CollectAsync("CTRL-2", TimeSpan.FromSeconds(15));
+        Log($"  control 2: {(c2 ? $"IMAGE {c2Bytes:N0} bytes" : "*** NO IMAGE — the body stopped mid-run")}");
+        if (!c2) failures++;
+        return failures;
     }
 
     if (mode is "lens")
