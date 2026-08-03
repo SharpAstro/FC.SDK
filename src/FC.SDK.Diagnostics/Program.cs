@@ -77,6 +77,7 @@ hostOpt.Recursive = releaseOpt.Recursive = true;
     ("press",    "0x9128's two parameters: press stage x AF/MF, judged on delivered files.", [avOpt, tvOpt, isoOpt, cappedOpt]),
     ("afpress",  "Does 0x9128's p2 drive the focus motor? Judged on frame sharpness, against controls.", [avOpt, tvOpt, isoOpt]),
     ("meter",    "Live-view histogram: is it real metering? Structure, channel order, exposure sweep.", [avOpt, tvOpt, isoOpt]),
+    ("power",    "Is AutoPowerOff (0xD114) writable, or was its DeviceBusy just a no-op write?", []),
 ];
 
 string? mode = null;
@@ -174,7 +175,11 @@ try
     // on the command line because a dead process took its own list to the grave.
     foreach (var handle in parse.GetValue(releaseOpt) ?? [])
         Log($"TransferComplete(0x{handle:X8}) = {await camera.TransferCompleteAsync(handle)}");
-    Log($"AutoPowerOff=off = {await camera.SetAutoPowerOffAsync(0)}");
+    // Not SetAutoPowerOffAsync: a 6D refuses 0xD114 with DeviceBusy in every state tried — drained,
+    // under UILock, in live view — and announces no allowed values for it, so auto power-off is a
+    // camera-menu setting here. The old line logged "AutoPowerOff=off = DeviceBusy" every run, which
+    // read as if the harness were managing power when it could not. 0x911D is what actually works.
+    Log($"KeepDeviceOn = {await camera.KeepDeviceOnAsync()}");
     // Self-timer drive was left set by an earlier session and adds a delay to every release; the
     // matrix wants the plainest possible release.
     Log($"DriveMode=Single = {await camera.SetDriveModeAsync(EdsDriveMode.SingleShooting)}");
@@ -355,6 +360,93 @@ try
         return 0;
     }
 
+    if (mode is "power")
+    {
+        // Every run logs "AutoPowerOff=off = DeviceBusy", and that one line has two readings that
+        // call for opposite actions: a write the body refused, or the documented no-op response to
+        // setting a property to the value it already holds. Guessing was wrong once already today,
+        // so this reads the value, reads its allowed list, and moves it — a write is only proven by
+        // a read-back that changed.
+        const ushort AutoPowerOff = 0xD114;
+
+        var (readErr, current) = await camera.GetRawPropertyAsync(AutoPowerOff);
+        var allowed = await camera.GetAllowedValuesAsync(EdsPropertyId.AutoPowerOffSetting);
+        Log($"0xD114 currently {current} ({readErr})");
+        Log($"0xD114 allowed:  {(allowed is null ? "none announced" : string.Join(", ", allowed))}");
+
+        if (readErr is not EdsError.OK)
+        {
+            Log("*** The body does not report this property, so nothing below would mean anything.");
+            return 1;
+        }
+
+        // DeviceBusy is Canon's generic refusal, not "read-only": this repo documents an undrained
+        // event queue, a value already held, and a malformed record as three unrelated causes. So a
+        // single busy write does not establish that the property cannot be written, and concluding
+        // that from one attempt was reading a response code as truth again.
+        //
+        // The queue cause is already covered — SetPropertyBytesAsync drains and retries on busy — so
+        // what is left is state: does the body accept this write under UILock, or in live view? Each
+        // phase writes a value that DIFFERS from the current one, so a no-op can never explain a
+        // pass, and each is judged on a read-back rather than its response code.
+        var target = allowed?.FirstOrDefault(v => v != current)
+            ?? (current == 0 ? 1u : 0u);
+        Log($"\nTarget {target}, differs from {current} — a no-op cannot explain a pass.");
+
+        async Task<(EdsError Set, uint After, bool Landed)> TryWriteAsync(string label, Func<Task> setup, Func<Task> teardown)
+        {
+            await setup();
+            await camera!.DrainEventsAsync();
+            var setErr = await camera.SetAutoPowerOffAsync(target);
+            await Task.Delay(2000);
+            await camera.DrainEventsAsync();
+            var (_, got) = await camera.GetRawPropertyAsync(AutoPowerOff);
+            await teardown();
+
+            var landed = got == target;
+            Log($"  {label,-22} set = {setErr,-12} reads back {got} => {(landed ? "LANDED" : "did not land")}");
+
+            // Leave the body where it was found, so a later phase is not testing a changed baseline.
+            if (landed)
+            {
+                await camera.SetAutoPowerOffAsync(current);
+                await Task.Delay(1500);
+                await camera.DrainEventsAsync();
+            }
+            return (setErr, got, landed);
+        }
+
+        Log("");
+        var plain = await TryWriteAsync("plain (drained)", () => Task.CompletedTask, () => Task.CompletedTask);
+
+        // EDSDK takes the UI lock around some writes; a body that will not let a host change a menu
+        // setting while the user could be in that menu is a plausible refusal this would clear.
+        var locked = await TryWriteAsync("under UILock",
+            async () => Log($"    SetUILock = {await camera.SetUILockAsync(true)}"),
+            async () => Log($"    ResetUILock = {await camera.SetUILockAsync(false)}"));
+
+        // The condition actually asked about. Live view is the body's busiest state, so if anything
+        // makes this worse it is this — and if it makes it BETTER that is worth knowing too.
+        var inLiveView = await TryWriteAsync("in live view",
+            async () => { await camera.StartLiveViewAsync(); await Task.Delay(1500); },
+            async () => { await camera.StopLiveViewAsync(); await Task.Delay(1000); });
+
+        Log("");
+        if (plain.Landed || locked.Landed || inLiveView.Landed)
+        {
+            Log("=> WRITABLE, but only in some states. The earlier 'not writable' verdict was wrong.");
+            Log($"   plain {(plain.Landed ? "yes" : "no")}, UILock {(locked.Landed ? "yes" : "no")}, live view {(inLiveView.Landed ? "yes" : "no")}");
+        }
+        else
+        {
+            Log("=> Refused in all three states, and the body announces no allowed values for 0xD114.");
+            Log("   That is as far as this can be pushed from the host: treat auto power-off as a");
+            Log("   camera-menu setting, and use KeepDeviceOn (0x911D) to hold a body awake.");
+            Log("   Still only one body — a 450D may differ, as it does for so much else.");
+        }
+        return 0;
+    }
+
     if (mode is "meter")
     {
         // Is live-view record 17 real metering? Three questions, each with a way to fail.
@@ -362,6 +454,9 @@ try
         // The record has been called "histogram — 4 channels x 256 bins x uint32" on the strength of
         // its size alone, which 4096 bytes of anything would satisfy. Structure, identity and
         // liveness all have to be shown separately.
+        Log($"Av={parse.GetValue(avOpt)}: {await camera.SetApertureAsync(parse.GetValue(avOpt))}");
+        Log($"Tv={parse.GetValue(tvOpt)}: {await camera.SetShutterSpeedAsync(parse.GetValue(tvOpt))}");
+
         await camera.StartLiveViewAsync();
         await Task.Delay(1500);
         await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
@@ -464,12 +559,44 @@ try
         Log($"Focus: {focus}");
         if (!focus.AutoFocusAvailable) { Log("*** Autofocus unavailable — mount a lens, switch to AF."); return 1; }
 
-        // The first pass ran f/5.6 1/125 at whatever ISO the body held and came back nearly black.
-        // Underexposure is not neutral here: it buries scene structure under read noise, which is
-        // the one thing a sharpness measure must not be reading.
+        // The first pass ran f/5.6 1/125 at whatever ISO the body held and came back at 1% of full
+        // scale. Underexposure is not neutral here: it buries scene structure under read noise,
+        // which is the one thing a sharpness measure must not be reading.
         Log($"Av={parse.GetValue(avOpt)}: {await camera.SetApertureAsync(parse.GetValue(avOpt))}");
         Log($"Tv={parse.GetValue(tvOpt)}: {await camera.SetShutterSpeedAsync(parse.GetValue(tvOpt))}");
-        Log($"ISO={parse.GetValue(isoOpt)}: {await camera.SetISOAsync(parse.GetValue(isoOpt))}");
+
+        // ...so the ISO is metered rather than guessed. The body is in Manual, so nothing else will
+        // do it, and a run whose exposure was wrong is a run wasted — as the first one was.
+        await camera.StartLiveViewAsync();
+        await Task.Delay(1500);
+        await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
+
+        const double TargetLevel = 0.20;
+        (EdsISOSpeed Iso, double Mean)? best = null;
+        foreach (var candidate in new[]
+        {
+            EdsISOSpeed.ISO_100, EdsISOSpeed.ISO_200, EdsISOSpeed.ISO_400, EdsISOSpeed.ISO_800,
+            EdsISOSpeed.ISO_1600, EdsISOSpeed.ISO_3200, EdsISOSpeed.ISO_6400,
+        })
+        {
+            await camera.SetISOAsync(candidate);
+            await Task.Delay(900);
+            if (await camera.GetEvfHistogramAsync() is not { } m) continue;
+            Log($"  meter {candidate,-12} mean {m.MeanLevel,7:P2}  clipped high {m.ClippedHighlights,6:P1}");
+            if (best is null || Math.Abs(m.MeanLevel - TargetLevel) < Math.Abs(best.Value.Mean - TargetLevel))
+                best = (candidate, m.MeanLevel);
+        }
+        await camera.StopLiveViewAsync();
+        await Task.Delay(1000);
+
+        if (best is not { } pick)
+        {
+            Log("*** The meter never answered, so the exposure would be a guess again. Refusing.");
+            return 1;
+        }
+        Log($"ISO={pick.Iso} (metered {pick.Mean:P1}, target {TargetLevel:P0}): {await camera.SetISOAsync(pick.Iso)}");
+        if (pick.Mean < 0.05)
+            Log("*** Even the best rung is very dark — expect the sharpness controls not to separate.");
 
         // Returns how many of the six steps the body acknowledged. An ACK is not motion, but a zero
         // is conclusive the other way: nothing moved, so there is nothing for a focus command to

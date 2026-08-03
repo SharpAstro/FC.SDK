@@ -606,6 +606,21 @@ public sealed class CanonCamera : IAsyncDisposable
         SetPropertyAsync(EdsPropertyId.ColorTemperature, kelvin, ct);
 
     /// <summary>Sets the auto power-off timeout. Set to 0 to disable (keep camera awake for long sessions).</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>An EOS 6D refuses this outright.</b> It reports 0xD114 fine, announces <i>no</i> allowed
+    /// values for it, and answers <see cref="EdsError.DeviceBusy"/> to every write — measured with
+    /// the event queue drained, under UILock, and in live view, writing a value that differed from
+    /// the one held. So on that body auto power-off is a camera-menu setting and this method cannot
+    /// change it.
+    /// </para>
+    /// <para>
+    /// Note the failure is indistinguishable from a transient one by response code alone, which is
+    /// how it went unnoticed: a harness logged "AutoPowerOff=off = DeviceBusy" on every run and it
+    /// read as noise. To keep a body awake use <see cref="KeepDeviceOnAsync"/> (0x911D), which works.
+    /// Only the 6D has been probed; a 450D may well behave differently.
+    /// </para>
+    /// </remarks>
     public Task<EdsError> SetAutoPowerOffAsync(uint seconds, CancellationToken ct = default) =>
         SetPropertyAsync(EdsPropertyId.AutoPowerOffSetting, seconds, ct);
 
