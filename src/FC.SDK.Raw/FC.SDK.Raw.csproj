@@ -44,9 +44,9 @@
     <ProjectReference Include="..\..\..\Codecs\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
-    <PackageReference Include="SharpAstro.Jpeg" Version="3.4.*" />
-    <PackageReference Include="SharpAstro.Exif" Version="3.4.*" />
-    <PackageReference Include="SharpAstro.Tiff" Version="3.4.*" />
+    <PackageReference Include="SharpAstro.Jpeg" Version="3.8.*" />
+    <PackageReference Include="SharpAstro.Exif" Version="3.8.*" />
+    <PackageReference Include="SharpAstro.Tiff" Version="3.8.*" />
   </ItemGroup>
 
   <ItemGroup>
