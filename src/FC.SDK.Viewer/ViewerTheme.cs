@@ -8,15 +8,25 @@ namespace FC.SDK.Viewer;
 /// </summary>
 public static class ViewerTheme
 {
-    public static readonly UiPalette Palette = new(
-        ContentBg: new(0x14, 0x16, 0x1c, 0xff),
-        PanelBg: new(0x1c, 0x20, 0x28, 0xff),
-        HeaderBg: new(0x25, 0x2b, 0x36, 0xff),
-        HeaderText: new(0xe8, 0xec, 0xf4, 0xff),
-        BodyText: new(0xd2, 0xd8, 0xe2, 0xff),
-        DimText: new(0x77, 0x80, 0x90, 0xff),
-        Separator: new(0x2e, 0x35, 0x42, 0xff),
-        Selection: new(0x2c, 0x4a, 0x78, 0xff));
+    // DIR.Lib 7.11 turned UiPalette from a positional record struct into a sealed record with
+    // required members (see its MIGRATION.md), so this is an object initializer now. The eight
+    // colours are unchanged; Accent is stated from the value this file already kept beside the
+    // palette, and Info/Warn/Error from its own status colours, so nothing here shifts hue.
+    public static readonly UiPalette Palette = new UiPalette
+    {
+        ContentBg = new(0x14, 0x16, 0x1c, 0xff),
+        PanelBg = new(0x1c, 0x20, 0x28, 0xff),
+        HeaderBg = new(0x25, 0x2b, 0x36, 0xff),
+        HeaderText = new(0xe8, 0xec, 0xf4, 0xff),
+        BodyText = new(0xd2, 0xd8, 0xe2, 0xff),
+        DimText = new(0x77, 0x80, 0x90, 0xff),
+        Separator = new(0x2e, 0x35, 0x42, 0xff),
+        Selection = new(0x2c, 0x4a, 0x78, 0xff),
+        Accent = new(0x4f, 0x9d, 0xe8, 0xff),
+        Info = new(0x4f, 0x9d, 0xe8, 0xff),
+        Warn = new(0xd8, 0xa8, 0x3f, 0xff),
+        Error = new(0xe0, 0x6c, 0x6c, 0xff),
+    };
 
     public static readonly UiMetrics Metrics = new(
         BaseFontSize: 13f,
