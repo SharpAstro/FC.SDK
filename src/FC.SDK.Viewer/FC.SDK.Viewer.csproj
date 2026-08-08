@@ -45,7 +45,10 @@
     <PackageReference Include="SDL3-CS" Version="3.5.0-preview.20260213-150035" NoWarn="NU5104" />
     <!-- Ships the native SDL3 binary; the renderer package deliberately leaves it to the app. -->
     <PackageReference Include="SDL3-CS.Native" Version="3.5.0-preview.20260205-174353" NoWarn="NU5104" />
-    <PackageReference Include="Vortice.Vulkan" Version="3.2.1" />
+    <!-- Must not sit below what SdlVulkan.Renderer requires, or restore fails NU1605 as a package
+         downgrade. The renderer is pinned by a floating minor here, so its transitive floor can
+         move under a version this file states exactly. -->
+    <PackageReference Include="Vortice.Vulkan" Version="3.2.3" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.5" />
   </ItemGroup>
 
