@@ -34,6 +34,32 @@ namespace FC.SDK.Raw.Tests;
 /// </summary>
 public class Cr3EndToEndTests(ITestOutputHelper output)
 {
+    /// <summary>
+    /// Whether the fixture is actually usable: present AND materialised.
+    /// 
+    /// <para>The second half is the one that bites. A checkout with <c>lfs: false</c>, or a failed
+    /// <c>git lfs pull</c>, leaves a ~130-byte pointer TEXT file in place of the CR3. That file
+    /// exists, so a <see cref="File.Exists(string)"/> guard passes and the decoder is then handed
+    /// pointer text: seven tests failed with assertion noise where they should have skipped. An
+    /// unmaterialised pointer never fails on its own, which is exactly what makes it worth
+    /// detecting explicitly.</para>
+    /// </summary>
+    private static bool IsUsableFixture(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        // Every LFS pointer begins with this exact string; a CR3 begins with an ISO-BMFF ftyp box,
+        // so the two cannot be confused.
+        ReadOnlySpan<byte> pointerMagic = "version https://git-lfs"u8;
+        Span<byte> head = stackalloc byte[23];
+        using var stream = File.OpenRead(path);
+        return stream.ReadAtLeast(head, head.Length, throwOnEndOfStream: false) == head.Length
+            && !head.SequenceEqual(pointerMagic);
+    }
+
     private static string FixturePath
         => System.Environment.GetEnvironmentVariable("FC_SDK_RAW_TEST_CR3")
            ?? Path.Combine(AppContext.BaseDirectory, "Fixtures", "Canon_EOS_M50_CRAW.CR3");
@@ -42,7 +68,7 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
     public void DecodesRealCr3_MetadataAndDimensionsMatch()
     {
         var path = FixturePath;
-        if (!File.Exists(path))
+        if (!IsUsableFixture(path))
         {
             Assert.Skip($"CR3 fixture not present at {path}. " +
                 "If running locally outside CI, run `git lfs pull` or set FC_SDK_RAW_TEST_CR3.");
@@ -87,7 +113,7 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
     public void ThumbnailRendersToPng()
     {
         var path = FixturePath;
-        if (!File.Exists(path))
+        if (!IsUsableFixture(path))
         {
             Assert.Skip($"CR3 fixture not present at {path}. " +
                 "If running locally outside CI, run `git lfs pull` or set FC_SDK_RAW_TEST_CR3.");
@@ -126,7 +152,7 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
         // (encType=0 levels=3 — full CDF 5/3 wavelet pyramid, the path
         // that exercises CrxWaveletPlaneDecoder + the H-band line decoder).
         var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Canon_EOS_M50_CRAW.CR3");
-        if (!File.Exists(path))
+        if (!IsUsableFixture(path))
         {
             Assert.Skip($"CR3 CRAW fixture not present at {path}. Run `git lfs pull` to fetch.");
             return;
@@ -195,7 +221,7 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
         // M50 fixtures — they differ in wavelet levels (0 vs 3) so we
         // cover both decode-path classes.
         var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", fixtureName);
-        if (!File.Exists(path))
+        if (!IsUsableFixture(path))
         {
             Assert.Skip($"CR3 fixture not present at {path}. Run `git lfs pull` to fetch.");
             return;
@@ -237,7 +263,7 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
         // ((qStepTbl[row,col] * qStepMult) >> 3) before the inverse 5/3
         // lift. R5/R6 ship every consumer cRAW shot through this path.
         var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Canon_EOS_R5_CRAW.CR3");
-        if (!File.Exists(path))
+        if (!IsUsableFixture(path))
         {
             Assert.Skip($"EOS R5 cRAW fixture not present at {path}.");
             return;
@@ -313,7 +339,7 @@ public class Cr3EndToEndTests(ITestOutputHelper output)
         // levels>0 wavelet recombination is the B.5 task. CRAW.CR3 still
         // throws at decode time with a "B.5 pending" message.
         var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Canon_EOS_M50_RAW.CR3");
-        if (!File.Exists(path))
+        if (!IsUsableFixture(path))
         {
             Assert.Skip($"CR3 RAW fixture not present at {path}. Run `git lfs pull` to fetch.");
             return;
