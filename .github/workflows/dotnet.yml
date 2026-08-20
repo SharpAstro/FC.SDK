@@ -46,7 +46,7 @@ jobs:
       version-line: ${{ steps.version.outputs.line }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         # LFS-backed CR2 fixtures (.gitattributes pattern *.cr2) are only needed by
         # FC.SDK.Raw.Tests. Skip the default lfs pull and do a narrow, cached pull
@@ -60,7 +60,7 @@ jobs:
         # of LFS objects we'd be pulling. Cache hit -> no LFS bandwidth.
         HASH=$(git ls-files '*.cr2' '*.cr3' '*.CR2' '*.CR3' '*.cr2.gz' | xargs cat 2>/dev/null | sha256sum | cut -c1-16)
         echo "key=lfs-test-${HASH}" >> $GITHUB_OUTPUT
-    - uses: actions/cache@v4
+    - uses: actions/cache@v6
       with:
         path: .git/lfs
         key: ${{ steps.lfs-key.outputs.key }}
@@ -69,7 +69,7 @@ jobs:
       # *.CR3 fixture (Canon_EOS_M50_CRAW.CR3) is distinct from *.cr3 glob there.
       run: git lfs pull --include="*.cr2,*.cr3,*.CR2,*.CR3,*.cr2.gz"
     - name: Setup .NET
-      uses: actions/setup-dotnet@v4
+      uses: actions/setup-dotnet@v6
       with:
         dotnet-version: 10.0.x
     - name: Resolve release line
@@ -99,7 +99,7 @@ jobs:
     - name: Test
       run: dotnet test -c $BUILD_CONF --no-build --verbosity normal
     - name: Upload Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: nuget-packages
         path: '**/*.nupkg'
@@ -118,7 +118,7 @@ jobs:
 
     steps:
     - name: Download NuGet packages
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: nuget-packages
     - name: Push NuGet package
@@ -151,13 +151,13 @@ jobs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE", "$env:RUNNER_TEMP", "$env:USERPROFILE\.nuget"
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         # No LFS pull at all: the CR2/CR3 fixtures belong to FC.SDK.Raw.Tests, and publishing a
         # single app project never builds the test project.
         lfs: false
     - name: Setup .NET
-      uses: actions/setup-dotnet@v4
+      uses: actions/setup-dotnet@v6
       with:
         dotnet-version: 10.0.x
     - name: Resolve release line
@@ -186,7 +186,7 @@ jobs:
         -p:FileVersion=${VERSION_LINE}.${VERSION_BUILD}.${VERSION_REV}
         -p:ContinuousIntegrationBuild=true
         -p:GeneratePackageOnBuild=false
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       with:
         name: fc-viewer-${{ matrix.rid }}
         path: src/FC.SDK.Viewer/bin/Release/net10.0/${{ matrix.rid }}/publish/
@@ -203,7 +203,7 @@ jobs:
     permissions:
       contents: write
     steps:
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v8
       with:
         pattern: fc-viewer-*
         path: artifacts
