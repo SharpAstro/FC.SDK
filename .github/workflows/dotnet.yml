@@ -64,10 +64,37 @@ jobs:
       with:
         path: .git/lfs
         key: ${{ steps.lfs-key.outputs.key }}
+        # A changed key (any fixture added or updated) restores the newest previous object set so
+        # the pull below fetches only the delta. Without this, adding one 7 MB fixture meant a cold
+        # re-pull of all 50 MB.
+        #
+        # Note what this canNOT fix: GitHub evicts a cache after 7 days unused, and this repo is
+        # pushed roughly monthly, so most runs start with no cache at all however well it is keyed.
+        # That is why the pull below must be allowed to fail rather than merely be made cheaper.
+        restore-keys: |
+          lfs-test-
     - name: Fetch test-fixture LFS objects
       # Uppercase variants matter on case-sensitive filesystems (Linux CI):
       # *.CR3 fixture (Canon_EOS_M50_CRAW.CR3) is distinct from *.cr3 glob there.
-      run: git lfs pull --include="*.cr2,*.cr3,*.CR2,*.CR3,*.cr2.gz"
+      #
+      # OPTIONAL BY DESIGN, and it must stay that way. Every fixture-dependent test already calls
+      # Assert.Skip when its file is absent (Cr2EndToEndTests, Cr3EndToEndTests), so an unavailable
+      # fixture costs raw-decode coverage and nothing else. Letting this step fail the run instead
+      # put the build at the mercy of the account-wide LFS budget, which this repo neither owns nor
+      # can top up: on 2026-08-20 a refusal took the whole build red while every test in it was
+      # ready to skip cleanly.
+      #
+      # The reduced coverage is announced rather than silent, because a green run that quietly
+      # tested less than it claims to is the worse failure.
+      run: |
+        if git lfs pull --include="*.cr2,*.cr3,*.CR2,*.CR3,*.cr2.gz"; then
+          echo "LFS fixtures present; raw-decode tests will run."
+        else
+          echo "::warning::LFS fixtures unavailable, so the raw-decode tests will SKIP. Coverage is reduced for this run."
+          echo "### :warning: Raw-decode tests skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "The CR2/CR3 fixtures could not be fetched from Git LFS, so every test that needs one skipped." >> "$GITHUB_STEP_SUMMARY"
+          echo "The build is still green because those tests skip by design; the raw decode path was NOT exercised." >> "$GITHUB_STEP_SUMMARY"
+        fi
     - name: Setup .NET
       uses: actions/setup-dotnet@v6
       with:
