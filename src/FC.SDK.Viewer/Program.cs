@@ -2,6 +2,7 @@ using DIR.Lib;
 using FC.SDK.Viewer;
 using Microsoft.Extensions.Logging;
 using SdlVulkan.Renderer;
+using SharpAstro.AppShell;
 
 // The viewer's reason to exist is the log file: everything it does to the camera is recorded so the
 // output can be attached to a bug report. Wire the sink before anything else can fail.
@@ -23,6 +24,36 @@ await using var actions = new ViewerActions(state, loggerFactory);
 // symbol glyphs the chrome wants, so ViewerFonts resolves a text/symbol/emoji trio and checks each
 // candidate's actual cmap coverage rather than assuming.
 var fonts = ViewerFonts.Resolve(logger);
+
+// --- One instance for the whole application ---
+// Not keyed on anything, and for a firmer reason than tidiness: this app drives a physically
+// attached camera over PTP, and two processes claiming one camera is a conflict at the driver
+// level rather than a cosmetic one. It also watches for hot-plug events, which two instances
+// would both react to.
+//
+// There is nothing to hand over -- args[0] is an output directory, not a document -- so the
+// payload is empty, which is the request to activate. Claimed before the window exists so a
+// second launch costs no GPU device and never touches the camera.
+const string GateScope = "fc-viewer";
+const string SingleInstanceEnvVar = "FC_VIEWER_SINGLE_INSTANCE";
+InstanceGate? instanceGate = null;
+if (!string.Equals(Environment.GetEnvironmentVariable(SingleInstanceEnvVar), "0", StringComparison.Ordinal))
+{
+    var gateChannel = InstanceGate.ChannelFor(GateScope);
+    instanceGate = InstanceGate.TryClaim(gateChannel, logger);
+    if (instanceGate is null)
+    {
+        if (InstanceGate.TryHandOff(gateChannel, string.Empty, TimeSpan.FromSeconds(5), logger))
+        {
+            logger.LogInformation("Activated the running viewer instead of starting a second one");
+            return 0;
+        }
+
+        // Nobody answered. Starting anyway is the lesser evil: a launch that appears to do
+        // nothing is worse than a second window, and the log above records the attempt.
+        logger.LogWarning("An instance holds the viewer channel but did not answer; starting anyway");
+    }
+}
 
 using var window = SdlVulkanWindow.Create("FC.SDK Viewer — Canon EOS diagnostics", 1600, 1000);
 window.GetSizeInPixels(out var pixelWidth, out var pixelHeight);
@@ -59,6 +90,15 @@ loop.OnPointerInput = evt => widget.HandleInput(evt);
 // the USB transfers we care about.
 loop.CheckNeedsRedraw = () =>
 {
+    // Above the early return below, because this is the only callback that runs on every
+    // loop iteration and a hand-off would otherwise be noticed only once something else
+    // happened to need a repaint.
+    while (instanceGate?.TryDequeue(out _) == true)
+    {
+        window.Raise();
+        state.Invalidate();
+    }
+
     if (!state.NeedsRedraw && !renderer.FontAtlasDirty) return false;
     state.NeedsRedraw = false;
     return true;
@@ -116,6 +156,7 @@ catch (Exception ex)
 finally
 {
     widget.Dispose();
+    instanceGate?.Dispose();
     logger.LogInformation("Shutting down");
 }
 

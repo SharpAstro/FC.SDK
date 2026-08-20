@@ -34,10 +34,13 @@
   <ItemGroup Condition="'$(UseLocalSiblings)' == 'true'">
     <ProjectReference Include="..\..\..\SdlVulkan.Renderer\src\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
     <ProjectReference Include="..\..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj" />
+    <ProjectReference Include="..\..\..\AppShell\src\SharpAstro.AppShell\SharpAstro.AppShell.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
     <PackageReference Include="SdlVulkan.Renderer" Version="7.10.*" />
     <PackageReference Include="DIR.Lib" Version="7.11.*" />
+    <!-- The single-instance gate, shared with the TianWen viewer and GUI. -->
+    <PackageReference Include="SharpAstro.AppShell" Version="1.0.*" />
   </ItemGroup>
 
   <ItemGroup>

@@ -18,7 +18,8 @@
       AND Exists('$(MSBuildThisFileDirectory)..\..\Codecs\src\SharpAstro.Exif\SharpAstro.Exif.csproj')
       AND Exists('$(MSBuildThisFileDirectory)..\..\Codecs\src\SharpAstro.Tiff\SharpAstro.Tiff.csproj')
       AND Exists('$(MSBuildThisFileDirectory)..\..\SdlVulkan.Renderer\src\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj')
-      AND Exists('$(MSBuildThisFileDirectory)..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj')">true</UseLocalSiblings>
+      AND Exists('$(MSBuildThisFileDirectory)..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj')
+      AND Exists('$(MSBuildThisFileDirectory)..\..\AppShell\src\SharpAstro.AppShell\SharpAstro.AppShell.csproj')">true</UseLocalSiblings>
   </PropertyGroup>
 
   <PropertyGroup>
