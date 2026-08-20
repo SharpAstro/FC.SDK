@@ -95,6 +95,12 @@ loop.CheckNeedsRedraw = () =>
     // happened to need a repaint.
     while (instanceGate?.TryDequeue(out _) == true)
     {
+        // Restore BEFORE raising, and not only for tidiness: SDL_RaiseWindow moves focus without
+        // un-minimising, so a minimised window became the foreground window while still parked
+        // off-screen at -21333,-21333 (measured). Keyboard input then goes somewhere the user
+        // cannot see, which is worse than the taskbar flash this is meant to replace. Restore is a
+        // no-op when the window is merely behind another one, which is the common case.
+        window.Restore();
         window.Raise();
         state.Invalidate();
     }
