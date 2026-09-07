@@ -566,7 +566,7 @@ from the MakerNote `SensorInfo` tag (`0x00E0`, indices 5..8) by `CanonSensorInfo
 | 5D Mark IV | 6888x4546 | (156, 58) 6720x4480 | 12, 8 |
 | EOS M50 | 6288x4056 | (276, 48) 6000x4000 | 12, 8 |
 | EOS R5 | 5248x3510 | (144, 108) 5088x3392 | 16, 10 |
-| CR2 (5D Mk III) | 5568x3708 | (84, 50) 5472x3648 | 12, 10 |
+| CR2 (6D)       | 5568x3708 | (84, 50) 5472x3648 | 12, 10 |
 
 Four things to know before touching it:
 
