@@ -28,7 +28,47 @@ public sealed record CanonRawFile(
     int BitDepth,
     CanonCfaPattern CfaPattern,
     ExifMetadata? Exif,
-    CanonMakerNote? MakerNote);
+    CanonMakerNote? MakerNote)
+{
+    /// <summary>
+    /// The part of <see cref="BayerMosaic"/> that is a photograph. <see cref="Width"/> and
+    /// <see cref="Height"/> are the full sensor raster, which on every Canon body is larger: the
+    /// left and top edges carry shielded and partly shielded photosites, and the right and bottom a
+    /// few spare columns and rows.
+    /// </summary>
+    /// <remarks>
+    /// <para>Read from Canon's <c>SensorInfo</c> MakerNote tag, falling back to the whole frame when
+    /// the file does not describe a rectangle that fits these pixels. <b>Nothing here crops the
+    /// mosaic</b> -- see <see cref="CanonSensorInfo"/> for why the decoder must keep handing back the
+    /// full raster, and for what the discarded margin is and is not good for.</para>
+    /// <para>Applying it means reading <c>BayerMosaic[(Top + y) * Width + (Left + x)]</c> and taking
+    /// the pattern from <see cref="CanonActiveArea.CfaPattern"/> rather than from
+    /// <see cref="CfaPattern"/>: an odd offset re-phases the colour filter.</para>
+    /// </remarks>
+    public CanonActiveArea ActiveArea => CanonSensorInfo.Resolve(Width, Height, CfaPattern, MakerNote);
+}
+
+/// <summary>
+/// The rectangle of a Canon sensor raster that carries a picture, and the Bayer pattern seen from
+/// its origin.
+/// </summary>
+/// <param name="Left">Column of the first picture pixel in the full raster.</param>
+/// <param name="Top">Row of the first picture pixel in the full raster.</param>
+/// <param name="Width">Picture width in pixels.</param>
+/// <param name="Height">Picture height in pixels.</param>
+/// <param name="CfaPattern">The pattern at (<paramref name="Left"/>, <paramref name="Top"/>), which
+/// differs from the full raster's whenever either offset is odd. Use this one after cropping.</param>
+public readonly record struct CanonActiveArea(
+    int Left,
+    int Top,
+    int Width,
+    int Height,
+    CanonCfaPattern CfaPattern)
+{
+    /// <summary>True when the active area is the whole raster, i.e. there is nothing to crop --
+    /// either the body records no margin or the file did not describe a usable rectangle.</summary>
+    public bool IsWholeFrame => Left == 0 && Top == 0;
+}
 
 /// <summary>
 /// Bayer colour-filter pattern at sensor pixel (0, 0). Matches the standard
@@ -72,7 +112,21 @@ public sealed record CanonMakerNote(
     int? SensorHeight,
     float[]? ColorMatrix,
     CanonWhiteBalance? AsShotWhiteBalance,
-    System.Collections.Generic.IReadOnlyDictionary<ushort, byte[]> RawSubtags);
+    System.Collections.Generic.IReadOnlyDictionary<ushort, byte[]> RawSubtags)
+{
+    /// <summary>
+    /// Byte order of <see cref="RawSubtags"/>, which is the file's, not the machine's.
+    /// </summary>
+    /// <remarks>
+    /// The strongly-typed fields above are already decoded, so this exists for anything reading the
+    /// raw bytes back -- <see cref="CanonSensorInfo"/> is the one such reader today. Defaulted to
+    /// little-endian, which every Canon file we have ever seen is, and set explicitly by both
+    /// decoders; a decoder that forgot would at worst read a nonsense rectangle, which
+    /// <see cref="CanonSensorInfo.Resolve"/> rejects against the decoded frame size rather than
+    /// acting on.
+    /// </remarks>
+    public bool IsLittleEndian { get; init; } = true;
+}
 
 /// <summary>
 /// Per-channel white-balance multipliers as stored in Canon's MakerNote
