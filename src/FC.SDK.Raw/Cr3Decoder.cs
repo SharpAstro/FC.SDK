@@ -208,7 +208,9 @@ internal static class Cr3Decoder
             }
             else if (tag == 0x00E0 && raw.Bytes.Length >= 6)
             {
-                // SensorInfo array of SHORTs; indices 1/2 are sensor width/height.
+                // SensorInfo array of SHORTs; indices 1/2 are sensor width/height. Indices 5..8
+                // are the active-area rect, read back from RawSubtags by CanonSensorInfo rather
+                // than here, so CR2 and CR3 cannot end up cropping differently.
                 sensorWidth = ReadUInt16(raw.Bytes.AsSpan(2, 2), fileIsLE);
                 sensorHeight = ReadUInt16(raw.Bytes.AsSpan(4, 2), fileIsLE);
             }
@@ -226,7 +228,10 @@ internal static class Cr3Decoder
             }
         }
 
-        return new CanonMakerNote(modelId, sensorWidth, sensorHeight, colorMatrix, asShotWb, subtags);
+        return new CanonMakerNote(modelId, sensorWidth, sensorHeight, colorMatrix, asShotWb, subtags)
+        {
+            IsLittleEndian = fileIsLE,
+        };
     }
 
     /// <summary>WB_RGGB_LEVELS_AS_SHOT extractor — identical dispatch to

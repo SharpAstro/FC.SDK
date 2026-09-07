@@ -5,6 +5,36 @@ astro-imaging pipeline (linear sensor values, custom stretch), but this
 library is general-purpose — most items below land somewhere on the
 spectrum between "consumer raw viewer" and "astro decode."
 
+## Sensor calibration
+
+- [ ] **Per-frame black level and read noise from the masked margin.** `CanonRawFile.ActiveArea`
+      now says where the picture is, so the strip outside it is available rather than merely
+      discarded — and it is the only part of the frame that saw zero photons through the same
+      amplifier, ADC, gain and timing as the picture. `CanonRaw.PreprocessMosaic` currently
+      subtracts a hardcoded `blackLevel = 2048`.
+
+      Measured on a 5D Mark IV frame (`x < 144`, 655k px, per CFA cell): R 2047.89, G(r) 2047.98,
+      G(b) 2048.30, B 2047.88, sd 15.6 to 17.9 ADU. So the constant was right to 0.3 ADU on that
+      frame — which is one frame at one temperature, and the offset drifts with both. The sd is the
+      more interesting number: it is read noise with no sky shot noise in it, which nothing measured
+      from the active area can give.
+
+      Three findings that constrain the implementation:
+  - **Use columns, not rows.** The top margin is not all masked: on the same frame `G(r)` reads
+    2027.04 with sd 47.98 (3x the others) and R and G(b) reach 3287 and 4411. The left strip is
+    clean; the top strip is contaminated.
+  - **Do not trust `BlackMaskLeftBorder`.** It reads 0 on every file inspected, so the usable
+    window has to be found by measurement (the flat part), not read from the tag.
+  - **No per-row bias correction without re-measuring.** Row means wander 2044.8 to 2050.3, which
+    looks like row-wise readout offset — but at 144 samples and sd 16 the standard error of a row
+    mean is 1.33 ADU, and that range over 18 sampled rows is about what pure noise gives. Check on
+    a long warm sub before building it.
+
+      **Not a substitute for dark frames.** Dark current is per-pixel and structured (hot pixels,
+      amp glow, corner gradients); a strip at one edge cannot predict a hot pixel in the middle, and
+      its own dark signal is buried under 16 ADU of read noise. This replaces the scalar pedestal a
+      bias frame carries, nothing more.
+
 ## Image rendering / output
 
 - [ ] **Tone mapping stage in `CanonDemosaic`.** Today's render is

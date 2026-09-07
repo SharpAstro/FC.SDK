@@ -554,6 +554,38 @@ combination the `SIBLING_DEBUG_INSPECTORS` guard exists for.
 and the constant silently goes missing on a plain `dotnet build`. Any other Configuration-dependent
 property in this repo belongs in `.targets` for the same reason.
 
+## The decoded raw frame is bigger than the photograph
+
+Every Canon body records a sensor raster with a shielded margin down the left and across the top, a
+narrow partly-shielded transition after it, and a few spare columns and rows at the right and bottom.
+`CanonRawFile.Width`/`Height` are that whole raster; **`CanonRawFile.ActiveArea` is the picture**, read
+from the MakerNote `SensorInfo` tag (`0x00E0`, indices 5..8) by `CanonSensorInfo`. Measured:
+
+| body | decoded | active | right/bottom spare |
+|---|---|---|---|
+| 5D Mark IV | 6888x4546 | (156, 58) 6720x4480 | 12, 8 |
+| EOS M50 | 6288x4056 | (276, 48) 6000x4000 | 12, 8 |
+| EOS R5 | 5248x3510 | (144, 108) 5088x3392 | 16, 10 |
+| CR2 (5D Mk III) | 5568x3708 | (84, 50) 5472x3648 | 12, 10 |
+
+Four things to know before touching it:
+
+- **`BayerMosaic` is never cropped by this library, and must not become so.** The CR3 decoder is
+  byte-exact against LibRaw's `unprocessed_raw`, which is uncropped, and that comparison is the only
+  reason to believe the decoder; cropping inside it retires the oracle silently. The crop is metadata
+  the consumer applies.
+- **`ActiveArea` is a computed property on `CanonRawFile`, reading `MakerNote.RawSubtags`,
+  deliberately.** CR2 and CR3 parse their MakerNotes in separate code that has drifted before, and a
+  crop one format applies and the other does not is a geometry-and-colour bug visible on half the
+  files. Computing it in one place means neither decoder can forget.
+- **An odd crop offset re-phases the CFA**, so use `ActiveArea.CfaPattern`, not `CanonRawFile.CfaPattern`,
+  after cropping. Every body above offsets by an even number, which is exactly why `ShiftCfa` is unit
+  tested rather than assumed.
+- **The masked region and the discarded margin are different rectangles.** On the 5D Mark IV the
+  optically black columns stop at 143 while `SensorLeftBorder` is 156 — the twelve between are lit but
+  only partly shielded. Anything mining the margin for a black reference must measure where the flat
+  part ends; `BlackMaskLeftBorder` and friends read 0 on all four files, so they cannot be asked.
+
 ## Versioning and releasing
 
 Two schemes, because they answer to different audiences:
@@ -570,8 +602,10 @@ deliberate: the download URLs get quoted in issues, so re-publishing binaries in
 the same links working.
 
 Do **not** push a release tag by hand — the tag comes from `VERSION_LINE`, so a hand-pushed `v1.6`
-against `VERSION_LINE: '1.5'` would trigger a run that creates a release called `v1.5`. Bump
-`VERSION_LINE` (and the `VERSION_PREFIX` stem alongside it) instead.
+against a `VERSION_LINE` of `1.5` would trigger a run that creates a release called `v1.5`. Bump the
+number instead, and note that **`VERSION_LINE` is no longer a thing anyone edits**: each job reads it
+back out of `<VersionMajorMinor>` in `src/Directory.Build.props`, which is the one place the release
+line is written (that is also what makes a local `dotnet pack` stamp the same number CI does).
 
 The NuGet `publish` job is gated to `push` on `main` only. It used to have no condition at all, so every
 pull request published a package from unreviewed code and consumed the version number the merge would

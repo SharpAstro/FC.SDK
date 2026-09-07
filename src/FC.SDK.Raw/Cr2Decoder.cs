@@ -295,8 +295,10 @@ internal static class Cr2Decoder
             }
             else if (tag == 0x00E0 && type == TiffFieldType.Short && count >= 8)
             {
-                // SensorInfo — array of SHORT. Indices 1/2 = sensor width/height
-                // (active area, includes margin pixels), 5..8 = active-area crop rect.
+                // SensorInfo — array of SHORT. Indices 1/2 = the full sensor raster (the name is
+                // Canon's; it is NOT the active area, it includes the margins). Indices 5..8 are the
+                // active-area rect, read back from RawSubtags by CanonSensorInfo rather than here,
+                // so CR2 and CR3 cannot end up cropping differently.
                 sensorWidth = Cr2IfdReader.ReadShort(data.Slice(2, 2), fileIsLE);
                 sensorHeight = Cr2IfdReader.ReadShort(data.Slice(4, 2), fileIsLE);
             }
