@@ -250,7 +250,7 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         var inner = new RectF32(rect.X + pad, rect.Y + pad,
             MathF.Max(0f, rect.Width - pad - pad), MathF.Max(0f, rect.Height - pad - pad));
 
-        scroll.SetExtent(inner, rowHeight * DpiScale, rows.Count, DpiScale);
+        scroll.SetExtent(inner, rowHeight * DpiScale, rows.Count, Scale);
 
         var gap = RowGap * DpiScale;
         foreach (var (index, atomRect) in scroll.VisibleRows())
