@@ -515,6 +515,27 @@ event-stream property cache side by side, and writes a timestamped log of every 
   which binds each click region to the rect it drew. No hand-rolled hit rectangles. Row virtualization
   is delegated to `ListScrollController`; the only arithmetic in the widget is letterboxing an image,
   which depends on image dimensions rather than layout.
+- **Input goes through DIR.Lib's `InputRouter`, and the widget does not dispatch.** `Program.cs` builds
+  one router over the widget and hands it every pointer event and every key; it answers presses, the
+  wheel, hover, drags and tooltips from what the last paint declared, and gives the widget's
+  `HandleInput` only what nothing declared (the keys). So a control states its behaviour on its node:
+  `.Clickable`, `.Disabled(reason)` for a button that does not apply (dimmed, press swallowed, the reason
+  shown as its tooltip), `.BgHover`, `.WithTooltip`, `Builder.Checkbox`, `Builder.ButtonGroup`. A panel
+  body is a `Fill` declared `.WithScroll(controller)` (so the wheel finds it) and `.Pressable` (so a
+  press on empty space or the scrollbar thumb reaches the list as a drag capture). The keyboard was
+  dead before this port: nothing set `OnKeyDown`, and the loop does not deliver keys through the
+  pointer callback, so F5 / Space / Ctrl+L / Ctrl+D never reached the widget.
+- **The global keys are host keys, not `.WithShortcut`.** A declared shortcut fires only while its node
+  is PAINTED, and the buttons they belong to live in a virtualized list, so F5 would die whenever
+  Diagnostics scrolled out of view. The tooltips name the keys instead. Toggles ignore `Repeat`.
+- **A `.WithScroll` Fill's rect must BE the list's viewport.** The painter binds that rect and re-clamps
+  the offset against it before `drawFill` runs. With the panel padding inside the Fill, the taller rect
+  fitted one more row, clamped the maximum offset to 0, and snapped every wheel and thumb drag back to
+  the top with no error. The padding is a stack around the Fill now, and `PaintScrolledRows` passes the
+  Fill rect to `SetExtent` untouched.
+- **`.Pad` on a text LEAF insets nothing.** Padding insets a node's children; on a leaf it only grows the
+  measured box, and the text is still drawn from the rect's edge. `ViewerWidget.Padded` wraps the leaf
+  in a one-child stack, and chrome (fill, hover, hit) goes on that stack.
 - **Fonts are a trio, not one file** (`ViewerFonts`, same shape as `drawboard/pdf-viewer`): a platform
   text face, a symbol face, an emoji face. A platform UI face is narrower than it looks — Segoe UI
   carries `→ — ·` but *none* of `◀ ▶ ☑ ☐ ✓ ✗ ⟵ ⟶ ⏳ 📷`, all of which live in Segoe UI Symbol.
@@ -525,13 +546,19 @@ event-stream property cache side by side, and writes a timestamped log of every 
   `Segoe UI Symbol` (the file is `seguisym.ttf`). `ViewerFonts` therefore falls back to matching *file
   names* against `FontResolver.EnumerateInstalledFonts()`. Same class of gap as pdf-viewer's issue #111
   for macOS `.ttc` collections.
-- **Symbol glyphs go through the `Fill` escape hatch**, not a text leaf: `PaintLayout` draws a whole
-  text leaf with one font, and per-run fallback in that path is
-  [DIR.Lib#29](https://github.com/SharpAstro/DIR.Lib/issues/29). `ViewerWidget.Glyph(...)` emits a
-  `Fill` leaf whose rect still comes from arrange; only the font is chosen by the widget. Once #29
-  lands these can collapse back into ordinary `Text` leaves.
-  Supplementary-plane pictographs (📷, U+1F4F7) need none of this — `PixelWidgetBase.EmojiFontPath`
-  routes them automatically, but *only* above U+FFFF (it tests for a surrogate pair).
+- **Symbol glyphs are ordinary `Text` leaves.** The painter splits every text leaf into per-font runs
+  through `PixelWidgetBase.FontFallback`, which the widget sets to `ViewerFonts.Fallback`, built with
+  `FontFallbackResolver.FromRoles`. That retired the old `Glyph(...)` `Fill`-leaf workaround, which
+  existed because `PaintLayout` once drew a whole leaf with one font. Declaring the emoji role matters:
+  a codepoint whose Unicode default presentation is emoji (⏳, 📷) is drawn from the emoji face even
+  where the symbol face also covers it. Marks the icon family has (the step arrows, the tick, the
+  checkbox) are `Builder.Icon` / `Builder.Checkbox` and need no face at all; `ViewerGlyphs` keeps only
+  what it has no member for.
+- **Preview textures go through `VulkanContext.QueueTextureUpload`.** `DeferredTexture` creates the
+  texture on the render thread, queues its upload (recorded before the next frame's render pass, and
+  re-recorded by the renderer if that frame is dropped), and switches to it once `IsUploaded`; the
+  host asks for that frame through `ViewerWidget.IsUploading`. The outgoing texture is a plain
+  `Dispose`, which `VkTexture` defers until every frame that could have bound it has retired.
 - **A nested `RenderLayout` must forward `drawFill`.** Without it a `Fill` leaf still arranges and
   reserves its space, then nothing paints it — a silent blank, no error. This bit the panel rows once.
 - `DebugInspector.Attach` is wired under `#if SIBLING_DEBUG_INSPECTORS` — **not** plain `DEBUG`. The

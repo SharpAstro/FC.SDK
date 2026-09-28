@@ -1,6 +1,5 @@
 using DIR.Lib;
 using Microsoft.Extensions.Logging;
-using SharpAstro.Fonts;
 
 namespace FC.SDK.Viewer;
 
@@ -14,11 +13,12 @@ namespace FC.SDK.Viewer;
 /// from each candidate's cmap, so a glyph is only used when some available face actually has it and
 /// otherwise degrades to an ASCII stand-in instead of painting a blank box.
 /// <para>
-/// Two consumers, because the widget framework splits the job: <see cref="EmojiPath"/> goes to
-/// <c>PixelWidgetBase.EmojiFontPath</c>, which <c>DrawText</c> uses automatically but only for
-/// supplementary-plane codepoints (U+1F000+). BMP symbols need the font chosen per run, which the
-/// declarative painter cannot do yet (DIR.Lib#29), so the widget draws those through the layout
-/// engine's <c>Fill</c> escape hatch using <see cref="FontFor"/>.
+/// One consumer now: <see cref="Fallback"/> goes to <c>PixelWidgetBase.FontFallback</c>, and the
+/// declarative painter splits every text leaf into per-font runs through it, measure and paint alike.
+/// That retired the viewer's own <c>Fill</c>-leaf glyph path, which existed only because the painter
+/// once drew a whole leaf with one font. The resolver is built by ROLE so a codepoint whose Unicode
+/// default presentation is emoji (the hourglass, the camera) is taken from the emoji face even where
+/// the symbol face also has it.
 /// </para>
 /// </remarks>
 public sealed class ViewerFonts
@@ -57,9 +57,6 @@ public sealed class ViewerFonts
             ? [new("Apple Color Emoji", "Apple Color Emoji.ttc", "AppleColorEmoji.ttf")]
             : [new("Noto Color Emoji", "NotoColorEmoji.ttf"), new("Noto Emoji", "NotoEmoji-Regular.ttf")];
 
-    private readonly Dictionary<string, OpenTypeFont?> _faces = [];
-    private readonly Dictionary<int, string?> _fontByCodepoint = [];
-
     /// <summary>Face used for ordinary text. Never empty — falls back to the platform default.</summary>
     public string PrimaryPath { get; }
 
@@ -70,8 +67,8 @@ public sealed class ViewerFonts
     public string? EmojiPath { get; }
 
     /// <summary>
-    /// The DIR.Lib per-run resolver over the same chain. Not consumed by the declarative painter
-    /// (see the remarks on this type) but the right tool for any text drawn directly.
+    /// The DIR.Lib per-run resolver over the same chain, handed to the widget as its
+    /// <c>FontFallback</c> so every text leaf draws each run with a face that covers it.
     /// </summary>
     public FontFallbackResolver Fallback { get; }
 
@@ -80,7 +77,7 @@ public sealed class ViewerFonts
         PrimaryPath = primary;
         SymbolPath = symbol;
         EmojiPath = emoji;
-        Fallback = new FontFallbackResolver(primary, new[] { symbol, emoji }.OfType<string>());
+        Fallback = FontFallbackResolver.FromRoles(primary, symbol, emoji);
     }
 
     public static ViewerFonts Resolve(ILogger logger)
@@ -146,54 +143,10 @@ public sealed class ViewerFonts
     });
 
     /// <summary>
-    /// The face that should draw <paramref name="codepoint"/>, or null when no available face covers
-    /// it — in which case the caller must substitute something ASCII rather than draw a blank.
+    /// True when some available face covers every codepoint in <paramref name="text"/>. Asked of the
+    /// same resolver the painter draws with, so "can render" and "will render" cannot disagree.
     /// </summary>
-    public string? FontFor(int codepoint)
-    {
-        if (_fontByCodepoint.TryGetValue(codepoint, out var cached)) return cached;
-
-        string? chosen = null;
-        foreach (var candidate in new[] { PrimaryPath, SymbolPath, EmojiPath })
-        {
-            if (candidate is { Length: > 0 } && Covers(candidate, codepoint)) { chosen = candidate; break; }
-        }
-
-        _fontByCodepoint[codepoint] = chosen;
-        return chosen;
-    }
-
-    /// <summary>True when some available face covers every codepoint in <paramref name="text"/>.</summary>
-    public bool CanRender(string text)
-    {
-        foreach (var rune in text.EnumerateRunes())
-        {
-            if (FontFor(rune.Value) is null) return false;
-        }
-        return true;
-    }
-
-    /// <summary>True when the primary face itself covers the whole string — no fallback needed.</summary>
-    public bool PrimaryCovers(string text)
-    {
-        foreach (var rune in text.EnumerateRunes())
-        {
-            if (!Covers(PrimaryPath, rune.Value)) return false;
-        }
-        return true;
-    }
-
-    private bool Covers(string fontPath, int codepoint)
-    {
-        if (!_faces.TryGetValue(fontPath, out var face))
-        {
-            try { face = OpenTypeFont.LoadFromFile(fontPath); }
-            catch { face = null; }   // unreadable / unsupported container — treat as no coverage
-            _faces[fontPath] = face;
-        }
-
-        return face is not null && face.GetGlyphId((uint)codepoint) != 0;
-    }
+    public bool CanRender(string text) => Fallback.CanRender(text);
 }
 
 /// <summary>
@@ -208,11 +161,9 @@ public sealed class ViewerGlyphs(ViewerFonts fonts)
     private string Pick(string preferred, string asciiFallback) =>
         fonts.CanRender(preferred) ? preferred : asciiFallback;
 
-    public string StepBack => Pick("◀", "<");          // ◀
-    public string StepForward => Pick("▶", ">");       // ▶
-    public string Checked => Pick("☑", "[x]");         // ☑
-    public string Unchecked => Pick("☐", "[ ]");       // ☐
-    public string Yes => Pick("✓", "yes");             // ✓
+    // The step arrows, the checkbox marks and the tick are drawn icons now (IconKind.CaretLeft /
+    // CaretRight / Check, and Builder.Checkbox), so they need no face at all. What is left here is what
+    // the icon family has no member for.
     public string No => Pick("✗", "NO");               // ✗
     public string FocusFar => Pick("⟵", "<<");         // ⟵
     public string FocusNear => Pick("⟶", ">>");        // ⟶

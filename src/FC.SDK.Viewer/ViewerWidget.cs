@@ -13,12 +13,20 @@ namespace FC.SDK.Viewer;
 /// delegated to <see cref="ListScrollController"/>.
 /// </summary>
 /// <remarks>
-/// Symbol glyphs (<c>◀ ▶ ☑ ✓</c>) come from a different face than the text: a platform UI font does not
-/// cover them, and the declarative painter draws a whole text leaf with one font — per-run fallback in
-/// that path is DIR.Lib#29 (https://github.com/SharpAstro/DIR.Lib/issues/29). Until then they go through
-/// <see cref="Glyph"/>, which uses the layout engine's <c>Fill</c> escape hatch: the rect still comes
-/// from arrange, only the font is chosen by the widget. Supplementary-plane pictographs need none of
-/// this — <c>PixelWidgetBase.EmojiFontPath</c> already routes those.
+/// <para>
+/// <b>The widget declares; it does not dispatch.</b> Presses, the wheel, hover and tooltips are all
+/// answered by the host's <see cref="InputRouter"/> from what the last paint registered: a button is
+/// <c>.Clickable</c>, a control that does not apply is <c>.Disabled(reason)</c> (dimmed, press
+/// swallowed, the reason shown as its tooltip), a panel body is <c>.WithScroll</c> so the wheel finds
+/// it, and its empty space is <c>.Pressable</c> so a drag or the scrollbar thumb reaches the list.
+/// <see cref="HandleInput"/> is left with the keys only, as the router's <c>Unhandled</c>.
+/// </para>
+/// <para>
+/// Symbol glyphs (<c>⟵ ⟶ ✗ ⏳</c>) come from a different face than the text, and the painter now splits
+/// every text leaf into per-font runs through <see cref="PixelWidgetBase{TSurface}.FontFallback"/>, so
+/// they are ordinary <c>Text</c> leaves. The marks the icon family covers (step arrows, the tick, the
+/// checkbox) are drawn icons instead and need no face at all.
+/// </para>
 /// </remarks>
 public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
 {
@@ -34,13 +42,7 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     private readonly ViewerState _state;
     private readonly ViewerActions _actions;
     private readonly ViewerLog _log;
-    private readonly ViewerFonts _fonts;
     private readonly ViewerGlyphs _glyphs;
-
-    // Per-frame payloads for the Glyph() Fill leaves: the Fill content carries only a key, so the
-    // glyph text and its colour are parked here and looked up when that leaf paints. Rebuilt every
-    // frame in Render(), and only ever appended to, so an index stays valid for the frame that made it.
-    private readonly List<(string Glyph, RGBAColor32 Color, float FontSize)> _glyphSlots = [];
 
     // SnapToAtom everywhere: rows are painted individually into the controller's atom rects, and
     // without clipping in the painter a sub-atom scroll shift would draw partial rows outside the
@@ -49,9 +51,10 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     private readonly ListScrollController _controlScroll = new() { SnapToAtom = true };
     private readonly ListScrollController _logScroll = new() { Anchor = ScrollAnchor.Bottom, SnapToAtom = true };
 
-    // Deferred GPU uploads, following the renderer's documented pattern: pixels captured on the
-    // action thread, texture created and recorded during OnPreRenderPass, previous texture disposed
-    // one frame later once its fence has been waited on.
+    // Pixels captured on the action thread, uploaded through the renderer's own queue: a texture is
+    // created on the render thread and its upload recorded at the start of the next frame, before any
+    // render pass, and the outgoing texture's Dispose is deferred by the renderer until every frame
+    // that drew it has retired.
     private readonly DeferredTexture _liveView;
     private readonly DeferredTexture _thumbnail;
 
@@ -64,23 +67,15 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         _state = state;
         _actions = actions;
         _log = log;
-        _fonts = fonts;
         _glyphs = new ViewerGlyphs(fonts);
         FontPath = fonts.PrimaryPath;
-        // Handles supplementary-plane pictographs (📷) inside ordinary labels for free.
+        // The per-run chain every text leaf is measured and painted through: symbols from the symbol
+        // face, emoji-presentation codepoints (📷, ⏳) from the emoji face.
+        FontFallback = fonts.Fallback;
         EmojiFontPath = fonts.EmojiPath;
 
-        _liveView = new DeferredTexture(renderer);
-        _thumbnail = new DeferredTexture(renderer);
-
-        // Chain both uploads onto whatever else wants the pre-render-pass hook.
-        var previous = renderer.OnPreRenderPass;
-        renderer.OnPreRenderPass = cmd =>
-        {
-            previous?.Invoke(cmd);
-            _liveView.Flush(cmd);
-            _thumbnail.Flush(cmd);
-        };
+        _liveView = new DeferredTexture(renderer.Context);
+        _thumbnail = new DeferredTexture(renderer.Context);
     }
 
     /// <summary>Font size in design units; the layout engine applies DPI scale on top.</summary>
@@ -90,18 +85,30 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         set => _fontSize = Math.Clamp(value, 8f, 24f);
     }
 
+    /// <summary>
+    /// True while a preview upload is queued and not yet drawable. The host asks for a frame on it,
+    /// since the upload lands at the start of a frame and nothing else would ask for the one that
+    /// finally shows it.
+    /// </summary>
+    public bool IsUploading => _liveView.IsUploading || _thumbnail.IsUploading;
+
     private float SmallFontSize => _fontSize - 1f;
 
-    public void Render(RectF32 bounds)
+
+    /// <param name="bounds">The window, in pixels.</param>
+    /// <param name="tooltip">The router's due tooltip, painted over everything else, or null.</param>
+    public void Render(RectF32 bounds, TooltipRequest? tooltip)
     {
         BeginFrame();
-        _glyphSlots.Clear();
 
         // Hand the newest rasters to the upload queue before anything draws them.
         if (_state.LiveViewFrame is { } frame) _liveView.Submit(frame);
         if (_state.CapturePreview is { } capture) _thumbnail.Submit(capture);
 
-        RenderLayout(Shell(), bounds, drawFill: PaintFill);
+        // The tooltip is the overlay's top layer, so it paints after every panel, the ones drawn
+        // through drawFill included, and is clamped on screen by the anchored placement.
+        var root = tooltip is { } due ? Layout.Builder.Overlay(Shell(), TooltipCard(due)) : Shell();
+        RenderLayout(root, bounds, drawFill: PaintFill);
     }
 
     // ---------------------------------------------------------------- shell
@@ -112,20 +119,56 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             Layout.Builder.Fill(key: "preview").Stretch().Bg(ViewerTheme.Palette.ContentBg),
             Layout.Builder.Top(TopBar(), TopBarHeight),
             Layout.Builder.Bottom(StatusBar(), StatusBarHeight),
-            Layout.Builder.Bottom(Panel("Log", "log"), LogPanelHeight),
-            Layout.Builder.Left(Panel("Camera", "actions"), LeftPanelWidth),
-            Layout.Builder.Right(Panel("Controls", "controls"), RightPanelWidth));
+            Layout.Builder.Bottom(Panel("Log", "log", _logScroll), LogPanelHeight),
+            Layout.Builder.Left(Panel("Camera", "actions", _actionScroll), LeftPanelWidth),
+            Layout.Builder.Right(Panel("Controls", "controls", _controlScroll), RightPanelWidth));
 
-    /// <summary>A titled panel whose body is an app-drawn, scrollable region routed by <paramref name="key"/>.</summary>
-    private Layout.Node Panel(string title, string key) =>
+    /// <summary>
+    /// A titled panel whose body is an app-drawn, scrollable region routed by <paramref name="key"/>.
+    /// </summary>
+    /// <remarks>
+    /// The body declares its list: <c>.WithScroll</c> makes the router hand it the wheel, and
+    /// <c>.Pressable</c> hands it a press that no row claimed, which is what arms the drag and the
+    /// scrollbar thumb. Rows register after the body (they paint inside its drawFill), so a press on a
+    /// button still reaches the button; only the space between and beside rows reaches the list.
+    /// <para>
+    /// The padding sits OUTSIDE the Fill, so the Fill's arranged rect is exactly the list's viewport.
+    /// It has to be: the painter binds that rect as the viewport and re-clamps the offset against it
+    /// before drawFill runs, and when it was the unpadded body the taller rect fitted one row more,
+    /// clamped the maximum to 0, and snapped every wheel and thumb drag straight back to the top.
+    /// </para>
+    /// </remarks>
+    private Layout.Node Panel(string title, string key, ListScrollController scroll) =>
         Layout.Builder.Dock(
-                Layout.Builder.Fill(key: key).Stretch(),
+                Layout.Builder.HStack(
+                        Layout.Builder.Fill(key: key).Stretch()
+                            .WithScroll(scroll)
+                            .Pressable(new HitResult.ChromeHit(), press => ScrollPress(scroll, press)))
+                    .Pad(ViewerTheme.Metrics.Padding),
                 Layout.Builder.Top(
-                    Layout.Builder.Text(title, SmallFontSize, ViewerTheme.Palette.HeaderText)
-                        .Pad(ViewerTheme.Metrics.Padding)
+                    Padded(Layout.Builder.Text(title, SmallFontSize, ViewerTheme.Palette.HeaderText),
+                            ViewerTheme.Metrics.Padding)
                         .Bg(ViewerTheme.Palette.HeaderBg),
                     ViewerTheme.Metrics.HeaderHeight))
             .Bg(ViewerTheme.Palette.PanelBg);
+
+    /// <summary>
+    /// A press on a panel's empty space, offered to its list. The controller decides between the
+    /// scrollbar thumb and a drag of the list itself, and the capture carries the rest of the gesture
+    /// to it: the router holds a capture until the button comes up, so the list sees every move of a
+    /// drag that leaves its panel.
+    /// </summary>
+    private static DragCapture? ScrollPress(ListScrollController scroll, PointerPress press)
+    {
+        if (!scroll.HandleInput(new InputEvent.MouseDown(press.X, press.Y, press.Button, press.Modifiers, press.Clicks)))
+        {
+            return null;
+        }
+
+        return new DragCapture(
+            move => scroll.HandleInput(new InputEvent.MouseMove(move.X, move.Y, move.Button, move.Modifiers)),
+            release => scroll.HandleInput(new InputEvent.MouseUp(release.X, release.Y, release.Button, release.Modifiers)));
+    }
 
     private Layout.Node TopBar()
     {
@@ -175,7 +218,7 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         };
 
         return Layout.Builder.HStack(
-                Glyph(_state.IsBusy || queued > 0 ? _glyphs.Busy : " ", busyColor)
+                Layout.Builder.Text(_state.IsBusy || queued > 0 ? _glyphs.Busy : " ", SmallFontSize, busyColor, TextAlign.Center)
                     .W(Layout.Sizing.Fixed(GlyphColumnWidth)).HStar(),
                 Layout.Builder.Text(busyText, SmallFontSize, busyColor).WStar(0.5f).HStar(),
                 Layout.Builder.Text(_state.StatusMessage, SmallFontSize, ViewerTheme.Palette.BodyText).WStar(2.4f).HStar(),
@@ -184,6 +227,20 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             .Pad(ViewerTheme.Metrics.Padding)
             .Bg(ViewerTheme.Palette.HeaderBg);
     }
+
+    /// <summary>
+    /// The due tooltip, as a card hung under the rect the pointer rests on. Anchored placement clamps it
+    /// into the window, so a tooltip on the right-hand panel is not pushed off screen.
+    /// </summary>
+    private Layout.Node TooltipCard(TooltipRequest tooltip) =>
+        Layout.Builder.AnchoredTo(tooltip.Anchor,
+            Layout.Builder.HStack(
+                    Layout.Builder.Text(tooltip.Text, SmallFontSize, ViewerTheme.Palette.HeaderText).WAuto().HAuto())
+                .Pad(6f, 3f)
+                .Bg(ViewerTheme.TooltipBg)
+                .Radius(3f),
+            Layout.DockSide.Bottom,
+            margin: 3f);
 
     // ---------------------------------------------------------------- fill routing
 
@@ -195,35 +252,7 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             case "controls": PaintScrolledRows(rect, _controlScroll, BuildControlRows(), ViewerTheme.Metrics.ItemHeight + RowGap); break;
             case "log": PaintScrolledRows(rect, _logScroll, BuildLogRows(), SmallFontSize + 2f + RowGap); break;
             case "preview": PaintPreview(rect); break;
-            case { } key when key.StartsWith("glyph:", StringComparison.Ordinal): PaintGlyph(key, rect); break;
         }
-    }
-
-    /// <summary>
-    /// A single glyph, drawn with whichever installed face covers it rather than the tree's primary
-    /// font. Sized and positioned by the layout engine like any other leaf — only the font differs.
-    /// </summary>
-    private Layout.Node Glyph(string glyph, RGBAColor32 color, float? fontSize = null)
-    {
-        _glyphSlots.Add((glyph, color, fontSize ?? SmallFontSize));
-        return Layout.Builder.Fill(key: $"glyph:{_glyphSlots.Count - 1}");
-    }
-
-    private void PaintGlyph(string key, RectF32 rect)
-    {
-        if (!int.TryParse(key.AsSpan("glyph:".Length), out var index) ||
-            (uint)index >= (uint)_glyphSlots.Count)
-        {
-            return;
-        }
-
-        var (glyph, color, fontSize) = _glyphSlots[index];
-        // FontFor returns null only when nothing covers the codepoint, and ViewerGlyphs already
-        // substituted ASCII in that case — so the primary is always a safe last resort.
-        var font = _fonts.FontFor(char.ConvertToUtf32(glyph, 0)) ?? FontPath;
-
-        DrawText(glyph, font, rect.X, rect.Y, rect.Width, rect.Height,
-            fontSize * DpiScale, color, TextAlign.Center, TextAlign.Center);
     }
 
     /// <summary>Visual gap between virtualized rows, in design units. Part of the atom extent.</summary>
@@ -235,32 +264,32 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     /// keep draw==hit and DPI scaling for free.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The controller models the list as UNIFORM atoms, and this method is what upholds that contract:
-    /// the viewport it registers is the padded content rect (not the raw panel rect), and every row is
+    /// the viewport it registers is the Fill's own rect (the panel pads around it), and every row is
     /// painted into the atom rect the controller hands back — <c>RenderLayout</c> places a root at its
     /// bounds verbatim, so a row's own <c>RowH</c> never argues with the atom extent. The previous
     /// shape (one VStack of rows with their own heterogeneous heights + an outer pad the controller
     /// never heard about) made the drawn extent disagree with the scroll math: the list's bottom edge
     /// wandered as the visible mix of row heights changed, and overflow painted over the panel below —
     /// the layout engine deliberately never clips a stack.
+    /// </para>
+    /// <para>
+    /// Virtualized by hand rather than declared as a <c>.WithScroll</c> stack, which DIR.Lib 10.2 made a
+    /// real scroll container. A container arranges every child every frame and clips at paint, and the
+    /// log holds up to 4000 lines; this arranges only the rows that show. The panel's Fill still declares
+    /// the list (see <see cref="Panel"/>): the painter binds its rect as the viewport, and <c>SetExtent</c>
+    /// here adds the half the engine cannot know, the row count and height, against that same rect.
+    /// </para>
     /// </remarks>
     private void PaintScrolledRows(RectF32 rect, ListScrollController scroll, List<Layout.Node> rows, float rowHeight)
     {
-        var pad = ViewerTheme.Metrics.Padding * DpiScale;
-        var inner = new RectF32(rect.X + pad, rect.Y + pad,
-            MathF.Max(0f, rect.Width - pad - pad), MathF.Max(0f, rect.Height - pad - pad));
-
-        scroll.SetExtent(inner, rowHeight * DpiScale, rows.Count, Scale);
+        scroll.SetExtent(rect, rowHeight * DpiScale, rows.Count, Scale);
 
         var gap = RowGap * DpiScale;
         foreach (var (index, atomRect) in scroll.VisibleRows())
         {
-            // Forward drawFill: rows contain Glyph() Fill leaves, and a nested RenderLayout without
-            // the callback drops them silently — the leaf arranges and reserves space, then nothing
-            // paints it.
-            RenderLayout(rows[index],
-                new RectF32(atomRect.X, atomRect.Y, atomRect.Width, atomRect.Height - gap),
-                drawFill: PaintFill);
+            RenderLayout(rows[index], new RectF32(atomRect.X, atomRect.Y, atomRect.Width, atomRect.Height - gap));
         }
 
         scroll.DrawScrollBar(FillRect, ViewerTheme.ScrollTrack, ViewerTheme.ScrollThumb);
@@ -273,6 +302,14 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         var connected = _state.IsConnected;
         var open = _state.SessionOpen;
         var remote = open && _state.RemoteMode;
+        var exposure = _state.Exposure;
+
+        // Why a control does not apply, most fundamental first: a reader who is told "enter remote mode"
+        // while no transport is connected is sent to a button that is itself unavailable.
+        var needConnection = connected ? null : "Connect a transport first";
+        var needSession = needConnection ?? (open ? null : "Open a session first");
+        var needRemote = needSession ?? (remote ? null : "Enter remote mode first");
+        var needIdleBody = exposure is null ? null : $"{exposure.Label} in progress";
 
         List<Layout.Node> rows =
         [
@@ -291,11 +328,12 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
                 var index = i;
                 var device = _state.Devices[i];
                 var selected = i == _state.SelectedDeviceIndex;
-                rows.Add(Layout.Builder.Text(device.ToString(), SmallFontSize,
-                        selected ? ViewerTheme.Palette.HeaderText : ViewerTheme.Palette.DimText)
-                    .Pad(4f)
+                var background = selected ? ViewerTheme.Palette.Selection : ViewerTheme.Palette.PanelBg;
+                rows.Add(Padded(Layout.Builder.Text(device.ToString(), SmallFontSize,
+                        selected ? ViewerTheme.Palette.HeaderText : ViewerTheme.Palette.DimText), 4f)
                     .RowH(ViewerTheme.Metrics.ItemHeight)
-                    .Bg(selected ? ViewerTheme.Palette.Selection : ViewerTheme.Palette.PanelBg)
+                    .Bg(background)
+                    .BgHover(ViewerTheme.Hover(background))
                     .Radius(3f)
                     .Clickable(new HitResult.ListItemHit("devices", index), _ =>
                     {
@@ -306,70 +344,75 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         }
 
         rows.Add(Button(connected ? "Reconnect transport" : "Connect transport", "connect", _actions.Connect,
-            enabled: _state.SelectedDeviceIndex >= 0));
-        rows.Add(Button("Disconnect", "disconnect", _actions.Disconnect, enabled: connected,
+            disabledReason: _state.SelectedDeviceIndex >= 0 ? null : "Select a camera first"));
+        rows.Add(Button("Disconnect", "disconnect", _actions.Disconnect, needConnection,
             background: ViewerTheme.DangerBg));
 
+        var alreadyOpen = needConnection ?? (open ? "A session is already open" : null);
         rows.Add(SectionHeader("Session"));
-        rows.Add(Button("Open session", "open", () => _actions.OpenSession(remoteMode: true), enabled: connected && !open));
-        rows.Add(Button("Open — no remote mode", "open-plain", () => _actions.OpenSession(remoteMode: false), enabled: connected && !open));
-        rows.Add(Button("Close session", "close", _actions.CloseSession, enabled: open));
+        rows.Add(Button("Open session", "open", () => _actions.OpenSession(remoteMode: true), alreadyOpen));
+        rows.Add(Button("Open without remote mode", "open-plain", () => _actions.OpenSession(remoteMode: false), alreadyOpen));
+        rows.Add(Button("Close session", "close", _actions.CloseSession, needSession));
         rows.Add(Button(remote ? "Exit remote mode" : "Enter remote mode", "remote",
-            () => _actions.SetRemoteMode(!remote), enabled: open));
+            () => _actions.SetRemoteMode(!remote), needSession));
 
         rows.Add(SectionHeader("Capture"));
 
         // While the body is exposing, the shutter button becomes the exposure's own readout: the
         // release itself returned long ago, so without this there is nothing on screen to say the
-        // camera is still working. Disabled with it, because a second release during an exposure is
-        // never what anyone meant.
-        var exposure = _state.Exposure;
+        // camera is still working. Busy rather than disabled, because a second release during an
+        // exposure is never what anyone meant, and greying out the most active thing the app ever does
+        // says the opposite of what is happening.
         rows.Add(Button(
             exposure is null
                 ? $"{_glyphs.Camera} Take picture".TrimStart()
                 : $"{_glyphs.Busy} {exposure.Label}… {exposure.Elapsed.TotalSeconds:F1}s".TrimStart(),
             "shoot", _actions.TakePicture,
-            enabled: remote && exposure is null,
+            needRemote,
             background: ViewerTheme.ActiveBg,
-            disabledBackground: exposure is null ? null : ViewerTheme.BusyBg));
+            busyReason: needIdleBody,
+            tooltip: "Space"));
 
         rows.Add(Button("InitiateCapture (std PTP)", "initiate", _actions.InitiateCapture,
-            enabled: open && exposure is null));
-        rows.Add(Button("Half-press", "halfpress", () => _actions.HalfPress(true), enabled: remote));
-        rows.Add(Button("Release", "release", () => _actions.HalfPress(false), enabled: remote));
-        rows.Add(Button("Cancel AF", "afcancel", _actions.CancelAutoFocus, enabled: remote));
-        rows.Add(Button("Bulb start", "bulbstart", () => _actions.Bulb(true),
-            enabled: remote && exposure is null));
-        rows.Add(Button("Bulb end", "bulbend", () => _actions.Bulb(false),
-            enabled: remote, background: exposure?.Label is "Bulb" ? ViewerTheme.BusyBg : null));
-        rows.Add(Toggle("Auto-download new images", "autodl", _actions.AutoDownload,
-            () => { _actions.AutoDownload = !_actions.AutoDownload; _state.Invalidate(); }));
+            needSession ?? needIdleBody));
+        rows.Add(Button("Half-press", "halfpress", () => _actions.HalfPress(true), needRemote));
+        rows.Add(Button("Release", "release", () => _actions.HalfPress(false), needRemote));
+        rows.Add(Button("Cancel AF", "afcancel", _actions.CancelAutoFocus, needRemote));
+        rows.Add(Button("Bulb start", "bulbstart", () => _actions.Bulb(true), needRemote ?? needIdleBody));
+        rows.Add(Button("Bulb end", "bulbend", () => _actions.Bulb(false), needRemote,
+            background: exposure?.Label is "Bulb" ? ViewerTheme.BusyBg : null));
+        rows.Add(Layout.Builder.Checkbox("Auto-download new images", _actions.AutoDownload,
+                on => { _actions.AutoDownload = on; _state.Invalidate(); },
+                ViewerTheme.Checkbox, SmallFontSize, new HitResult.ButtonHit("autodl"))
+            .PadX(6f)
+            .RowH(ViewerTheme.Metrics.ButtonHeight)
+            .Radius(4f));
         rows.Add(Button("Download last image", "download", _actions.DownloadLast,
-            enabled: open && _state.LastObjectHandle is not null));
+            needSession ?? (_state.LastObjectHandle is null ? "No image announced yet" : null)));
 
         rows.Add(SectionHeader("Live view"));
         rows.Add(Button(_state.LiveViewActive ? "Stop live view" : "Start live view", "lv",
             () => { if (_state.LiveViewActive) _actions.StopLiveView(); else _actions.StartLiveView(); },
-            enabled: remote, background: _state.LiveViewActive ? ViewerTheme.ActiveBg : null));
-        rows.Add(Button("Save one frame", "lvsave", _actions.SaveLiveViewFrame, enabled: remote));
+            needRemote, background: _state.LiveViewActive ? ViewerTheme.ActiveBg : null, tooltip: "Ctrl+L"));
+        rows.Add(Button("Save one frame", "lvsave", _actions.SaveLiveViewFrame, needRemote));
         rows.Add(GlyphButton(_glyphs.FocusFar, "Focus far", "lensfar",
-            () => _actions.DriveLens(EdsDriveLensStep.FarMedium), enabled: remote));
+            () => _actions.DriveLens(EdsDriveLensStep.FarMedium), needRemote));
         rows.Add(GlyphButton(_glyphs.FocusNear, "Focus near", "lensnear",
-            () => _actions.DriveLens(EdsDriveLensStep.NearMedium), enabled: remote));
+            () => _actions.DriveLens(EdsDriveLensStep.NearMedium), needRemote));
 
         rows.Add(SectionHeader("Diagnostics"));
         // First in the section on purpose: it is what a bug report needs, and a reporter should not
         // have to find it among a dozen probing actions.
-        rows.Add(Button("Save device report", "devreport", _actions.SaveDeviceReport, enabled: open));
-        rows.Add(Button("Read all properties", "readall", _actions.ReadAll, enabled: open));
-        rows.Add(Button("Drain event queue", "drain", _actions.DrainEvents, enabled: open));
-        rows.Add(Button("Dump properties to file", "dump", _actions.DumpProperties, enabled: open));
-        rows.Add(Button("Read C.Fn block", "cfn", _actions.ReadCustomFunctions, enabled: open));
-        rows.Add(Button("Report host capacity", "capacity", _actions.ReportHostCapacity, enabled: remote));
-        rows.Add(Button("Keep device on", "keepalive", _actions.KeepDeviceOn, enabled: remote));
-        rows.Add(Button("Lock camera UI", "uilock", () => _actions.SetUILock(true), enabled: remote));
-        rows.Add(Button("Unlock camera UI", "uiunlock", () => _actions.SetUILock(false), enabled: remote));
-        rows.Add(Button("Reset mirror-lockup state", "mlureset", _actions.ResetMirrorLockup, enabled: remote));
+        rows.Add(Button("Save device report", "devreport", _actions.SaveDeviceReport, needSession));
+        rows.Add(Button("Read all properties", "readall", _actions.ReadAll, needSession, tooltip: "F5"));
+        rows.Add(Button("Drain event queue", "drain", _actions.DrainEvents, needSession));
+        rows.Add(Button("Dump properties to file", "dump", _actions.DumpProperties, needSession, tooltip: "Ctrl+D"));
+        rows.Add(Button("Read C.Fn block", "cfn", _actions.ReadCustomFunctions, needSession));
+        rows.Add(Button("Report host capacity", "capacity", _actions.ReportHostCapacity, needRemote));
+        rows.Add(Button("Keep device on", "keepalive", _actions.KeepDeviceOn, needRemote));
+        rows.Add(Button("Lock camera UI", "uilock", () => _actions.SetUILock(true), needRemote));
+        rows.Add(Button("Unlock camera UI", "uiunlock", () => _actions.SetUILock(false), needRemote));
+        rows.Add(Button("Reset mirror-lockup state", "mlureset", _actions.ResetMirrorLockup, needRemote));
 
         if (_state.SupportedOperations.Count > 0)
         {
@@ -391,9 +434,14 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         var supported = _state.SupportedOperations.Contains(code);
         var color = supported ? ViewerTheme.Ok : ViewerTheme.Warn;
 
+        // The tick is drawn; the cross has no member in the icon family, so it stays a text run, which
+        // the fallback chain draws from whichever face has it (or "NO" where none does).
+        var mark = supported
+            ? Layout.Builder.Icon(Layout.IconKind.Check, color: color)
+            : Layout.Builder.Text(_glyphs.No, SmallFontSize - 1f, color, TextAlign.Center);
+
         return Layout.Builder.HStack(
-                Glyph(supported ? _glyphs.Yes : _glyphs.No, color, SmallFontSize - 1f)
-                    .W(Layout.Sizing.Fixed(GlyphColumnWidth)).HStar(),
+                mark.W(Layout.Sizing.Fixed(GlyphColumnWidth)).HStar(),
                 Layout.Builder.Text($"0x{code:X4} {name}", SmallFontSize - 1f, color).WStar().HStar())
             .WithGap(4f)
             .Pad(4f)
@@ -440,7 +488,12 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     private Layout.Node ControlRow(CameraControl control)
     {
         var reading = _state.Reading(control.PropertyId);
-        var interactive = _state.SessionOpen && control.Writable && !_state.IsBusy;
+
+        // Busy counts as unavailable here, unlike the action buttons: a step fired while another
+        // write is queued would be computed from a value the queued write is about to replace.
+        var unavailable = !_state.SessionOpen ? "Open a session first"
+            : _state.BusyOperation is { } busy ? $"Waiting for {busy}"
+            : null;
 
         var (valueText, valueColor) = reading switch
         {
@@ -457,11 +510,11 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         // Read-only properties get spacers of the same width, so every value column still lines up
         // without offering a control the camera would reject.
         var stepBack = control.Writable
-            ? StepButton(_glyphs.StepBack, $"{control.PropertyId}-prev", interactive,
+            ? StepButton(Layout.IconKind.CaretLeft, $"{control.PropertyId}-prev", unavailable,
                 () => _actions.SetControl(control, control.Previous(current, allowed)))
             : StepSpacer();
         var stepForward = control.Writable
-            ? StepButton(_glyphs.StepForward, $"{control.PropertyId}-next", interactive,
+            ? StepButton(Layout.IconKind.CaretRight, $"{control.PropertyId}-next", unavailable,
                 () => _actions.SetControl(control, control.Next(current, allowed)))
             : StepSpacer();
 
@@ -517,11 +570,24 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             ? _state.LiveViewActive ? ViewerTheme.Ok : ViewerTheme.Palette.DimText
             : ViewerTheme.Palette.BodyText;
 
+        // A segmented control rather than two hand-coloured chips: the style owns which segment looks
+        // chosen, the chosen one swallows its press without re-selecting, and only the other one lights
+        // under the pointer.
+        ReadOnlySpan<Layout.ButtonGroupOption<PreviewPane>> panes =
+        [
+            new(PreviewPane.LiveView, "Live view") { Hit = new HitResult.ButtonHit($"preview-{PreviewPane.LiveView}") },
+            new(PreviewPane.Capture, "Last capture") { Hit = new HitResult.ButtonHit($"preview-{PreviewPane.Capture}") },
+        ];
+
         var tree = Layout.Builder.VStack(
                 Layout.Builder.HStack(
-                        PreviewTab("Live view", PreviewPane.LiveView),
-                        PreviewTab("Last capture", PreviewPane.Capture),
-                        Layout.Builder.Text(label, SmallFontSize, labelColor).WStar().HStar().Pad(3f))
+                        Layout.Builder.ButtonGroup(panes, _state.PreviewMode, pane =>
+                            {
+                                _state.PreviewMode = pane;
+                                _state.Invalidate();
+                            }, ViewerTheme.PreviewTabs, SmallFontSize)
+                            .WAuto().HStar(),
+                        Padded(Layout.Builder.Text(label, SmallFontSize, labelColor), 3f).WStar().HStar())
                     .WithGap(ViewerTheme.Metrics.Padding)
                     .RowH(ViewerTheme.Metrics.ButtonHeight),
                 Layout.Builder.Fill(key: live ? "liveimage" : "thumbimage")
@@ -546,21 +612,6 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         });
     }
 
-    private Layout.Node PreviewTab(string label, PreviewPane pane)
-    {
-        var selected = _state.PreviewMode == pane;
-        return Layout.Builder.Text(label, SmallFontSize,
-                selected ? ViewerTheme.Palette.HeaderText : ViewerTheme.Palette.DimText, TextAlign.Center)
-            .W(Layout.Sizing.Fixed(110f)).HStar()
-            .Bg(selected ? ViewerTheme.Palette.Selection : ViewerTheme.ButtonBg)
-            .Radius(4f)
-            .Clickable(new HitResult.ButtonHit($"preview-{pane}"), _ =>
-            {
-                _state.PreviewMode = pane;
-                _state.Invalidate();
-            });
-    }
-
     /// <summary>
     /// Draws a texture letterboxed into <paramref name="rect"/>, or a hint when there is nothing yet.
     /// The aspect fit is the one piece of arithmetic the layout engine cannot do for us — it depends
@@ -583,134 +634,147 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
 
     // ---------------------------------------------------------------- row primitives
 
-    private Layout.Node SectionHeader(string title) =>
-        Layout.Builder.Text(title.ToUpperInvariant(), SmallFontSize - 1f, ViewerTheme.Accent)
-            .Pad(3f)
+    private static Layout.Node SectionHeader(string title, float fontSize) =>
+        Padded(Layout.Builder.Text(title.ToUpperInvariant(), fontSize, ViewerTheme.Accent), 3f)
             .RowH(ViewerTheme.Metrics.ItemHeight)
             .Bg(ViewerTheme.Palette.HeaderBg)
             .Radius(3f);
 
+    private Layout.Node SectionHeader(string title) => SectionHeader(title, SmallFontSize - 1f);
+
     private Layout.Node Note(string text) =>
-        Layout.Builder.Text(text, SmallFontSize - 1f, ViewerTheme.Palette.DimText)
-            .Pad(3f)
+        Padded(Layout.Builder.Text(text, SmallFontSize - 1f, ViewerTheme.Palette.DimText), 3f)
             .RowH(ViewerTheme.Metrics.ItemHeight - 4f);
 
-    /// <param name="disabledBackground">
-    /// Fill for a button that is un-pressable because it is already running, as opposed to one that
-    /// simply does not apply. Only the latter should look inert — an exposure in progress is the
-    /// most active thing the app ever does, and greying it out says the opposite.
-    /// </param>
-    private Layout.Node Button(string label, string action, Action onClick, bool enabled = true,
-        RGBAColor32? background = null, RGBAColor32? disabledBackground = null)
-    {
-        var bg = enabled
-            ? background ?? ViewerTheme.ButtonBg
-            : disabledBackground ?? ViewerTheme.ButtonDisabledBg;
-        var fg = enabled || disabledBackground is not null
-            ? ViewerTheme.Palette.BodyText
-            : ViewerTheme.Palette.DimText;
+    /// <summary>
+    /// A text leaf inset by <paramref name="pad"/> on every side. Padding insets a node's CHILDREN, so on a
+    /// leaf it grows the measured box and then the text is still drawn from the rect's edge: every label
+    /// here that was written <c>Text(...).Pad(n)</c> sat flush against its background. A one-child stack is
+    /// the node that has a child to inset; chrome (fill, hover, hit) goes on it, not on the leaf.
+    /// </summary>
+    private static Layout.Node Padded(Layout.Node leaf, float pad) =>
+        Layout.Builder.HStack(leaf.WStar().HStar()).Pad(pad);
 
-        return Layout.Builder.Text(label, SmallFontSize, fg, TextAlign.Center)
+    /// <param name="disabledReason">
+    /// Why the button does not apply right now, or null when it does. Stated rather than a bool because
+    /// the painter shows it as the tooltip of the dimmed button: something a reader cannot press with no
+    /// explanation teaches nothing about how to make it pressable.
+    /// </param>
+    /// <param name="busyReason">
+    /// Why the button is un-pressable because it is already running, as opposed to one that simply
+    /// does not apply. Only the latter should look inert: an exposure in progress is the most active
+    /// thing the app ever does, and greying it out says the opposite. So a busy button keeps its
+    /// colour-coded fill (amber) and bright label, and swallows the press with a wait cursor.
+    /// </param>
+    /// <param name="tooltip">Hover text for the pressable button, used for its keyboard shortcut.</param>
+    private Layout.Node Button(string label, string action, Action onClick, string? disabledReason = null,
+        RGBAColor32? background = null, string? busyReason = null, string? tooltip = null)
+    {
+        var node = Layout.Builder.Text(label, SmallFontSize, ViewerTheme.Palette.BodyText, TextAlign.Center)
             .RowH(ViewerTheme.Metrics.ButtonHeight)
-            .Bg(bg)
-            .Radius(4f)
-            .Clickable(enabled ? new HitResult.ButtonHit(action) : null, enabled ? _ => onClick() : null);
+            .Radius(4f);
+
+        return Actionable(node, action, onClick, disabledReason, background ?? ViewerTheme.ButtonBg, busyReason, tooltip);
     }
 
-    private Layout.Node Toggle(string label, string action, bool on, Action onClick) =>
-        GlyphButton(on ? _glyphs.Checked : _glyphs.Unchecked, label, action, onClick,
-            background: on ? ViewerTheme.ActiveBg : null);
+    /// <summary>
+    /// The three states a button can be in, stated once for every button shape: pressable (lit under the
+    /// pointer), not applicable (dimmed, the press swallowed, the reason as its tooltip), or already
+    /// running (its own fill, the press swallowed).
+    /// </summary>
+    /// <remarks>
+    /// The busy case registers the hit with NO handler, which under the router is a dead region: the
+    /// press is consumed and nothing runs. That is the point, since a press falling through to the panel
+    /// behind would start a list drag from a button.
+    /// </remarks>
+    private static Layout.Node Actionable(Layout.Node node, string action, Action onClick, string? disabledReason,
+        RGBAColor32 background, string? busyReason = null, string? tooltip = null)
+    {
+        var hit = new HitResult.ButtonHit(action);
+
+        if (disabledReason is not null)
+        {
+            return node.Bg(ViewerTheme.ButtonDisabledBg).Clickable(hit).Disabled(disabledReason);
+        }
+
+        if (busyReason is not null)
+        {
+            return node.Bg(ViewerTheme.BusyBg).Clickable(hit, cursor: CursorKind.Wait).WithTooltip(busyReason);
+        }
+
+        node = node.Bg(background).BgHover(ViewerTheme.Hover(background)).Clickable(hit, _ => onClick());
+        return tooltip is null ? node : node.WithTooltip(tooltip);
+    }
 
     private static Layout.Node StepSpacer() =>
         Layout.Builder.Spacer().W(Layout.Sizing.Fixed(StepButtonWidth)).HStar();
 
-    private Layout.Node StepButton(string glyph, string action, bool enabled, Action onClick) =>
-        Glyph(glyph, enabled ? ViewerTheme.Palette.HeaderText : ViewerTheme.Palette.DimText, SmallFontSize - 1f)
-            .W(Layout.Sizing.Fixed(StepButtonWidth)).HStar()
-            .Bg(enabled ? ViewerTheme.ButtonBg : ViewerTheme.ButtonDisabledBg)
-            .Radius(3f)
-            .Clickable(enabled ? new HitResult.ButtonHit(action) : null, enabled ? _ => onClick() : null);
+    private static Layout.Node StepButton(Layout.IconKind icon, string action, string? disabledReason, Action onClick) =>
+        Actionable(
+            Layout.Builder.Icon(icon, color: ViewerTheme.Palette.HeaderText)
+                .W(Layout.Sizing.Fixed(StepButtonWidth)).HStar()
+                .Radius(3f),
+            action, onClick, disabledReason, ViewerTheme.ButtonBg);
 
     /// <summary>
-    /// A button whose label is preceded by a symbol glyph. Two leaves rather than one string, because
-    /// the glyph and the text need different fonts (see the remarks on this type).
+    /// A button whose label is preceded by a symbol glyph, in a column of its own so a stack of these
+    /// lines up however wide each glyph is drawn.
     /// </summary>
     private Layout.Node GlyphButton(string glyph, string label, string action, Action onClick,
-        bool enabled = true, RGBAColor32? background = null, RGBAColor32? glyphColor = null)
+        string? disabledReason = null)
     {
-        var bg = enabled ? background ?? ViewerTheme.ButtonBg : ViewerTheme.ButtonDisabledBg;
-        var fg = enabled ? ViewerTheme.Palette.BodyText : ViewerTheme.Palette.DimText;
+        var fg = ViewerTheme.Palette.BodyText;
 
-        return Layout.Builder.HStack(
-                Glyph(glyph, glyphColor ?? fg).W(Layout.Sizing.Fixed(GlyphColumnWidth)).HStar(),
+        var node = Layout.Builder.HStack(
+                Layout.Builder.Text(glyph, SmallFontSize, fg, TextAlign.Center).W(Layout.Sizing.Fixed(GlyphColumnWidth)).HStar(),
                 Layout.Builder.Text(label, SmallFontSize, fg).WStar().HStar())
             .WithGap(4f)
             .RowH(ViewerTheme.Metrics.ButtonHeight)
-            .Bg(bg)
-            .Radius(4f)
-            .Clickable(enabled ? new HitResult.ButtonHit(action) : null, enabled ? _ => onClick() : null);
+            .Radius(4f);
+
+        return Actionable(node, action, onClick, disabledReason, ViewerTheme.ButtonBg);
     }
 
     // ---------------------------------------------------------------- input
 
-    public override bool HandleInput(InputEvent evt)
-    {
-        switch (evt)
-        {
-            // A widget click has to beat list interaction. ListScrollController claims ANY left
-            // mouse-down inside its viewport — it arms a tap/drag gesture and returns true — so
-            // giving the scroll controllers first look swallowed every button in a panel before it
-            // could dispatch. Both panels are scroll viewports, so that was every button in the app.
-            case InputEvent.MouseDown { Button: MouseButton.Left } down:
-                if (HitTestAndDispatch(down.X, down.Y, down.Modifiers) is not null)
-                {
-                    _state.Invalidate();
-                    return true;
-                }
-                // Nothing clickable under the pointer: let the lists have it, so dragging empty space
-                // and grabbing a scrollbar thumb still work.
-                return ScrollHandled(evt);
-
-            case InputEvent.KeyDown key:
-                return HandleKey(key);
-
-            // Wheel, plus the move/up that carry an in-progress thumb drag to completion. The
-            // controllers ignore these unless the pointer is theirs or a drag is already armed.
-            default:
-                return ScrollHandled(evt);
-        }
-    }
-
-    private bool ScrollHandled(InputEvent evt)
-    {
-        if (!_actionScroll.HandleInput(evt) && !_controlScroll.HandleInput(evt) && !_logScroll.HandleInput(evt))
-            return false;
-
-        _state.Invalidate();
-        return true;
-    }
+    /// <summary>
+    /// The keys, and only the keys: the router's <c>Unhandled</c>. Every press, move, release and wheel
+    /// is answered by the router from the regions the last paint declared.
+    /// </summary>
+    /// <remarks>
+    /// These four stay host keys rather than <c>.WithShortcut</c> on their buttons, because a declared
+    /// shortcut fires only while its node is PAINTED, and the buttons live in a virtualized list: F5 would
+    /// stop working the moment the Diagnostics section scrolled out of view. The buttons' tooltips name
+    /// the keys instead. They were also dead until the router port: the host never set
+    /// <c>OnKeyDown</c>, and the loop does not deliver keys through the pointer callback.
+    /// </remarks>
+    public override bool HandleInput(InputEvent evt) => evt is InputEvent.KeyDown key && HandleKey(key);
 
     private bool HandleKey(InputEvent.KeyDown key)
     {
         switch (key.Key)
         {
-            case InputKey.F5:
+            // Not on a repeat: holding F5 would queue a full property read per auto-repeat.
+            case InputKey.F5 when !key.Repeat:
                 _actions.ReadAll();
                 return true;
 
-            case InputKey.Space when _state.SessionOpen:
+            // Not on a repeat either: a held Space is one exposure, not a burst.
+            case InputKey.Space when _state.SessionOpen && !key.Repeat:
                 _actions.TakePicture();
                 return true;
 
-            case InputKey.L when (key.Modifiers & InputModifier.Ctrl) != 0:
+            // A toggle, so a held chord would flip live view at the key-repeat rate.
+            case InputKey.L when (key.Modifiers & InputModifier.Ctrl) != 0 && !key.Repeat:
                 if (_state.LiveViewActive) _actions.StopLiveView(); else _actions.StartLiveView();
                 return true;
 
-            case InputKey.D when (key.Modifiers & InputModifier.Ctrl) != 0:
+            case InputKey.D when (key.Modifiers & InputModifier.Ctrl) != 0 && !key.Repeat:
                 _actions.DumpProperties();
                 return true;
 
-            // Ctrl +/- resizes every label at once; the layout engine reflows around it.
+            // Ctrl +/- resizes every label at once; the layout engine reflows around it. Repeats are
+            // fine here: holding the chord to step through sizes is what a reader expects.
             case InputKey.Plus when (key.Modifiers & InputModifier.Ctrl) != 0:
                 FontSize += 1f;
                 _state.Invalidate();
@@ -732,47 +796,71 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     }
 
     /// <summary>
-    /// A single-slot GPU texture fed from CPU rasters. Uploads are recorded during the renderer's
-    /// pre-render-pass hook and the outgoing texture is only released a frame later, once BeginFrame
-    /// has waited on the fence that could still have been sampling it.
+    /// A single-slot GPU texture fed from CPU rasters, through the renderer's own upload queue.
     /// </summary>
-    private sealed class DeferredTexture(VkRenderer renderer) : IDisposable
+    /// <remarks>
+    /// <para>
+    /// The texture is created on the render thread and handed to <c>VulkanContext.QueueTextureUpload</c>,
+    /// which records its upload at the start of the next frame, before any render pass, and records it
+    /// again by itself if that frame is dropped. It becomes the drawn texture once
+    /// <see cref="VkTexture.IsUploaded"/> says so; until then the previous one keeps showing, so a new
+    /// frame never flashes the hint.
+    /// </para>
+    /// <para>
+    /// Retiring the outgoing texture is a plain <c>Dispose</c>: <c>VkTexture</c> defers its own destroy
+    /// until every frame that could have bound it has retired, so this no longer holds a texture back
+    /// by hand for a frame, which covered in-flight frames and not the one being recorded.
+    /// </para>
+    /// <para>
+    /// One upload in flight at a time. A raster that arrives while one is queued waits for the next
+    /// frame, when the host submits the newest again; replacing a texture the queue still holds would
+    /// dispose it under the queue.
+    /// </para>
+    /// </remarks>
+    private sealed class DeferredTexture(VulkanContext context) : IDisposable
     {
-        private Raster? _pending;
-        private Raster? _uploaded;
-        private VkTexture? _texture;
-        private VkTexture? _retired;
+        private Raster? _submitted;
+        private VkTexture? _shown;
+        private VkTexture? _incoming;
 
-        public VkTexture? Texture => _texture;
+        public VkTexture? Texture
+        {
+            get
+            {
+                Promote();
+                return _shown;
+            }
+        }
+
+        public bool IsUploading => _incoming is not null;
 
         public void Submit(Raster raster)
         {
-            // Same instance as last frame means nothing changed — skip the upload entirely.
-            if (ReferenceEquals(raster, _uploaded) || ReferenceEquals(raster, _pending)) return;
-            _pending = raster;
+            Promote();
+
+            // Same instance as last time means nothing changed, so skip the upload entirely.
+            if (_incoming is not null || ReferenceEquals(raster, _submitted)) return;
+
+            var texture = VkTexture.CreateDeferred(context, raster.Rgba, raster.Width, raster.Height,
+                VkFormat.R8G8B8A8Unorm);
+            context.QueueTextureUpload(texture);
+            _incoming = texture;
+            _submitted = raster;
         }
 
-        public void Flush(VkCommandBuffer cmd)
+        private void Promote()
         {
-            _retired?.Dispose();
-            _retired = null;
+            if (_incoming is not { IsUploaded: true } ready) return;
 
-            if (_pending is not { } raster) return;
-            _pending = null;
-
-            var texture = VkTexture.CreateDeferred(renderer.Context, raster.Rgba, raster.Width, raster.Height,
-                VkFormat.R8G8B8A8Unorm);
-            texture.RecordUpload(cmd);
-
-            _retired = _texture;
-            _texture = texture;
-            _uploaded = raster;
+            _shown?.Dispose();
+            _shown = ready;
+            _incoming = null;
         }
 
         public void Dispose()
         {
-            _retired?.Dispose();
-            _texture?.Dispose();
+            _incoming?.Dispose();
+            _shown?.Dispose();
         }
     }
 }

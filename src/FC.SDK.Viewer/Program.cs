@@ -82,9 +82,58 @@ loop.OnResize = (w, h) =>
     state.Invalidate();
 };
 
-loop.OnRender = () => widget.Render(new RectF32(0f, 0f, width, height));
+// The one dispatcher. Presses, the wheel, hover, drags and tooltips are answered from what the last
+// paint declared (the widget's layout tree), in DIR.Lib's fixed order; what nothing declared reaches
+// the widget's own HandleInput, which is the keys. The tracker is the router's for a text field's async
+// commit; the viewer has no fields, so it only ever sits empty.
+var tracker = new BackgroundTaskTracker();
+var router = new InputRouter(widget.Ui, tracker, state.Invalidate)
+{
+    Widgets = () => [widget],
+    Unhandled = widget.HandleInput,
+};
 
-loop.OnPointerInput = evt => widget.HandleInput(evt);
+// The cursor is asked of the regions on every move, not only after a paint: a move over inert chrome
+// draws no frame, and a cursor recomputed only in OnRender would keep whatever kind it last had there.
+// Cached so a move within one region costs no SDL call.
+(float X, float Y) pointer = (-1f, -1f);
+var shownCursor = CursorKind.Default;
+void UpdateCursor()
+{
+    var cursor = router.CursorAt(pointer.X, pointer.Y) ?? CursorKind.Default;
+    if (cursor == shownCursor) return;
+    shownCursor = cursor;
+    window.SetSystemCursor(cursor.ToSystemCursor);
+}
+
+loop.OnPointerInput = evt =>
+{
+    if (evt is InputEvent.MouseMove move) pointer = (move.X, move.Y);
+    var handled = router.Handle(evt);
+    if (evt is InputEvent.MouseMove) UpdateCursor();
+    return handled;
+};
+
+// Keys go through the router too, which hands them to the widget via Unhandled once no popover,
+// declared shortcut or focused field claimed them. Before this nothing set OnKeyDown at all, so F5,
+// Space, Ctrl+L and Ctrl+D were documented and never reached the widget.
+loop.OnKeyDown = key => router.Handle(key);
+
+// The tooltip on screen, so the redraw check can tell when the router's due one has changed: it becomes
+// due on a clock (the hover delay), with no event to announce it.
+TooltipRequest? paintedTooltip = null;
+
+loop.OnRender = () =>
+{
+    paintedTooltip = router.Tooltip;
+    widget.Render(new RectF32(0f, 0f, width, height), paintedTooltip);
+
+    // Once the whole frame is painted: expire a tooltip whose region has gone, and the other two rules
+    // that need a finished frame. Then the cursor again, because a repaint can change which region sits
+    // under a pointer that has not moved (a button that just became disabled, say).
+    router.AfterPaint();
+    UpdateCursor();
+};
 
 // Redraw only when something changed: the camera is the slow part, and a spinning GPU competes with
 // the USB transfers we care about.
@@ -105,6 +154,10 @@ loop.CheckNeedsRedraw = () =>
         state.Invalidate();
     }
 
+    // Two reasons to draw that no event announces: a tooltip coming due on the hover delay, and a
+    // preview upload that lands at the start of a frame and needs that frame to be shown.
+    if (router.Tooltip != paintedTooltip || widget.IsUploading) state.Invalidate();
+
     if (!state.NeedsRedraw && !renderer.FontAtlasDirty) return false;
     state.NeedsRedraw = false;
     return true;
@@ -120,7 +173,6 @@ log.LineAppended += state.Invalidate;
 // Gated on SIBLING_DEBUG_INSPECTORS, not plain DEBUG: DebugInspector is #if DEBUG upstream, so it
 // exists only in a Debug-compiled SdlVulkan.Renderer *sibling*. The published package is built
 // Release and does not contain the type at all — see src/Directory.Build.props.
-// Attach turns on LayoutInspection itself once GetLayout is supplied.
 using var inspector = DebugInspector.Attach(loop, new DebugInspectorOptions
 {
     AppName = "FC.SDK Viewer",

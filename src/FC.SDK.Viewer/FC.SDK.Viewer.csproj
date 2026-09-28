@@ -37,8 +37,8 @@
     <ProjectReference Include="..\..\..\AppShell\src\SharpAstro.AppShell\SharpAstro.AppShell.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
-    <PackageReference Include="SdlVulkan.Renderer" Version="7.37.*" />
-    <PackageReference Include="DIR.Lib" Version="9.0.*" />
+    <PackageReference Include="SdlVulkan.Renderer" Version="7.50.*" />
+    <PackageReference Include="DIR.Lib" Version="11.5.*" />
     <!-- The single-instance gate, shared with the TianWen viewer and GUI. -->
     <PackageReference Include="SharpAstro.AppShell" Version="1.1.*" />
   </ItemGroup>
