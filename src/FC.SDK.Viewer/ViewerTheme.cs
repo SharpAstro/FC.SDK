@@ -44,10 +44,47 @@ public static class ViewerTheme
     /// <summary>An operation the camera is still working on — amber, to read as "wait", not "go".</summary>
     public static readonly RGBAColor32 BusyBg = new(0x53, 0x42, 0x1c, 0xff);
 
+    /// <summary>
+    /// The lit form of a fill, for a control under the pointer. Derived rather than stated per fill so a
+    /// danger or active button keeps its hue when lit instead of turning into the neutral button colour,
+    /// which is exactly when the pointer is about to press it.
+    /// </summary>
+    public static RGBAColor32 Hover(RGBAColor32 fill) => RGBAColor32.Lerp(fill, Palette.HeaderText, 0.12f);
+
+    /// <summary>The auto-download row: a well, a drawn tick, and a green row while it is on.</summary>
+    public static readonly Layout.CheckboxStyle Checkbox = new(
+        BoxFill: new(0x14, 0x16, 0x1c, 0xff),
+        CheckColor: new(0x6c, 0xc6, 0x77, 0xff),
+        LabelColor: Palette.BodyText,
+        HoverFill: Hover(ButtonBg))
+    {
+        RowFill = ButtonBg,
+        CheckedRowFill = ActiveBg,
+        CheckedLabelColor = Palette.HeaderText,
+        Gap = 6f,
+        CornerRadius = 3f,
+    };
+
+    /// <summary>The live-view / last-capture selector above the preview.</summary>
+    public static readonly Layout.ButtonGroupStyle PreviewTabs = new(
+        SelectedFill: Palette.Selection,
+        UnselectedFill: ButtonBg,
+        SelectedContent: Palette.HeaderText,
+        UnselectedContent: Palette.DimText,
+        HoverFill: Hover(ButtonBg))
+    {
+        Gap = Metrics.Padding,
+        CornerRadius = 4f,
+        SegmentWidth = 110f,
+    };
+
     // The library defaults (0x22222a / 0x444455) disappear against PanelBg 0x1c2028 — the thumb read
     // as a paint artifact. Track sits slightly below the panel, thumb clearly above it.
     public static readonly RGBAColor32 ScrollTrack = new(0x16, 0x1a, 0x20, 0xff);
     public static readonly RGBAColor32 ScrollThumb = new(0x5e, 0x68, 0x7c, 0xff);
+
+    /// <summary>A tooltip's card: above HeaderBg, so it reads as floating over whatever it covers.</summary>
+    public static readonly RGBAColor32 TooltipBg = new(0x34, 0x3c, 0x4a, 0xff);
 
     public static readonly RGBAColor32 Ok = new(0x6c, 0xc6, 0x77, 0xff);
     public static readonly RGBAColor32 Warn = new(0xd8, 0xa8, 0x3f, 0xff);
