@@ -228,6 +228,45 @@ public sealed class CanonCamera : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Reads which body is at <paramref name="wpdDeviceId"/> WITHOUT opening a PTP session: one <c>GetDeviceInfo</c>
+    /// (0x1001), which PTP allows with no session open. Nothing on the camera changes (no <c>OpenSession</c>, no
+    /// remote mode, no event mode).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is what makes a body recognisable when it is plugged into another USB port. The WPD id that
+    /// <see cref="EnumerateWpdCameras"/> returns is the Windows device instance, and on a body that reports no USB serial
+    /// (an EOS 6D) Windows builds it from the hub and the hub port, so the same camera has a different id on every port.
+    /// The serial this returns is the body's own.
+    /// </para>
+    /// <para>
+    /// Measured on an EOS 6D: about 7 ms to open the device and 21 ms to read. It is not free of interference, though:
+    /// while another program streamed live view from the same body, 2 of 12 such reads coincided with one live view frame
+    /// failing (<c>InternalError</c>, the next frame fine). PTP runs one command at a time, so a read that lands on
+    /// another client's command can make that command fail. Read once per device, remember the answer, and do not read a
+    /// camera you are already driving (its session already reports <see cref="SerialNumber"/>). The call is bounded by
+    /// the transport's 15 s command deadline.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// The body's model and serial, or null when the camera answered but reported no serial, or did not answer
+    /// <c>GetDeviceInfo</c> successfully. An id WPD cannot open throws, as <see cref="ConnectWpd"/> does.
+    /// </returns>
+    [SupportedOSPlatform("windows")]
+    public static async Task<CanonBodyIdentity?> ReadWpdIdentityAsync(string wpdDeviceId, CancellationToken ct = default)
+    {
+        await using var transport = new WpdPtpTransport(wpdDeviceId);
+        await transport.ConnectAsync(ct).ConfigureAwait(false);
+
+        var ptp = new PtpSession(transport);
+        var (response, data) = await ptp.SendCommandReceiveDataAsync(PtpOperationCode.GetDeviceInfo, ct).ConfigureAwait(false);
+
+        return response.IsSuccess && PtpDeviceInfo.TryParse(data, out var info) && info.SerialNumber.Length > 0
+            ? new CanonBodyIdentity(info.Model, info.SerialNumber)
+            : null;
+    }
+
     public async Task<EdsError> OpenSessionAsync(CancellationToken ct = default)
     {
         _logger.LogDebug("Opening PTP session via {Transport}", _transport.GetType().Name);

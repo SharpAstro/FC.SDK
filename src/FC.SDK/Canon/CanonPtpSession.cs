@@ -133,32 +133,17 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
 
     private void ParseDeviceInfo(byte[] data)
     {
-        // PTP DeviceInfo dataset: skip fixed fields, read PTP strings
-        // Offset 8: VendorExtensionDesc (PTP string), then skip several fields to reach:
-        // Model, DeviceVersion, SerialNumber as the last three PTP strings.
-        // PTP string format: uint8 length (in chars), then UTF-16LE chars
-        try
+        // A dataset that is cut short is not fatal: the session carries on with what it already knew, and an empty
+        // operation set means "assume everything is supported" (see IsOperationSupported).
+        if (PtpDeviceInfo.TryParse(data, out var info))
         {
-            int offset = 8; // skip StandardVersion(u16), VendorExtId(u32), VendorExtVersion(u16)
-            offset = SkipPtpString(data, offset); // VendorExtensionDesc
-            offset += 2; // FunctionalMode (u16)
-            var (operations, o0) = ReadPtpUInt16Array(data, offset); // OperationsSupported
-            SupportedOperations = operations;
-            offset = o0;
-            offset = SkipPtpArray(data, offset); // EventsSupported (u16 array)
-            offset = SkipPtpArray(data, offset); // DevicePropertiesSupported (u16 array)
-            offset = SkipPtpArray(data, offset); // CaptureFormats (u16 array)
-            offset = SkipPtpArray(data, offset); // ImageFormats (u16 array)
-            var (manufacturer, o1) = ReadPtpString(data, offset);
-            var (model, o2) = ReadPtpString(data, o1);
-            var (deviceVersion, o3) = ReadPtpString(data, o2);
-            var (serialNumber, _) = ReadPtpString(data, o3);
-            Model = model;
-            SerialNumber = serialNumber;
+            SupportedOperations = info.OperationsSupported;
+            Model = info.Model;
+            SerialNumber = info.SerialNumber;
         }
-        catch { /* malformed device info — not fatal */ }
     }
 
+    /// <summary>Reads one PTP string (u8 character count including the NUL, then UTF-16LE); used for object file names.</summary>
     private static (string Value, int NewOffset) ReadPtpString(byte[] data, int offset)
     {
         if (offset >= data.Length) return ("", offset);
@@ -167,33 +152,6 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
         if (charCount == 0) return ("", offset);
         var str = System.Text.Encoding.Unicode.GetString(data, offset, (charCount - 1) * 2); // exclude null terminator
         return (str, offset + charCount * 2);
-    }
-
-    private static int SkipPtpString(byte[] data, int offset)
-    {
-        if (offset >= data.Length) return offset;
-        int charCount = data[offset];
-        return offset + 1 + charCount * 2;
-    }
-
-    private static int SkipPtpArray(byte[] data, int offset)
-    {
-        if (offset + 4 > data.Length) return offset;
-        uint count = BitConverter.ToUInt32(data, offset);
-        return offset + 4 + (int)count * 2; // u16 elements
-    }
-
-    private static (HashSet<ushort> Values, int NewOffset) ReadPtpUInt16Array(byte[] data, int offset)
-    {
-        var values = new HashSet<ushort>();
-        if (offset + 4 > data.Length) return (values, offset);
-        uint count = BitConverter.ToUInt32(data, offset);
-        offset += 4;
-        for (uint i = 0; i < count && offset + 2 <= data.Length; i++, offset += 2)
-        {
-            values.Add(BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset)));
-        }
-        return (values, offset);
     }
 
     /// <summary>

@@ -46,6 +46,14 @@ A session commits to one transport for its whole life; they are alternatives, no
 using FC.SDK;
 using FC.SDK.Canon;
 
+// Which body is this? The WPD id from EnumerateWpdCameras is the Windows device instance, which on a body with no
+// USB serial (an EOS 6D) is built from the hub and the hub port, so it changes when the cable moves. The body's own
+// serial comes from one GetDeviceInfo, with no session opened and nothing on the camera changed. Read it once per
+// device and remember it: a read can cost another program's live view a frame (see the method's remarks).
+var (wpdId, _) = CanonCamera.EnumerateWpdCameras().First();
+if (await CanonCamera.ReadWpdIdentityAsync(wpdId) is { } body)
+    Console.WriteLine($"{body.Model}, serial {body.SerialNumber}");
+
 // Connect via WPD (Windows, zero-install). Picks the ioctl transport when the body accepts it.
 var (deviceId, _) = CanonCamera.EnumerateWpdCameras().First();
 await using var camera = await CanonCamera.ConnectWpdAutoAsync(deviceId);
