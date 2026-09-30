@@ -595,10 +595,13 @@ public sealed class CanonCamera : IAsyncDisposable
     /// <remarks>
     /// <para>
     /// <b>Mirror lockup alone is not enough, and that is the whole reason this method exists.</b> On a
-    /// 6D in a single-shot drive mode, an armed release simply shoots: a frame arrives in 0.4 s and two
-    /// presses give two frames rather than raise-then-expose. The caller gets an image and believes
-    /// they had lockup, which is the worse of the two failure modes. Lockup engages only in a
-    /// self-timer drive, where the body's own firmware owns raise, settle and expose.
+    /// 6D in a single-shot drive mode, an armed release only RAISES the mirror: no picture comes, the
+    /// body waits for a second press, and it drops the mirror again 30 s later. Measured 2026-09-30
+    /// through TianWen, on a power-cycled body armed at connect with its drive read back as single
+    /// shot: no object in 30 s, twice, where this method delivered 14 frames of 14. An earlier note
+    /// here said the opposite (a frame in 0.4 s, two presses two frames); the likeliest reading is
+    /// that its arm had not taken, since a body can acknowledge a write and keep its setting. Lockup
+    /// exposes in a self-timer drive, where the body's own firmware owns raise, settle and expose.
     /// </para>
     /// <para>
     /// So the settle is the body's timer, not a parameter, and cannot be chosen. 0x9128's second
@@ -1012,24 +1015,29 @@ public sealed class CanonCamera : IAsyncDisposable
             return singleShot;
         }
 
-        // Half press. NOT an autofocus, despite libgphoto2 naming 0x9128's second parameter AF/MF:
+        if (MirrorLockupEnabled == true)
+        {
+            var (_, drive) = await GetDriveModeAsync(ct);
+            if (drive is not (EdsDriveMode.Timer_2sec or EdsDriveMode.Timer_10sec or EdsDriveMode.Timer_10sec_RemoteControl))
+            {
+                _logger.LogWarning(
+                    "Mirror lockup is armed and the drive is {Drive}: on a 6D such a release only raises the mirror, and "
+                    + "no picture comes (the mirror drops again 30 s later). TakePictureWithMirrorLockupAsync is the "
+                    + "capture that exposes with lockup.", drive);
+            }
+        }
+
+        // Half press, full press, let go of both, and let go of whatever was pressed whatever answered after it
+        // (ShutterPresses): a press left held had the body answer DeviceBusy to every write.
+        //
+        // The half press is NOT an autofocus, despite libgphoto2 naming 0x9128's second parameter AF/MF:
         // on a 6D this sequence demonstrably does not focus. Measured with a lens at AF, defocused by
         // a known amount first and judged on the delivered CR2's sharpness, it comes back exactly as
         // soft as a release with no focus command at all, while an explicit 0x9154 recovers focus and
         // scores 1.9x higher. See the 0x9128 section in CLAUDE.md.
-        var err = await _canon.RemoteReleaseOnAsync(0x01, ct);
-        if (err is not EdsError.OK) return err;
-
-        // Full press
-        err = await _canon.RemoteReleaseOnAsync(0x02, ct);
-        if (err is not EdsError.OK) return err;
-
-        // Release shutter
-        err = await _canon.RemoteReleaseOffAsync(0x02, ct);
-        if (err is not EdsError.OK) return err;
-
-        // Release AF
-        return await _canon.RemoteReleaseOffAsync(0x01, ct);
+        return await ShutterPresses.ReleaseAsync(
+            mode => _canon.RemoteReleaseOnAsync(mode, ct),
+            mode => _canon.RemoteReleaseOffAsync(mode, ct));
     }
 
     /// <summary>
@@ -1168,7 +1176,9 @@ public sealed class CanonCamera : IAsyncDisposable
     /// discards remote releases entirely while it is armed. Measured on a 450D across nine sequences
     /// — single release, double release, three self-timer drive modes, and four bulb arrangements —
     /// every one silent, against controls that exposed. A 6D, which has the real
-    /// <see cref="EdsPropertyId.MirrorUpSetting"/> property, exposes normally instead. NINA draws the
+    /// <see cref="EdsPropertyId.MirrorUpSetting"/> property, exposes with lockup in a self-timer drive
+    /// (<see cref="TakePictureWithMirrorLockupAsync"/>); in a single-shot drive its armed release only
+    /// raises the mirror, which <see cref="TakePictureAsync"/> warns of. NINA draws the
     /// same line and refuses with the same advice ("turn MLU off under the camera's Custom Function
     /// menu"), which is independent corroboration from an EDSDK-based client.
     /// </para>
