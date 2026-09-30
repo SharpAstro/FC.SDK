@@ -203,11 +203,15 @@ allowed-value list got that one wrong.
 drive off the body's **own allowed list**, release, restore. Verified with `FC.SDK.Diagnostics
 mlushot`: 21.9 MB CR2 in ~2.5 s with the lockup marker present.
 
-- **Mirror lockup alone is silently ignored.** In a single-shot drive a 6D just shoots, so the caller
-  gets a frame and believes they had lockup. Lockup engages only in a self-timer drive, where the
-  body's firmware owns raise → settle → expose. The settle is therefore whatever the body offers and
-  cannot be chosen; `0x9128`'s second parameter was the standing hope for an arbitrary delay and turned
-  out to do nothing at all here.
+- **Mirror lockup armed in a single-shot drive gets no picture at all.** A 6D's armed release only
+  RAISES the mirror; the body waits for a second press and drops the mirror again 30 s later (measured
+  2026-09-30 through TianWen: a power-cycled body armed at connect, its drive read back as single shot,
+  announced no object in 30 s, twice, where this helper delivered 14 frames of 14). This note used to
+  say the opposite, that the body "just shoots"; the likeliest reading is that the arm had not taken,
+  since a body can acknowledge a write and keep its setting. `TakePictureAsync` warns when it is asked
+  to release in that state. Lockup exposes in a self-timer drive, where the body's firmware owns raise
+  → settle → expose. The settle is therefore whatever the body offers and cannot be chosen; `0x9128`'s
+  second parameter was the standing hope for an arbitrary delay and turned out to do nothing at all here.
 - **The restore has to happen after the caller fetches the image**, and this is the non-obvious part.
   Restoring immediately failed on hardware for *both* settings, while the identical write seconds later
   succeeded first time. `TakePictureAsync` returns when the release finishes, which is before the image
@@ -219,6 +223,22 @@ mlushot`: 21.9 MB CR2 in ~2.5 s with the lockup marker present.
   reported `0x15` and `0x17`; the latter carries every bit of the former, and an equality check called
   it absent. That also caps what the marker proves: it earns its meaning from having once been
   corroborated by an audible mirror and a viewfinder black for a whole countdown, not from the number.
+
+## A press left held keeps the body busy, and closing the session does not let go of it
+
+Every press `0x9128` makes is let go of with `0x9129`, whatever answered after it (`ShutterPresses`, one
+rule for `TakePictureAsync` and `BulbStartAsync`). Both used to return early on an error with the half
+press still held: a bulb start refused with the mode dial off B (`NotSupported`) and a release whose
+transport failed mid-press each left a 6D answering `DeviceBusy` to every write, across reconnects,
+until a power cycle. Measured 2026-09-30: an ISO write refused busy, one `ReleaseShutterAsync`, the
+same write taken. Letting go with nothing held is answered OK, so a caller that opens a session on a
+body an earlier session may have left pressed can simply let go first.
+
+Two more facts from the same bench, a 6D over WPD: a body set to RAW+JPEG announces two objects a shot
+(the raw first, then the JPEG), and a host-destination frame of either kind is held until
+`TransferCompleteAsync`, so a caller has to release every handle `ObjectAdded` hands it, not only the one
+it downloads (eight unreleased JPEGs stopped the body releasing); and `GetObjectFileNameAsync`
+(`0x9103`) answers `InternalError` there, so an object's kind has to be read off its bytes.
 
 ## Canon PTP opcodes reference
 
