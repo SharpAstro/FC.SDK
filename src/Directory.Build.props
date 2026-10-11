@@ -48,5 +48,14 @@
     <CreateHardLinksForCopyAdditionalFilesIfPossible>true</CreateHardLinksForCopyAdditionalFilesIfPossible>
     <CreateHardLinksForPublishFilesIfPossible>true</CreateHardLinksForPublishFilesIfPossible>
   </PropertyGroup>
+  <PropertyGroup>
+    <!-- Ship the /// comments in the package so consumers get IntelliSense. Keyed on the name
+         rather than IsPackable, which test projects set in their own csproj, after this file is
+         read. CS1591 (public member without a comment) and CS1573 (a parameter without a
+         <param> when its siblings have one) are silenced: the point is to ship the docs that
+         exist, not to demand them everywhere. Broken crefs and paramrefs still warn. -->
+    <GenerateDocumentationFile Condition="!$(MSBuildProjectName.EndsWith('.Tests'))">true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+  </PropertyGroup>
 
 </Project>
