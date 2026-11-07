@@ -156,7 +156,9 @@ guessing codes from EDSDK property IDs — which `CLAUDE.md` forbids for good re
 | Gap | Evidence / note |
 |---|---|
 | Movie recording | `Record` (0x510) is in `EdsPropertyId.cs:64`, unmapped. No start/stop. See "Not gaps" below for why this is *not* a live-video gap |
-| Hotplug notification | `EnumerateUsbCameras` / `EnumerateWpdCameras` are polls; EDSDK has `EdsSetCameraAddedHandler` |
+| Hotplug notification | `EnumerateUsbCameras` / `EnumerateWpdCameras` are polls; EDSDK has `EdsSetCameraAddedHandler`. Losing a body *mid-session* is covered: the event pump raises `ConnectionLost` when the transport fails (measured on an EOS R6 over WPD raw ioctl only) |
+| ~~Image quality~~ | **DONE**: `GetImageFormatAsync` decodes the `ImageFormat` structure (0xD120); the uint32 accessor only ever gave the file count. Read-only — writing it is unmeasured |
+| ~~Battery on EOS bodies~~ | **DONE**: `BatteryLevelPercent` falls back to `BatteryInfoEx` (0xD21C) when 0x5001 is refused, which every EOS does |
 | Direct transfer | `Enter`/`ExitDirectTransfer` status commands absent |
 | `CanonGetDeviceInfoEx` | 0x9108, declared (`PtpOperationCode.cs:28`), zero uses |
 | `0x9128` second parameter | We send one of two. libgphoto2 documents p1 = half/full/half+full press and **p2 = 0 AF / 1 MF** — so it is *not* the mirror-settle control it was hoped to be, but `p2=1` would give a release that skips autofocus, which is what a manual lens or a telescope needs. **p1 is measured, p2 is not** — see below |
