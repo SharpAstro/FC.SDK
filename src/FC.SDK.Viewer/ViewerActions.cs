@@ -134,7 +134,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 
     // --- Discovery and connection ---
 
-    public void Scan() => Enqueue("Scan for cameras", _ =>
+    public void Scan() => Enqueue("Scan for cameras", async ct =>
     {
         state.Devices.Clear();
 
@@ -162,15 +162,34 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             _logger.LogDebug("USB enumeration unavailable: {Message}", ex.Message);
         }
 
-        // The camera's own AP always answers on this address; offer it unconditionally since there
-        // is nothing to enumerate over WiFi until we connect.
-        state.Devices.Add(new DiscoveredCamera(TransportKind.WiFi, "192.168.0.1", "192.168.0.1 (camera AP)"));
+        // A body on a home network has whatever address DHCP gave it: look for it over SSDP, then offer
+        // the last host that worked. The camera's own AP always answers on 192.168.0.1.
+        var wifiHosts = new List<(string Host, string Label)>();
+        try
+        {
+            foreach (var (host, description) in await WifiDiscovery.FindCanonAsync(TimeSpan.FromSeconds(3), _logger, ct))
+                wifiHosts.Add((host, $"{host} ({description})"));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("SSDP discovery failed: {Message}", ex.Message);
+        }
+        if (LastWifiHost() is { } lastHost)
+            wifiHosts.Add((lastHost, $"{lastHost} (last connected)"));
+        wifiHosts.Add(("192.168.0.1", "192.168.0.1 (camera AP)"));
+
+        foreach (var (host, label) in wifiHosts.DistinctBy(h => h.Host))
+            state.Devices.Add(new DiscoveredCamera(TransportKind.WiFi, host, label));
 
         if (state.Devices.Count > 0 && state.SelectedDeviceIndex < 0) state.SelectedDeviceIndex = 0;
         state.StatusMessage = $"Found {state.Devices.Count} candidate connection(s).";
         _logger.LogInformation("Scan complete: {Count} candidates", state.Devices.Count);
-        return Task.CompletedTask;
     });
+
+    private static string LastWifiHostPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FC.SDK", "viewer-wifi-host.txt");
+
+    private static string? LastWifiHost() =>
+        File.Exists(LastWifiHostPath) && File.ReadAllText(LastWifiHostPath).Trim() is { Length: > 0 } host ? host : null;
 
     public void Connect() => Enqueue("Connect", async ct =>
     {
@@ -204,6 +223,11 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 
         await camera.ConnectTransportAsync(ct);
 
+        if (device.Transport is TransportKind.WiFi)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LastWifiHostPath)!);
+            File.WriteAllText(LastWifiHostPath, device.Identifier);
+        }
     });
 
     /// <summary>
