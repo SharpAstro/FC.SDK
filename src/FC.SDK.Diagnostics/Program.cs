@@ -1137,7 +1137,7 @@ try
             // not, whatever the timings say.
             var seen = new ConcurrentQueue<string>();
             void OnProp(object? _, CanonPropertyChangedEventArgs e)
-            { seen.Enqueue($"prop {(uint)e.PropertyId:X4}=0x{e.Value:X}"); }
+            { seen.Enqueue($"prop {e.PtpCode:X4}=0x{e.Value:X}"); }
             void OnState(object? _, CanonStateChangedEventArgs e)
             { seen.Enqueue($"{e.EventType}=0x{e.Param:X}"); }
             camera.PropertyChanged += OnProp;
