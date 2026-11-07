@@ -120,6 +120,43 @@ public class PtpIpTransportTests
         return duplicate.IsCompletedSuccessfully;
     }
 
+    /// <summary>
+    /// An R6 once stopped answering mid live view and the viewer waited forever. A silent reply now
+    /// fails the call as a lost link, and the link stays refused, since a late reply would answer the
+    /// wrong command.
+    /// </summary>
+    [Fact]
+    public async Task ACameraThatStopsAnsweringFailsTheCallInsteadOfHangingIt()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var silent = new TaskCompletionSource();
+        var camera = HandshakeThenStaySilentAsync(listener, silent.Task, timeout.Token);
+
+        await using (var transport = new PtpIpTransport("127.0.0.1", port, "test") { ReplyIdleTimeout = TimeSpan.FromMilliseconds(300) })
+        {
+            await transport.ConnectAsync(timeout.Token);
+            var session = new PtpSession(transport);
+
+            await Should.ThrowAsync<IOException>(() => session.SendCommandAsync(PtpOperationCode.OpenSession, timeout.Token, 1));
+            await Should.ThrowAsync<IOException>(() => session.SendCommandAsync(PtpOperationCode.OpenSession, timeout.Token, 1));
+        }
+
+        silent.SetResult();
+        await camera;
+        listener.Stop();
+    }
+
+    private static async Task HandshakeThenStaySilentAsync(TcpListener listener, Task release, CancellationToken ct)
+    {
+        var (command, events) = await AcceptHandshakeAsync(listener, ct);
+        using var _ = command;
+        using var __ = events;
+        await release; // hold both connections open, answer nothing
+    }
+
     /// <summary>The camera's side of the four-way handshake. The caller owns both connections.</summary>
     private static async Task<(TcpClient Command, TcpClient Events)> AcceptHandshakeAsync(TcpListener listener, CancellationToken ct)
     {
