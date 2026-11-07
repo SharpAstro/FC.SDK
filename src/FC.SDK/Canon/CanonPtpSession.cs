@@ -37,6 +37,13 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
     /// </summary>
     internal byte? BatteryLevelPercent { get; private set; }
 
+    /// <summary>
+    /// Remaining capacity from <c>BatteryInfoEx</c> (0xD21C) as last announced on the event stream; null if the body
+    /// has not announced it. See <see cref="CanonBattery"/>.
+    /// </summary>
+    internal byte? BatteryCapacityPercent =>
+        Properties.GetRawValue(CanonBattery.InfoExCode) is { } value ? CanonBattery.PercentFromInfoEx(value) : null;
+
     internal string? SerialNumber { get; private set; }
     internal string? Model { get; private set; }
 
