@@ -1,9 +1,11 @@
+using System.Buffers.Binary;
+using FC.SDK.Protocol;
 using LibUsbDotNet;
 using LibUsbDotNet.Main;
 
 namespace FC.SDK.Transport;
 
-internal sealed class UsbPtpTransport : IPtpTransport
+internal sealed class UsbPtpTransport : IPtpTransport, IPtpDataInTransport
 {
     public const ushort CanonVendorId = 0x04A9;
     private const byte PtpInterfaceClass = 0x06;
@@ -77,6 +79,60 @@ internal sealed class UsbPtpTransport : IPtpTransport
 
         buf.AsSpan(0, bytesRead).CopyTo(buffer.Span);
         return ValueTask.FromResult(bytesRead);
+    }
+
+    /// <summary>
+    /// A data container's own length word says how big it is, so keep reading until it is complete,
+    /// however many bulk transfers that takes, then read the response. One fixed-size read cut a
+    /// full-size image off at PtpSession's 512 KB receive buffer.
+    /// </summary>
+    public ValueTask<(byte[] Data, int ResponseLength)> ReceiveDataAsync(Memory<byte> responseBuffer, CancellationToken ct = default)
+    {
+        if (_bulkIn is null) throw new InvalidOperationException("Transport not connected.");
+
+        var first = new byte[1 << 20]; // a multiple of every bulk max packet size
+        int read = ReadBulk(first, 0, first.Length);
+        if (read < PtpPacket.HeaderSize)
+            throw new IOException($"USB reply began with {read} bytes, short of a PTP header.");
+
+        var type = (PtpContainerType)BinaryPrimitives.ReadUInt16LittleEndian(first.AsSpan(4));
+        if (type is PtpContainerType.Response) // refused before any data
+        {
+            first.AsSpan(0, read).CopyTo(responseBuffer.Span);
+            return ValueTask.FromResult<(byte[], int)>(([], read));
+        }
+        if (type is not PtpContainerType.Data)
+            throw new IOException($"Expected a PTP data or response container over USB, got {type}.");
+
+        int total = (int)BinaryPrimitives.ReadUInt32LittleEndian(first);
+        if (total < PtpPacket.HeaderSize)
+            throw new IOException($"USB data container declares an impossible length of {total}.");
+        var data = new byte[total - PtpPacket.HeaderSize];
+        int have = Math.Min(read, total) - PtpPacket.HeaderSize;
+        first.AsSpan(PtpPacket.HeaderSize, have).CopyTo(data);
+        while (have < data.Length)
+        {
+            int n = ReadBulk(data, have, data.Length - have);
+            if (n == 0) throw new IOException($"USB data phase stopped at {have} of {data.Length} bytes.");
+            have += n;
+        }
+
+        // A data phase that fills its last packet exactly is closed by a zero-length packet.
+        var response = new byte[512];
+        int responseLength = ReadBulk(response, 0, response.Length);
+        if (responseLength == 0) responseLength = ReadBulk(response, 0, response.Length);
+        if (responseLength > responseBuffer.Length)
+            throw new IOException($"USB response of {responseLength} bytes does not fit a response container.");
+        response.AsSpan(0, responseLength).CopyTo(responseBuffer.Span);
+        return ValueTask.FromResult((data, responseLength));
+    }
+
+    private int ReadBulk(byte[] buffer, int offset, int count)
+    {
+        var errorCode = _bulkIn!.Read(buffer, offset, count, 5000, out int bytesRead);
+        if (errorCode != ErrorCode.None && errorCode != ErrorCode.IoTimedOut)
+            throw new IOException($"USB read failed: {errorCode}");
+        return bytesRead;
     }
 
     public ValueTask<int> ReceiveEventAsync(Memory<byte> buffer, CancellationToken ct = default)
