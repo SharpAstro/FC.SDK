@@ -1704,7 +1704,7 @@ public sealed class CanonCamera : IAsyncDisposable
     private void OnCanonEvent(CanonPtpEvent evt)
     {
         if (evt.Type is CanonEventType.PropertyChanged)
-            PropertyChanged?.Invoke(this, new CanonPropertyChangedEventArgs((EdsPropertyId)evt.Param1, evt.Param2));
+            PropertyChanged?.Invoke(this, new CanonPropertyChangedEventArgs((ushort)evt.Param1, evt.Param2));
         else if (AnnouncesNewImage(evt.Type))
         {
             if (evt.Type is CanonEventType.RequestObjectTransfer or CanonEventType.RequestObjectTransfer64)
