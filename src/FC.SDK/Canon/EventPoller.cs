@@ -6,10 +6,21 @@ namespace FC.SDK.Canon;
 /// heartbeat — every consumer sees the same stream regardless of who polled.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Polling is not optional on EOS bodies: an undrained event queue makes the camera answer
 /// DeviceBusy to property writes, and property reads are served from the cache the stream fills.
+/// </para>
+/// <para>
+/// A transport failure ends the loop and is reported once through <paramref name="lost"/>. It used to
+/// be swallowed with every other error, so pulling the cable left a session that looked alive: no
+/// event, no exception, and property reads still answering OK out of the cache. Measured on an EOS R6
+/// and an EOS 6D over WPD (raw ioctl): the first real transaction after the pull throws
+/// <see cref="IOException"/> "WPD ioctl failed with Win32 error 995", every later one too, and the body
+/// leaves <c>EnumerateWpdCameras</c> within 5 s. No false alarm on the 6D over 90 s of live view
+/// (1254 frames) with the pump running. Other transports have not been unplugged under this.
+/// </para>
 /// </remarks>
-internal sealed class EventPoller(CanonPtpSession session, TimeSpan interval) : IAsyncDisposable
+internal sealed class EventPoller(CanonPtpSession session, TimeSpan interval, Action<Exception>? lost = null) : IAsyncDisposable
 {
     /// <summary>
     /// GetEvent round trips per tick. Deliberately small: during live view the camera re-announces
@@ -40,9 +51,15 @@ internal sealed class EventPoller(CanonPtpSession session, TimeSpan interval) : 
             {
                 break;
             }
+            catch (IOException ex)
+            {
+                // The link itself failed: polling again only repeats the same error. Stop, and say so.
+                lost?.Invoke(ex);
+                break;
+            }
             catch
             {
-                // Swallow transport errors during polling; camera may be busy
+                // Anything else is not a lost link (a busy or slow camera): keep polling.
             }
 
             await Task.Delay(interval, _cts.Token)

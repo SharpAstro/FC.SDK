@@ -50,6 +50,13 @@ public sealed class CanonCamera : IAsyncDisposable
     public event EventHandler<CanonStateChangedEventArgs>? StateChanged;
 
     /// <summary>
+    /// The background event pump (<see cref="StartEventPolling"/>) hit a transport failure and stopped — the body has
+    /// gone. Raised at most once per pump, from the pump's thread. Without it the only sign of a pulled cable is the
+    /// next command failing, because property reads keep answering out of the cache.
+    /// </summary>
+    public event EventHandler<CanonConnectionLostEventArgs>? ConnectionLost;
+
+    /// <summary>
     /// A stable device identifier. USB: serial number or device path. WiFi: responder GUID from PTP/IP handshake.
     /// Available after <see cref="OpenSessionAsync"/>.
     /// </summary>
@@ -1684,7 +1691,7 @@ public sealed class CanonCamera : IAsyncDisposable
     {
         if (_poller is not null) return;
 
-        _poller = new EventPoller(_canon, interval ?? DefaultPollInterval);
+        _poller = new EventPoller(_canon, interval ?? DefaultPollInterval, OnPollerLost);
         _poller.Start();
     }
 
@@ -1723,6 +1730,12 @@ public sealed class CanonCamera : IAsyncDisposable
     internal static bool AnnouncesNewImage(CanonEventType type) => type is
         CanonEventType.ObjectAddedEx or CanonEventType.ObjectAddedEx64
         or CanonEventType.RequestObjectTransfer or CanonEventType.RequestObjectTransfer64;
+
+    private void OnPollerLost(Exception error)
+    {
+        _logger.LogWarning(error, "Event polling stopped: the transport failed, the camera is gone");
+        ConnectionLost?.Invoke(this, new CanonConnectionLostEventArgs(error));
+    }
 
     private void OnCanonEvent(CanonPtpEvent evt)
     {
