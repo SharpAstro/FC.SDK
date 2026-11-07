@@ -21,6 +21,7 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
     private TcpClient? _eventClient;
     private NetworkStream? _commandStream;
     private NetworkStream? _eventStream;
+    private bool _connected;
 
     // A PTP command is held until the next call says whether a data-out phase follows: PTP/IP
     // announces that in the request itself, while PtpSession sends the data container separately.
@@ -51,6 +52,11 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
 
     public async Task ConnectAsync(CancellationToken ct = default)
     {
+        // Idempotent, like both WPD transports: the viewer connects the transport, then
+        // CanonCamera.OpenSessionAsync connects it again. A second handshake opened a second command
+        // connection the body never answered, and it dropped both a minute later.
+        if (_connected) return;
+
         // Step 1: Command connection
         _commandClient = new TcpClient();
         _commandClient.ReceiveTimeout = HandshakeTimeoutMs;
@@ -99,6 +105,7 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         // Reset timeouts for normal operation
         _commandClient.ReceiveTimeout = 10000;
         _commandClient.SendTimeout = 10000;
+        _connected = true;
     }
 
     public async ValueTask SendAsync(ReadOnlyMemory<byte> packet, CancellationToken ct = default)

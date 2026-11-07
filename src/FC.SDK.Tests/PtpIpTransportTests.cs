@@ -74,6 +74,52 @@ public class PtpIpTransportTests
         await commandStream.WriteAsync(OkResponse(txId), ct);
     }
 
+    /// <summary>
+    /// The viewer connected the transport, then <c>OpenSessionAsync</c> connected it again, and the
+    /// second handshake opened a second command connection the camera never answered. A real R6
+    /// dropped both a minute later.
+    /// </summary>
+    [Fact]
+    public async Task ASecondConnectReusesTheLiveConnectionsAndOpenSessionGoesThrough()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var camera = AnswerOpenSessionAsync(listener, timeout.Token);
+
+        await using (var transport = new PtpIpTransport("127.0.0.1", port, "test"))
+        {
+            await transport.ConnectAsync(timeout.Token);
+            await transport.ConnectAsync(timeout.Token);
+
+            var response = await new PtpSession(transport).SendCommandAsync(PtpOperationCode.OpenSession, timeout.Token, 1);
+            response.Code.ShouldBe(PtpResponseCode.OK);
+        }
+
+        (await camera).ShouldBeFalse("a second command connection was opened");
+        listener.Stop();
+    }
+
+    /// <summary>Plays a camera: the handshake, then one OpenSession. Answers whether anything connected again.</summary>
+    private static async Task<bool> AnswerOpenSessionAsync(TcpListener listener, CancellationToken ct)
+    {
+        var (command, events) = await AcceptHandshakeAsync(listener, ct);
+        using var _ = command;
+        using var __ = events;
+        var commandStream = command.GetStream();
+
+        // Anything that connects now is the duplicate handshake this test exists to catch.
+        var duplicate = listener.AcceptTcpClientAsync(ct).AsTask();
+
+        var request = await ReadPacketAsync(commandStream, ct);
+        request.Type.ShouldBe(PtpIpPacketType.OperationRequest);
+        BinaryPrimitives.ReadUInt16LittleEndian(request.Body.AsSpan(4)).ShouldBe((ushort)PtpOperationCode.OpenSession);
+        await commandStream.WriteAsync(OkResponse(BinaryPrimitives.ReadUInt32LittleEndian(request.Body.AsSpan(6))), ct);
+
+        return duplicate.IsCompletedSuccessfully;
+    }
+
     /// <summary>The camera's side of the four-way handshake. The caller owns both connections.</summary>
     private static async Task<(TcpClient Command, TcpClient Events)> AcceptHandshakeAsync(TcpListener listener, CancellationToken ct)
     {
