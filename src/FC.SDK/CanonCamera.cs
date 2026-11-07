@@ -1001,6 +1001,24 @@ public sealed class CanonCamera : IAsyncDisposable
         return CanonImageFormat.TryDecode(bytes, out var images) ? (EdsError.OK, images) : (EdsError.PropertiesMismatch, []);
     }
 
+    /// <summary>libgphoto2 <c>PTP_DPC_CANON_EOS_ShutterCounter</c>; EDSDK has no property for it.</summary>
+    private const ushort ShutterCounterCode = 0xD1AC;
+
+    /// <summary>
+    /// Shutter actuations, from 0xD1AC. Read-only. A 6D reports it only in its session-open dump: it pushes
+    /// no update after a release and a later request brings nothing, so this is the count when the
+    /// session opened. A body that never reports it (an EOS R6, even when asked) answers
+    /// <see cref="EdsError.DevicePropNotSupported"/>.
+    /// </summary>
+    public async Task<(EdsError Error, uint? Count)> GetShutterCountAsync(CancellationToken ct = default)
+    {
+        await _canon.RequestDevicePropValueAsync(ShutterCounterCode, ct);
+        await _canon.DrainEventsAsync(ct);
+        return _canon.Properties.TryGetValue(ShutterCounterCode, out uint count)
+            ? (EdsError.OK, count)
+            : (EdsError.DevicePropNotSupported, null);
+    }
+
     /// <summary>The attached lens, as the body names it. Read-only.</summary>
     public Task<(EdsError Error, string? Value)> GetLensNameAsync(CancellationToken ct = default) =>
         GetPropertyStringAsync(EdsPropertyId.LensName, ct: ct);
