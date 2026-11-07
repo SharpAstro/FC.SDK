@@ -145,6 +145,23 @@ internal sealed class PtpSession(IPtpTransport transport) : IAsyncDisposable
                 Pool.Return(cmdBuf);
             }
 
+            // A transport that knows the data phase's size receives it whole, past ReceiveBufferSize.
+            if (transport is IPtpDataInTransport dataIn)
+            {
+                var respBuf = Pool.Rent(MaxCommandSize);
+                try
+                {
+                    var (data, respLen) = await dataIn.ReceiveDataAsync(respBuf.AsMemory(0, MaxCommandSize), ct);
+                    if (respLen < PtpPacket.HeaderSize)
+                        return (new PtpResponse { Code = PtpResponseCode.GeneralError }, []);
+                    return (ParseResponse(respBuf.AsSpan(0, respLen)), data);
+                }
+                finally
+                {
+                    Pool.Return(respBuf);
+                }
+            }
+
             // Receive data container(s) then response
             var recvBuf = Pool.Rent(ReceiveBufferSize);
             try
