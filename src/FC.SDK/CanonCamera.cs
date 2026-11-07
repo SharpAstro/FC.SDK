@@ -960,6 +960,23 @@ public sealed class CanonCamera : IAsyncDisposable
             FocusMode: (EdsAFMode)mode));
     }
 
+    /// <summary>
+    /// The files one release writes - type, size and compression of each - decoded from <c>ImageFormat</c> (0xD120).
+    /// See <see cref="CanonImageFormat"/> for the layout.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="GetPropertyAsync"/> on <see cref="EdsPropertyId.ImageQuality"/> keeps answering the first word, which
+    /// is only the number of files. An EOS R6 with a menu open on its screen answers
+    /// <see cref="EdsError.DevicePropNotSupported"/> here until the menu is closed: a passing state, not a missing
+    /// property. Bytes that do not follow the layout answer <see cref="EdsError.PropertiesMismatch"/>.
+    /// </remarks>
+    public async Task<(EdsError Error, IReadOnlyList<CanonImageFormatEntry> Images)> GetImageFormatAsync(CancellationToken ct = default)
+    {
+        var (err, bytes) = await GetPropertyBytesAsync(EdsPropertyId.ImageQuality, ct: ct);
+        if (err is not EdsError.OK) return (err, []);
+        return CanonImageFormat.TryDecode(bytes, out var images) ? (EdsError.OK, images) : (EdsError.PropertiesMismatch, []);
+    }
+
     /// <summary>The attached lens, as the body names it. Read-only.</summary>
     public Task<(EdsError Error, string? Value)> GetLensNameAsync(CancellationToken ct = default) =>
         GetPropertyStringAsync(EdsPropertyId.LensName, ct: ct);
