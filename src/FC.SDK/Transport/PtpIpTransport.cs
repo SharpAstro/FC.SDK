@@ -23,6 +23,18 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
     private NetworkStream? _eventStream;
     private bool _connected;
 
+    /// <summary>
+    /// How long a reply may go silent before the link counts as lost. Longer than the R6's longest
+    /// timed exposure (30 s) plus its processing, since a release is answered only after it.
+    /// </summary>
+    internal TimeSpan ReplyIdleTimeout { get; init; } = TimeSpan.FromSeconds(60);
+
+    // Replies are read through this so a camera that stops answering fails the call instead of
+    // hanging it; it happened on an R6 mid live view. After that the stream is out of step with the
+    // camera (a late reply would answer the wrong command), so the link stays refused.
+    private IdleTimeoutStream? _replies;
+    private IOException? _lost;
+
     // A PTP command is held until the next call says whether a data-out phase follows: PTP/IP
     // announces that in the request itself, while PtpSession sends the data container separately.
     private byte[]? _pendingCommand;
@@ -111,6 +123,7 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
     public async ValueTask SendAsync(ReadOnlyMemory<byte> packet, CancellationToken ct = default)
     {
         if (_commandStream is null) throw new InvalidOperationException("Transport not connected.");
+        if (_lost is not null) throw _lost;
 
         var containerType = (PtpContainerType)BinaryPrimitives.ReadUInt16LittleEndian(packet.Span[4..]);
         switch (containerType)
@@ -134,17 +147,40 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
     {
         if (_commandStream is null) throw new InvalidOperationException("Transport not connected.");
 
+        if (_lost is not null) throw _lost;
+
         await FlushPendingCommandAsync(dataOut: false, ct);
-        return await PtpIpFraming.ReadResponseAsync(_commandStream, buffer, ct);
+        try
+        {
+            return await PtpIpFraming.ReadResponseAsync(Replies, buffer, ct);
+        }
+        catch (TimeoutException ex)
+        {
+            throw Lose(ex);
+        }
     }
 
     public async ValueTask<(byte[] Data, int ResponseLength)> ReceiveDataAsync(Memory<byte> responseBuffer, CancellationToken ct = default)
     {
         if (_commandStream is null) throw new InvalidOperationException("Transport not connected.");
 
+        if (_lost is not null) throw _lost;
+
         await FlushPendingCommandAsync(dataOut: false, ct);
-        return await PtpIpFraming.ReadDataAndResponseAsync(_commandStream, responseBuffer, ct);
+        try
+        {
+            return await PtpIpFraming.ReadDataAndResponseAsync(Replies, responseBuffer, ct);
+        }
+        catch (TimeoutException ex)
+        {
+            throw Lose(ex);
+        }
     }
+
+    private IdleTimeoutStream Replies => _replies ??= new IdleTimeoutStream(_commandStream!, ReplyIdleTimeout);
+
+    private IOException Lose(TimeoutException cause) =>
+        _lost = new IOException($"PTP/IP {_host}: the camera stopped answering ({cause.Message}); reconnect.", cause);
 
     private async ValueTask FlushPendingCommandAsync(bool dataOut, CancellationToken ct)
     {
