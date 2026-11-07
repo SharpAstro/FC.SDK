@@ -6,7 +6,7 @@ using FC.SDK.Protocol;
 
 namespace FC.SDK.Transport;
 
-internal sealed class PtpIpTransport : IPtpTransport
+internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
 {
     public const int PtpIpPort = 15740;
     private const int PtpIpHeaderSize = 8;
@@ -21,6 +21,10 @@ internal sealed class PtpIpTransport : IPtpTransport
     private TcpClient? _eventClient;
     private NetworkStream? _commandStream;
     private NetworkStream? _eventStream;
+
+    // A PTP command is held until the next call says whether a data-out phase follows: PTP/IP
+    // announces that in the request itself, while PtpSession sends the data container separately.
+    private byte[]? _pendingCommand;
 
     public bool IsConnected => _commandClient?.Connected is true;
 
@@ -101,51 +105,45 @@ internal sealed class PtpIpTransport : IPtpTransport
     {
         if (_commandStream is null) throw new InvalidOperationException("Transport not connected.");
 
-        // Wrap PTP container in PTP/IP Operation_Request (type 0x06)
-        // PTP/IP header (8) + DataPhaseInfo (4) + PTP container minus PTP header
-        // The PTP/IP operation request embeds: DataPhaseInfo, OpCode, TxId, Params
-        // For simplicity, wrap the raw PTP container inside PTP/IP framing
-        int ptpIpLen = PtpIpHeaderSize + 4 + packet.Length; // +4 for DataPhaseInfo
-        var wrapped = new byte[ptpIpLen];
-        BinaryPrimitives.WriteUInt32LittleEndian(wrapped, (uint)ptpIpLen);
-        BinaryPrimitives.WriteUInt32LittleEndian(wrapped.AsSpan(4), (uint)PtpIpPacketType.OperationRequest);
+        var containerType = (PtpContainerType)BinaryPrimitives.ReadUInt16LittleEndian(packet.Span[4..]);
+        switch (containerType)
+        {
+            case PtpContainerType.Command:
+                await FlushPendingCommandAsync(dataOut: false, ct);
+                _pendingCommand = packet.ToArray();
+                break;
 
-        // DataPhaseInfo: 1=no data, 2=sending data
-        var ptpType = (PtpContainerType)BinaryPrimitives.ReadUInt16LittleEndian(packet.Span[4..]);
-        uint dataPhaseInfo = ptpType is PtpContainerType.Data ? 2u : 1u;
-        BinaryPrimitives.WriteUInt32LittleEndian(wrapped.AsSpan(8), dataPhaseInfo);
+            case PtpContainerType.Data:
+                await FlushPendingCommandAsync(dataOut: true, ct);
+                await _commandStream.WriteAsync(PtpIpFraming.DataOutPackets(packet.Span), ct);
+                break;
 
-        // Copy PTP payload (skip PTP length+type fields, keep code+txid+params)
-        packet.Span[6..].CopyTo(wrapped.AsSpan(12));
-
-        await _commandStream.WriteAsync(wrapped, ct);
+            default:
+                throw new ArgumentException($"Cannot send a PTP {containerType} container.", nameof(packet));
+        }
     }
 
     public async ValueTask<int> ReceiveAsync(Memory<byte> buffer, CancellationToken ct = default)
     {
         if (_commandStream is null) throw new InvalidOperationException("Transport not connected.");
 
-        var ptpIpBuf = new byte[buffer.Length + PtpIpHeaderSize];
-        int read = await ReadPtpIpPacketAsync(_commandStream, ptpIpBuf, ct);
-        if (read < PtpIpHeaderSize) return 0;
+        await FlushPendingCommandAsync(dataOut: false, ct);
+        return await PtpIpFraming.ReadResponseAsync(_commandStream, buffer, ct);
+    }
 
-        var packetType = (PtpIpPacketType)BinaryPrimitives.ReadUInt32LittleEndian(ptpIpBuf.AsSpan(4));
+    public async ValueTask<(byte[] Data, int ResponseLength)> ReceiveDataAsync(Memory<byte> responseBuffer, CancellationToken ct = default)
+    {
+        if (_commandStream is null) throw new InvalidOperationException("Transport not connected.");
 
-        // Unwrap PTP/IP to standard PTP container
-        int payloadStart = packetType switch
-        {
-            PtpIpPacketType.OperationResponse => PtpIpHeaderSize,
-            PtpIpPacketType.StartDataPacket => PtpIpHeaderSize,
-            PtpIpPacketType.EndDataPacket => PtpIpHeaderSize,
-            PtpIpPacketType.DataPacket => PtpIpHeaderSize,
-            _ => PtpIpHeaderSize,
-        };
+        await FlushPendingCommandAsync(dataOut: false, ct);
+        return await PtpIpFraming.ReadDataAndResponseAsync(_commandStream, responseBuffer, ct);
+    }
 
-        int payloadLen = read - payloadStart;
-        if (payloadLen > 0)
-            ptpIpBuf.AsSpan(payloadStart, payloadLen).CopyTo(buffer.Span);
-
-        return payloadLen;
+    private async ValueTask FlushPendingCommandAsync(bool dataOut, CancellationToken ct)
+    {
+        if (_pendingCommand is not { } command) return;
+        _pendingCommand = null;
+        await _commandStream!.WriteAsync(PtpIpFraming.OperationRequest(command, dataOut), ct);
     }
 
     public async ValueTask<int> ReceiveEventAsync(Memory<byte> buffer, CancellationToken ct = default)
