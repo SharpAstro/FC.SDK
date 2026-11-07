@@ -991,6 +991,20 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         state.StatusMessage = $"Live view stopped ({err}).";
     });
 
+    private const int WifiMenuHintAfter = 30;
+
+    /// <summary>
+    /// An R6 over WiFi answers every frame request "not ready" while its "Wi-Fi on" screen is showing
+    /// (measured 2026-11-07), and nothing on the wire says that is why.
+    /// </summary>
+    private const string WifiMenuHint =
+        "No live-view frames: over WiFi an R6 sends none while its 'Wi-Fi on' screen is showing — leave that screen on the camera.";
+
+    private bool OverWifi => state.ConnectedTo?.Transport is TransportKind.WiFi;
+
+    private static string DescribeEmptyFrame(EdsError err) =>
+        err is EdsError.OK ? "empty (camera not ready)" : err.ToString();
+
     private async Task StopLiveViewLoopAsync()
     {
         state.LiveViewActive = false;
@@ -1054,9 +1068,17 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                     consecutiveFailures++;
                     if (err is EdsError.WaitTimeoutError) consecutiveTimeouts++;
 
-                    // Objects-not-ready is normal between frames; only shout when it persists.
+                    // Objects-not-ready is normal between frames; only shout when it persists. It comes
+                    // back as OK with no bytes, which this log used to print as "frame OK".
                     if (consecutiveFailures is 1 or 10 or 50)
-                        _logger.LogWarning("Live view frame {Error} ({Count} consecutive)", err, consecutiveFailures);
+                        _logger.LogWarning("Live view frame {Result} ({Count} consecutive)", DescribeEmptyFrame(err), consecutiveFailures);
+
+                    // ~3 s of nothing over WiFi: say what an R6 needs while there is still time to act on it.
+                    if (consecutiveFailures == WifiMenuHintAfter && err is EdsError.OK && OverWifi)
+                    {
+                        state.StatusMessage = WifiMenuHint;
+                        state.Invalidate();
+                    }
                 }
 
                 // Give up rather than hold the camera hostage. A body that advertises
@@ -1072,10 +1094,11 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                 if (timedOut || consecutiveFailures >= MaxLiveViewFailures)
                 {
                     _logger.LogError(
-                        "Live view produced no frame in {Count} attempts ({Timeouts} timed out, last: {Error}). " +
+                        "Live view produced no frame in {Count} attempts ({Timeouts} timed out, last: {Result}). " +
                         "Stopping. If the body is a 450D-era Rebel, check " +
-                        "Set-up 2 > Live View function settings > LV func. setting > Enable.",
-                        consecutiveFailures, consecutiveTimeouts, err);
+                        "Set-up 2 > Live View function settings > LV func. setting > Enable. Over WiFi, leave the " +
+                        "camera's 'Wi-Fi on' screen first.",
+                        consecutiveFailures, consecutiveTimeouts, DescribeEmptyFrame(err));
 
                     state.LiveViewActive = false;
                     // Not "the camera stopped answering": on a 450D it answers every frame, in full.
@@ -1085,8 +1108,14 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                     state.StatusMessage = timedOut
                         ? $"Live view stopped after {state.LiveViewFrameCount} frames — this body's WPD driver never "
                           + $"completes a frame's end-of-transfer phase ({err})."
-                        : $"Live view gave up after {consecutiveFailures} empty frames ({err}).";
+                        : err is EdsError.OK && OverWifi
+                            ? $"Live view gave up after {consecutiveFailures} empty frames. {WifiMenuHint}"
+                            : $"Live view gave up after {consecutiveFailures} empty frames ({DescribeEmptyFrame(err)}).";
                     state.Invalidate();
+
+                    // Hand the display back. Without this the body stays on Evf_OutputDevice=PC: an R6
+                    // kept its screen black, ignored every button and needed a power cycle.
+                    StopLiveView();
                     break;
                 }
             }
