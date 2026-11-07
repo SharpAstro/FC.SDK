@@ -281,8 +281,12 @@ All PTP property codes MUST be verified against [libgphoto2 ptp.h](https://githu
 | 0xD102 | Tv | Shutter speed |
 | 0xD103 | ISOSpeed | ISO |
 | 0xD105 | AEMode | Shooting mode |
+| 0xD111 | BatteryLevel | libgphoto2 `BatteryPower`: a level, not a percentage — 0 low, 1 50%, 2 100%, 4 75%, 5 25% (`CanonBattery`) |
 | 0xD114 | AutoPowerOffSetting | Auto power-off timeout |
 | 0xD11C | SaveTo | Capture destination |
+| 0xD120 | ImageQuality | libgphoto2 `ImageFormat`: a structure, read it with `GetImageFormatAsync` (`CanonImageFormat`). 0xD121/0xD122 (`ImageFormatCF`/`SD`) carry the same layout |
+| 0xD138 | *(unmapped)* | libgphoto2 `AEModeDial`: the physical mode dial. EOS R6: Tv 1, Av 2, M 3, B 4, C1 7. Read it with `GetRawPropertyAsync`; `AEModeSelect` is not mapped to it because the pairing is inferred, not extracted |
+| 0xD21C | *(unmapped)* | libgphoto2 `BatteryInfoEx` (not `BatteryInfo`, 0xD1A6): `[count][percent]…`, behind `BatteryLevelPercent` on EOS bodies |
 | 0xD13A | MirrorUpSetting | MLU on/off |
 | 0xD178 | NoiseReduction | High ISO NR |
 | 0xD1AB | TempStatus | Sensor/body temperature |
@@ -408,6 +412,41 @@ and the whole 0xD180–0xD1A0 range is absent from EDSDK's own property table).
   loudest cheap vitality probe (mirror flip + real frames); a control exposure either side of a negative result is
   better. Battery level in particular proves nothing on its own — level 0 streamed live view and delivered bulb
   exposures, and the level-0 MLU results reproduced exactly at level 2.
+
+## EOS R6 over WPD, verified 2026-11-05/06
+
+Measured with FC.SDK alone (EOS Utility and EDSDK closed), `ConnectWpdAutoAsync` → raw ioctl, by changing a setting on
+the body and diffing `DumpPropertiesAsync` / `GetRawPropertyBytesAsync` before and after.
+
+- **`OpenSessionAsync` is not optional after `ConnectWpdAutoAsync`.** Without it the body answers nothing useful and
+  nothing fails: zero operations, empty model, empty properties. After it: 161 operations, "Canon EOS R6", 146
+  properties.
+- **A menu open on the body's screen shrinks the property set to four**, and the image-quality codes answer
+  `DevicePropNotSupported` until it closes. A transient state, not a missing property; worth retrying rather than
+  caching as absent.
+- **The cache only grows.** After turning the dial M → Av → M, codes that appeared in Av (0xD146, and the allowed list
+  of `ExposureCompensation` 0xD104) are still there in M. A property the body stops announcing keeps its last value.
+- **Image quality is a structure** (0xD120–0xD122, same bytes in all three whatever the two card slots say), decoded
+  by `CanonImageFormat` and pinned in `ImageFormatTests`. HEIF (with HDR PQ on) is type 8, which libgphoto2 does not
+  list. Some readings carry trailing bytes after the last entry.
+- **Battery**: 0x5001 is refused; `BatteryInfoEx` (0xD21C) carries the exact percentage of the body's "Battery info"
+  menu (8, 94 and 96 % checked, LP-E6N and LP-E6NH), and `BatteryPower` (0xD111) steps 2 → 4 → 1 → 5 → 0 as bars go
+  from four to one and then low — libgphoto2's 100/75/50/25/low. That is why `CanonDeviceReport` no longer calls
+  level 1 "nearly flat". See `CanonBattery`. **A 6D is the other way round**: no 0xD21C (nor 0xD1A6), and 0x5001
+  answers a coarse 100 while the menu shows 88 %, so `BatteryLevelPercent` prefers 0xD21C when a body has both.
+- **Pulling the cable is invisible to the cache.** A property read still answers OK from it; the first real
+  transaction (`GetEvent`, `DumpPropertiesAsync`) throws `IOException` "WPD ioctl failed with Win32 error 995", and
+  the body leaves `EnumerateWpdCameras` within 5 s. The event pump now stops on that exception and raises
+  `ConnectionLost` (it used to swallow it and keep failing). Plugging back in, a new connection and `OpenSessionAsync`
+  work without power-cycling the body.
+- **`PropertyChanged` named nothing.** It cast the record's PTP code to `EdsPropertyId`, so an ISO change arrived as
+  `(EdsPropertyId)0xD103` and never matched `ISOSpeed`. It now carries `PtpCode` and the mapped id.
+- **Re-checked on a 6D** with the same harness (2026-11-06): image quality decodes across fifteen settings including
+  mRAW, sRAW and JPEG S3, `PropertyChanged` names `ISOSpeed` and `Tv`, 90 s of live view (1254 frames) with the pump
+  running raised no `ConnectionLost`, and pulling the cable raised it once.
+- Also confirmed here: `GetObjectFileNameAsync` answers `InternalError` (as on the 6D; read the kind off the bytes),
+  `MirrorUpSetting` answers `DevicePropNotSupported` (a mirrorless body), live view gives ~75 KB frames with the 5×
+  and 10× zoom and `DriveLens`, and a host-destination frame downloads through `ObjectAdded` in ~15 ms.
 
 ## WPD transport internals
 
@@ -747,7 +786,8 @@ explanations and the tempting one is wrong more often than not:
 
 Test targets so far: Canon EOS 6D (USB VID=0x04A9, PID=0x3215, WiFi AP at 192.168.0.1) and
 EOS 450D (USB PID=0x3145) — the 450D is the body most of the WPD, live-view, C.Fn and raw-ioctl
-findings were verified on, and being DIGIC III it is the strictest of the three.
+findings were verified on, and being DIGIC III it is the strictest of the three. EOS R6 (DIGIC X,
+USB PID=0x32F5) is verified over WPD raw ioctl: see "EOS R6 over WPD" above.
 Reported working under EDSDK but previously failing here: EOS 200D II / 250D / Rebel SL3 (DIGIC 8) —
 see the property-read and property-write notes above; both symptoms in issue #1 trace back to them.
 
