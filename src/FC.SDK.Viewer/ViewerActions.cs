@@ -673,9 +673,16 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             // Custom Function, rather than letting the camera ACK a release it will discard. This
                 // used to be a post-hoc check here, which could only ever report the lie after it was
             // told.
-            EndExposure(err is EdsError.OperationRefused && camera.MirrorLockupEnabled == true
-                ? "Mirror lockup is on and this body ignores remote releases in that mode — turn MLU off (Custom Function menu) to shoot remotely."
-                : $"TakePicture failed: {err}");
+            EndExposure(err switch
+            {
+                EdsError.OperationRefused when camera.MirrorLockupEnabled == true =>
+                    "Mirror lockup is on and this body ignores remote releases in that mode — turn MLU off (Custom Function menu) to shoot remotely.",
+                // An R6 whose autofocus cannot lock hunts for ~1.8 s and then answers DeviceBusy; no
+                // event tells the two apart, so name the likely cause without claiming it.
+                EdsError.DeviceBusy =>
+                    "TakePicture failed: DeviceBusy — often the autofocus could not lock. Check the subject, or set the lens to MF.",
+                _ => $"TakePicture failed: {err}",
+            });
             return;
         }
 
