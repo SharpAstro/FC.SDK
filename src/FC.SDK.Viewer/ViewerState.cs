@@ -79,6 +79,12 @@ public sealed class ViewerState
     public string? CapturePreviewSource { get; set; }
 
     /// <summary>
+    /// Set when the last capture has no preview the viewer can draw (HEIF), so the pane says so
+    /// instead of leaving the previous capture on screen as if it were this one.
+    /// </summary>
+    public string? CapturePreviewNote { get; set; }
+
+    /// <summary>
     /// An exposure the camera is in the middle of, or null when none is outstanding.
     /// </summary>
     /// <remarks>

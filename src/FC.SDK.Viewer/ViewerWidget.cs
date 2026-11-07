@@ -606,7 +606,11 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
                         : "start live view to see the sensor feed");
                     break;
                 case "thumbimage":
-                    DrawRasterOrHint(_thumbnail, imageRect, "the captured image appears here after a download");
+                    if (_state.CapturePreviewNote is { } note)
+                        DrawText(note, FontPath, imageRect.X, imageRect.Y, imageRect.Width, imageRect.Height,
+                            SmallFontSize * DpiScale, ViewerTheme.Palette.DimText, TextAlign.Center, TextAlign.Center);
+                    else
+                        DrawRasterOrHint(_thumbnail, imageRect, "the captured image appears here after a download");
                     break;
             }
         });

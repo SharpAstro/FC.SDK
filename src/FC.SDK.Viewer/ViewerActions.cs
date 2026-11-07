@@ -918,6 +918,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         {
             state.CapturePreview = TryDecodeJpeg(thumbData, "thumbnail");
             state.CapturePreviewSource = "embedded thumbnail";
+            state.CapturePreviewNote = null;
             // The image that just changed is the one to show — but never yank the pane away from a
             // running live view (auto-download fires mid-stream when the camera also saves to card).
             if (!state.LiveViewActive) state.PreviewMode = PreviewPane.Capture;
@@ -1185,6 +1186,18 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
     /// </remarks>
     private void QueueFullPreview(string path)
     {
+        // HEIF is HEVC-coded and the viewer carries no HEVC decoder; an R6's .HIF holds no JPEG preview
+        // either, and the camera's thumbnail for it is not a JPEG. Say so rather than show nothing new.
+        if (Path.GetExtension(path).ToLowerInvariant() is ".hif" or ".heif" or ".heic")
+        {
+            state.CapturePreview = null;
+            state.CapturePreviewSource = null;
+            state.CapturePreviewNote = "HEIF preview not supported — the file is saved";
+            if (!state.LiveViewActive) state.PreviewMode = PreviewPane.Capture;
+            state.Invalidate();
+            return;
+        }
+
         _ = Task.Run(() =>
         {
             var started = Stopwatch.GetTimestamp();
@@ -1203,6 +1216,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 
                 state.CapturePreview = raster;
                 state.CapturePreviewSource = source;
+                state.CapturePreviewNote = null;
                 if (!state.LiveViewActive) state.PreviewMode = PreviewPane.Capture;
                 state.Invalidate();
 
