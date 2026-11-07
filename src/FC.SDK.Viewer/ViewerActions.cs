@@ -189,7 +189,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         {
             { Transport: TransportKind.Wpd } when OperatingSystem.IsWindows() => factory.ConnectWpd(device.Identifier),
             { Transport: TransportKind.Usb, Usb: { } usb } => factory.ConnectUsb(usb),
-            { Transport: TransportKind.WiFi } => factory.ConnectWifi(device.Identifier, "FC.SDK Viewer"),
+            { Transport: TransportKind.WiFi } => factory.ConnectWifi(device.Identifier, "FC.SDK Viewer", PairedClientGuid()),
             _ => throw new PlatformNotSupportedException($"{device.Transport} is not available on this OS"),
         };
 
@@ -203,7 +203,25 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         _logger.LogInformation("Transport connected: {Device}", device);
 
         await camera.ConnectTransportAsync(ct);
+
     });
+
+    /// <summary>
+    /// The PTP/IP identity this viewer pairs under, kept across runs: a Canon body refuses any client
+    /// GUID other than the one it was paired with, so a fresh one per run means a re-pair per run.
+    /// </summary>
+    private Guid PairedClientGuid()
+    {
+        var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FC.SDK", "viewer-ptpip-client.guid");
+        if (File.Exists(path) && Guid.TryParse(File.ReadAllText(path).Trim(), out var stored))
+            return stored;
+
+        var guid = Guid.NewGuid();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, guid.ToString());
+        _logger.LogInformation("New PTP/IP client GUID {Guid} saved to {Path}; the camera will ask to pair once", guid, path);
+        return guid;
+    }
 
     public void Disconnect()
     {
@@ -294,6 +312,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 
         _logger.LogInformation("Model={Model} Serial={Serial} Battery={Battery}%",
             camera.Model, camera.SerialNumber, camera.BatteryLevelPercent);
+
         LogOperationSupport(camera);
 
         if (remoteMode)

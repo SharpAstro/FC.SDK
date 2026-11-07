@@ -33,11 +33,15 @@ internal sealed class PtpIpTransport : IPtpTransport
 
     public string DeviceId => ResponderGuid != Guid.Empty ? ResponderGuid.ToString("N") : _host;
 
-    internal PtpIpTransport(string host, int port = PtpIpPort, string? clientName = null)
+    /// <param name="clientGuid">
+    /// The identity a Canon body pairs with. It answers InitFail to any other GUID afterwards, so a
+    /// caller that reconnects must pass the same one every time; null draws a fresh one.
+    /// </param>
+    internal PtpIpTransport(string host, int port = PtpIpPort, string? clientName = null, Guid? clientGuid = null)
     {
         _host = host;
         _port = port;
-        _clientGuid = Guid.NewGuid();
+        _clientGuid = clientGuid ?? Guid.NewGuid();
         _clientName = clientName ?? "FC.SDK";
     }
 
