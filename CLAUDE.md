@@ -16,17 +16,23 @@ Four layers, bottom-up:
 
 `IPtpTransport` is the seam. Three implementations:
 
+**`ConnectAsync` must be idempotent**: `CanonCamera.OpenSessionAsync` connects again after the caller
+already did. Over WiFi a second handshake opened a second command connection the body never answered,
+and it dropped both a minute later — every WiFi `OpenSession` failed that way until 2026-11-06
+(`PtpIpTransportTests` pins it). The WPD and PTP/IP transports are idempotent; `UsbPtpTransport`
+still reopens the device on a second call.
+
 - **`WpdPtpTransport`** — Windows only. Uses WPD COM API via `[GeneratedComInterface]` (AOT safe). Talks to the camera through the stock MTP class driver (`wpdmtp.sys`) — no driver replacement needed. Does NOT use the raw `SendAsync`/`ReceiveAsync` path; instead exposes `ExecuteCommandAsync`, `ExecuteCommandReadDataAsync`, `ExecuteCommandWriteDataAsync` which map to the three WPD MTP extension command phases. The COM interfaces are defined in `WpdInterop.cs` with full vtable ordering.
 
 - **`UsbPtpTransport`** — Cross-platform via LibUsbDotNet. Requires WinUSB driver on Windows (Zadig). Claims USB interface 0 (class 0x06 Still Image), uses Bulk-Out (EP2), Bulk-In (EP1), Interrupt-In (EP3). Canon VID = `0x04A9`.
 
-- **`PtpIpTransport`** — WiFi/TCP. Two `TcpClient` connections to port 15740 (command + event). Four-way PTP/IP handshake in `ConnectAsync` using a random GUID. Camera acts as AP at `192.168.0.1`. First connection requires on-camera pairing approval (~1-2s timeout on 6D).
+- **`PtpIpTransport`** — WiFi/TCP (CIPA DC-005). Two `TcpClient` connections to port 15740 (command + event). `PtpIpFraming` translates between `PtpSession`'s PTP containers and PTP/IP packets, which carry no container header and announce a data-out phase in the request itself; `PtpIpFramingTests` pins the byte layout. **A Canon body pairs with the client GUID** and answers `InitFail` to any other, so callers pass a persisted one to `ConnectWifi` (the viewer keeps its own under `%LOCALAPPDATA%\FC.SDK`). First connection requires on-camera pairing approval (~1-2s timeout on 6D). The camera is either its own AP at `192.168.0.1` or on a home network at a DHCP address, where the viewer's scan finds it with an SSDP M-SEARCH (`WifiDiscovery`) or offers the last host that connected. A reply that goes silent for 60 s (`ReplyIdleTimeout`, idle rather than total so a 25 MB download is not cut) fails as an `IOException` and the link stays refused, since a late reply would answer the wrong command; an R6 once stopped answering mid live view and the viewer hung.
 
 ### Protocol (`Protocol/`)
 
 - **`PtpPacket`** — `readonly ref struct` over `Span<byte>` for zero-copy read. Static factory methods write command/data containers. Wire format: 12-byte header (uint32 Length, uint16 Type, uint16 Code, uint32 TxId). All serialization via `BinaryPrimitives`, little-endian.
 
-- **`PtpSession`** — Owns the transaction ID counter (`Interlocked.Increment`). `SemaphoreSlim(1)` enforces PTP half-duplex (one command in flight at a time). Uses `ArrayPool<byte>.Shared` for buffer rental. Three send patterns: command-only, command+data, command+receive-data.
+- **`PtpSession`** — Owns the transaction ID counter (`Interlocked.Increment`). `SemaphoreSlim(1)` enforces PTP half-duplex (one command in flight at a time). Uses `ArrayPool<byte>.Shared` for buffer rental. Three send patterns: command-only, command+data, command+receive-data. Its receive buffer is a fixed 512 KB, so PTP/IP and USB take a data-in phase through `IPtpDataInTransport` instead, sized by the camera's own announcement (Start_Data total, or the data container's length word) — a full-size image fails otherwise.
 
 - **`PtpErrorMapper`** — Maps `PtpResponseCode` to `EdsError`. PTP standard codes (0x2xxx) and Canon vendor codes (0xAxxx) both handled.
 
@@ -248,7 +254,7 @@ it downloads (eight unreleased JPEGs stopped the body releasing); and `GetObject
 | 0x1003 | CloseSession | none |
 | 0x910F | RemoteRelease | none — single-shot release on bodies without 0x9128/0x9129 |
 | 0x9110 | SetDevicePropValueEx | write: [size:u32][propcode:u32][value:u32] — size covers the record (12 for a scalar) |
-| 0x9114 | SetRemoteMode | none, param=1 (EOS M / newer PowerShots want 0x15 — not implemented) |
+| 0x9114 | SetRemoteMode | none, param=1 (EOS M / newer PowerShots want 0x15 — not implemented; an EOS R6 over WiFi takes 1) |
 | 0x9115 | SetEventMode | none, param=1 |
 | 0x9116 | GetEvent | read: event record list |
 | 0x9117 | TransferComplete | none, param=objectHandle |
@@ -286,6 +292,7 @@ All PTP property codes MUST be verified against [libgphoto2 ptp.h](https://githu
 | 0xD13A | MirrorUpSetting | MLU on/off |
 | 0xD178 | NoiseReduction | High ISO NR |
 | 0xD1AB | TempStatus | Sensor/body temperature |
+| 0xD1AC | *(unmapped)* | libgphoto2 `ShutterCounter`; read with `GetShutterCountAsync`. A 6D reports it only in its session-open dump: no update after a release, and a fresh 0x9127 request after a shot brings nothing either (two shots, 2026-11-07), so the figure is the count at connect. An EOS R6 refuses it even when requested. `0xD167` `ShutterReleaseCounter` is no counter on an R6: it stayed `0x10` across shots |
 | 0xD1B0 | Evf_OutputDevice | Live view output |
 | 0xD1B2 | Evf_DepthOfFieldPreview | DoF preview in LV |
 | 0xD1BF | MirrorLockUpState | MLU state |
@@ -736,6 +743,14 @@ explanations and the tempting one is wrong more often than not:
 Test targets so far: Canon EOS 6D (USB VID=0x04A9, PID=0x3215, WiFi AP at 192.168.0.1) and
 EOS 450D (USB PID=0x3145) — the 450D is the body most of the WPD, live-view, C.Fn and raw-ioctl
 findings were verified on, and being DIGIC III it is the strictest of the three.
+EOS R6 (DIGIC X) is verified over WiFi, on a home network (2026-11-06/07): pairing, `OpenSession`,
+live view (~150 KB frames), lens drive and full-size downloads (a 25 MB CR3 in ~13 s). **Its WiFi
+live view needs the body off its "Wi-Fi on" screen** (the one offering Disconnect / Confirm settings /
+Error details): while that screen shows, every `GetViewfinderData` answers `ObjectNotReady` (0xA102)
+with an empty payload. Leave the screen on the camera, then start live view (measured 2026-11-07). A
+body left on `Evf_OutputDevice=PC` with no frames also ignored every button until power-cycled, which
+is why the viewer's live-view give-up now stops live view on the camera too. A release whose autofocus
+cannot lock hunts ~1.8 s and answers `DeviceBusy` (twice, 2026-11-07); no event distinguished it.
 Reported working under EDSDK but previously failing here: EOS 200D II / 250D / Rebel SL3 (DIGIC 8) —
 see the property-read and property-write notes above; both symptoms in issue #1 trace back to them.
 
