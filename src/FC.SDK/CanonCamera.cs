@@ -56,10 +56,16 @@ public sealed class CanonCamera : IAsyncDisposable
     public string DeviceId => _transport.DeviceId;
 
     /// <summary>
-    /// Standard PTP battery level (0–100%). Read on session open via standard PTP 0x1015/0x5001.
-    /// Works on all transports including WPD (no VendorExtID needed).
+    /// Battery level (0–100%). The remaining capacity Canon's <c>BatteryInfoEx</c> (0xD21C) last announced on the
+    /// event stream, which is the figure the body's own "Battery info" menu shows; otherwise the standard PTP property
+    /// 0x5001, read on session open. Null when neither is available.
     /// </summary>
-    public byte? BatteryLevelPercent => _canon.BatteryLevelPercent;
+    /// <remarks>
+    /// The two are not equally precise. An EOS R6 refuses 0x5001 (this used to stay null there) and answers 0xD21C
+    /// exactly as its menu does: 8, 94 and 96 %, LP-E6N and LP-E6NH. An EOS 6D has no 0xD21C and answers 0x5001 with a
+    /// coarse level: 100 while its menu showed 88 %. See <see cref="CanonBattery"/>.
+    /// </remarks>
+    public byte? BatteryLevelPercent => _canon.BatteryCapacityPercent ?? _canon.BatteryLevelPercent;
 
     /// <summary>Camera serial number from PTP GetDeviceInfo. Available after session open.</summary>
     public string? SerialNumber => _canon.SerialNumber;

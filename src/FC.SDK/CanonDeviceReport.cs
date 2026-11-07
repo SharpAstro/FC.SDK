@@ -152,28 +152,42 @@ public static class CanonDeviceReport
     /// Canon's own battery property, which several bodies report when the standard PTP one is
     /// missing.
     /// </summary>
-    private const ushort BatteryLevelCode = 0xD111;
+    private const ushort BatteryLevelCode = CanonBattery.PowerCode;
 
     /// <summary>
-    /// Flags a nearly flat battery, loudly. A low battery does not announce itself as an error: an
+    /// Flags a weak battery, loudly. A low battery does not announce itself as an error: an
     /// EOS 450D at level 1 has been observed answering OK to a release that never exposes, dropping
     /// live view after streaming happily for a while, and announcing dial movements nobody made.
     /// Every one of those reads as an SDK bug, and none of them are — so a report that shows this
     /// should be re-taken on a charged battery before anyone spends time on it.
     /// </summary>
+    /// <remarks>
+    /// The level is not linear: libgphoto2 labels it 0 low, 1 50%, 2 100%, 4 75%, 5 25%, and an EOS R6
+    /// steps through exactly that (2 → 4 → 1 → 5 → 0) as its battery drains. So level 1 is half a
+    /// battery, not the last bar, and only 0 means nearly flat. Level 1 keeps a milder warning because
+    /// of what the 450D did there.
+    /// </remarks>
     private static void AppendBatteryWarning(StringBuilder report, IReadOnlyList<CanonPropertySnapshot> properties)
     {
         if (properties.FirstOrDefault(p => p.PtpCode == BatteryLevelCode) is not { } battery) return;
 
-        report.AppendLine($"### Battery (Canon `0x{BatteryLevelCode:X4}`): level {battery.Value}");
+        report.AppendLine($"### Battery (Canon `0x{BatteryLevelCode:X4}`): level {battery.Value} ({CanonBattery.DescribePower(battery.Value)})");
         report.AppendLine();
-        if (battery.Value <= 1)
+        if (battery.Value == CanonBattery.PowerLow)
         {
             report.AppendLine(
                 "> **Warning — this battery is nearly flat, and that invalidates most of what follows.** "
                 + "Bodies at the lowest level answer OK to commands they then ignore, drop live view "
                 + "mid-stream, and report property changes that never happened. Please recharge and "
                 + "re-take this report before drawing any conclusions from it.");
+            report.AppendLine();
+        }
+        else if (battery.Value == 1)
+        {
+            report.AppendLine(
+                "> **Note — this battery is about half charged.** An EOS 450D at this level has been seen "
+                + "dropping live view and announcing property changes nobody made; if anything below looks "
+                + "odd, re-take this report on a charged battery first.");
             report.AppendLine();
         }
     }
