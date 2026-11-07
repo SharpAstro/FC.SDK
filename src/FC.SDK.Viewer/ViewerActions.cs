@@ -304,6 +304,9 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             state.SessionOpen = false;
             state.RemoteMode = false;
             state.LiveViewActive = false;
+            state.BatteryPercent = null;
+            state.Model = null;
+            state.SerialNumber = null;
             state.Readings.Clear();
             state.RawProperties = [];
             state.StatusMessage = "Disconnected.";
