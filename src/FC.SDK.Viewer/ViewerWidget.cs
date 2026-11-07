@@ -184,6 +184,10 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
                     SmallFontSize, ViewerTheme.Palette.DimText).WStar().HStar(),
                 Layout.Builder.Text(_state.BatteryPercent is { } level ? $"battery {level}%" : "",
                     SmallFontSize, BatteryColor(_state.BatteryPercent)).WStar(0.6f).HStar(),
+                // "at connect": a 6D reports the count only in its session-open dump and ignores a
+                // later request, so the figure does not move while the session lasts.
+                Layout.Builder.Text(_state.ShutterCount is { } shots ? $"{shots:N0} shots at connect" : "",
+                    SmallFontSize, ViewerTheme.Palette.DimText).WStar(0.7f).HStar(),
                 Layout.Builder.Text($"{connection} · {session}", SmallFontSize,
                     _state.SessionOpen ? ViewerTheme.Ok : ViewerTheme.Palette.DimText).WStar(1.6f).HStar())
             .WithGap(ViewerTheme.Metrics.Padding)

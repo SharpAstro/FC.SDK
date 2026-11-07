@@ -305,6 +305,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             state.RemoteMode = false;
             state.LiveViewActive = false;
             state.BatteryPercent = null;
+            state.ShutterCount = null;
             state.Model = null;
             state.SerialNumber = null;
             state.Readings.Clear();
@@ -340,6 +341,13 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         _logger.LogInformation("Model={Model} Serial={Serial} Battery={Battery}%",
             camera.Model, camera.SerialNumber, camera.BatteryLevelPercent);
 
+        // Through the event stream, which only runs in remote mode.
+        if (remoteMode)
+        {
+            var (shotsErr, shots) = await camera.GetShutterCountAsync(ct);
+            state.ShutterCount = shots;
+            _logger.LogInformation("Shutter count (0xD1AC) = {Count}", shots?.ToString("N0") ?? shotsErr.ToString());
+        }
         LogOperationSupport(camera);
 
         if (remoteMode)
