@@ -16,8 +16,12 @@ public sealed class CanonCameraFactory(ILogger<CanonCamera> logger)
     public CanonCamera ConnectUsb(ushort vendorId, ushort productId) =>
         new(new UsbPtpTransport(vendorId, productId), logger);
 
-    public CanonCamera ConnectWifi(string host, string? clientName = null) =>
-        new(new PtpIpTransport(host, clientName: clientName), logger);
+    /// <param name="clientGuid">
+    /// The identity a Canon body pairs with. It refuses every other GUID afterwards, so persist one and
+    /// pass it on every connection; null draws a fresh one and forces a re-pair.
+    /// </param>
+    public CanonCamera ConnectWifi(string host, string? clientName = null, Guid? clientGuid = null) =>
+        new(new PtpIpTransport(host, clientName: clientName, clientGuid: clientGuid), logger);
 
     [SupportedOSPlatform("windows")]
     public CanonCamera ConnectWpd(string wpdDeviceId) =>
