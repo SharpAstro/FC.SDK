@@ -58,6 +58,9 @@ public sealed class ViewerState
     public string? SerialNumber { get; set; }
     public byte? BatteryPercent { get; set; }
 
+    /// <summary>Shutter actuations (0xD1AC), or null when the body does not report them.</summary>
+    public uint? ShutterCount { get; set; }
+
     /// <summary>PTP operations the body advertises — the fastest way to explain a NotSupported.</summary>
     public IReadOnlySet<ushort> SupportedOperations { get; set; } = new HashSet<ushort>();
 
