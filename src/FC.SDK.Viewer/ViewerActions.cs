@@ -1115,25 +1115,28 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             var started = Stopwatch.GetTimestamp();
             try
             {
-                var (raster, source) = DecodeCapture(path);
-                if (raster is null) return;
-
-                // A later capture may have finished while this was rendering; the newest image wins
-                // rather than whichever decode happened to land last.
-                if (!string.Equals(state.LastSavedPath, path, StringComparison.Ordinal))
+                // One stage for most formats; a HEIF yields its own preview first and then the full image,
+                // each shown as soon as it is ready.
+                foreach (var (raster, source) in DecodeCapture(path))
                 {
-                    _logger.LogDebug("Discarding stale preview for {Path}", Path.GetFileName(path));
-                    return;
+                    // A later capture may have finished while this was rendering; the newest image wins
+                    // rather than whichever decode happened to land last. Checked between stages too, so a
+                    // superseded HEIF does not go on to decode its full image.
+                    if (!string.Equals(state.LastSavedPath, path, StringComparison.Ordinal))
+                    {
+                        _logger.LogDebug("Discarding stale preview for {Path}", Path.GetFileName(path));
+                        return;
+                    }
+
+                    state.CapturePreview = raster;
+                    state.CapturePreviewSource = source;
+                    if (!state.LiveViewActive) state.PreviewMode = PreviewPane.Capture;
+                    state.Invalidate();
+
+                    _logger.LogInformation("Decoded {Source} for preview: {W}×{H} in {Ms:F0} ms",
+                        source, raster.Width, raster.Height,
+                        Stopwatch.GetElapsedTime(started).TotalMilliseconds);
                 }
-
-                state.CapturePreview = raster;
-                state.CapturePreviewSource = source;
-                if (!state.LiveViewActive) state.PreviewMode = PreviewPane.Capture;
-                state.Invalidate();
-
-                _logger.LogInformation("Decoded {Source} for preview: {W}×{H} in {Ms:F0} ms",
-                    source, raster.Width, raster.Height,
-                    Stopwatch.GetElapsedTime(started).TotalMilliseconds);
             }
             catch (Exception ex)
             {
@@ -1145,16 +1148,61 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         });
     }
 
-    private (Raster? Raster, string Source) DecodeCapture(string path) =>
-        Path.GetExtension(path).ToLowerInvariant() switch
+    /// <summary>
+    /// The previews of a capture, best last. Lazy: each stage is decoded only when the caller asks for
+    /// it, so the caller can show one before the next is started, and stop early.
+    /// </summary>
+    private IEnumerable<(PreviewImage Raster, string Source)> DecodeCapture(string path)
+    {
+        var extension = Path.GetExtension(path).ToLowerInvariant();
+        switch (extension)
         {
-            ".cr2" or ".cr3" => (ToRaster(CanonDemosaic.Render(CanonRaw.Open(path), RawPreviewOptions)),
-                Path.GetExtension(path).TrimStart('.').ToUpperInvariant() + " (bilinear)"),
+            case ".cr2" or ".cr3":
+                yield return (ToRaster(CanonDemosaic.Render(CanonRaw.Open(path), RawPreviewOptions)),
+                    extension.TrimStart('.').ToUpperInvariant() + " (bilinear)");
+                break;
             // Full-resolution JPEG beats the thumbnail for the same reason, and costs a decode we
             // already know how to do.
-            ".jpg" or ".jpeg" => (TryDecodeJpeg(File.ReadAllBytes(path), "capture"), "full-size JPEG"),
-            var other => (null, other),
-        };
+            case ".jpg" or ".jpeg":
+                if (TryDecodeJpeg(File.ReadAllBytes(path), "capture") is { } jpeg) yield return (jpeg, "full-size JPEG");
+                break;
+            // HEIF (a Canon .HIF, HDR PQ) stays float all the way to the GPU. Its own 1620x1080 preview
+            // item decodes in a fraction of the full image's time, so it goes up first.
+            case var heif when HeifPreview.Handles(heif):
+                var bytes = File.ReadAllBytes(path);
+                if (HeifPreview.DecodeLargestThumbnail(bytes, MaxPreviewDimension) is { } preview)
+                    yield return (preview, "HEIF preview (HDR)");
+                if (HeifPreview.DecodeFull(bytes, MaxPreviewDimension) is { } full)
+                    yield return (full, "full HEIF (HDR)");
+                else
+                    _logger.LogWarning("The HEIF decoder refused {File}; keeping the lesser preview", Path.GetFileName(path));
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Shows a file from disk as the last capture, with no camera involved: <c>--open &lt;file&gt;</c> on
+    /// the command line. For looking at a capture someone sent, and for checking the preview paths.
+    /// </summary>
+    public void OpenFile(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists)
+        {
+            state.StatusMessage = $"Cannot open {path}: no such file";
+            _logger.LogWarning("--open: {Path} does not exist", path);
+            return;
+        }
+
+        state.LastFileName = info.Name;
+        state.LastSavedPath = info.FullName;
+        state.LastSavedBytes = info.Length;
+        state.PreviewMode = PreviewPane.Capture;
+        state.StatusMessage = $"Opened {info.Name} ({info.Length:N0} bytes)";
+        _logger.LogInformation("Opened {Path} ({Bytes:N0} bytes)", info.FullName, info.Length);
+        QueueFullPreview(info.FullName);
+        state.Invalidate();
+    }
 
     /// <summary>
     /// Converts a 16-bit render to 8-bit RGBA, subsampling to <see cref="MaxPreviewDimension"/> on

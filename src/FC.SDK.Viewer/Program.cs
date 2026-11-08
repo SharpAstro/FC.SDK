@@ -6,9 +6,16 @@ using SharpAstro.AppShell;
 
 // The viewer's reason to exist is the log file: everything it does to the camera is recorded so the
 // output can be attached to a bug report. Wire the sink before anything else can fail.
-var outputDirectory = args.Length > 0 && args[0] is { Length: > 0 } dir
-    ? dir
-    : Path.Combine(Environment.CurrentDirectory, "fc-viewer-output");
+//
+// Usage: fc-viewer [output-directory] [--open <file>]. --open shows a capture from disk (JPEG, CR2, CR3,
+// HEIF) in the capture pane with no camera attached.
+string? outputArgument = null, openFile = null;
+for (var i = 0; i < args.Length; i++)
+{
+    if (args[i] == "--open" && i + 1 < args.Length) openFile = args[++i];
+    else if (outputArgument is null && args[i] is { Length: > 0 } positional) outputArgument = positional;
+}
+var outputDirectory = outputArgument ?? Path.Combine(Environment.CurrentDirectory, "fc-viewer-output");
 
 using var log = new ViewerLog(outputDirectory);
 using var loggerFactory = log.CreateLoggerFactory();
@@ -59,7 +66,21 @@ using var window = SdlVulkanWindow.Create("FC.SDK Viewer — Canon EOS diagnosti
 window.GetSizeInPixels(out var pixelWidth, out var pixelHeight);
 logger.LogInformation("Window {Width}x{Height} px, display scale {Scale}", pixelWidth, pixelHeight, window.DisplayScale);
 
-using var context = VulkanContext.Create(window.Instance, window.Surface, (uint)pixelWidth, (uint)pixelHeight);
+// HDR is asked for, and only taken where the display can present it: on an SDR display (or with HDR off in
+// the OS) the context is exactly the SDR one it always was, and a HEIF capture is tone-mapped instead.
+// FC_VIEWER_HDR=0 declines it outright: the escape hatch for a driver that misbehaves with scRGB, and the
+// other half of an SDR-versus-HDR-requested timing comparison.
+var wantHdr = !string.Equals(Environment.GetEnvironmentVariable("FC_VIEWER_HDR"), "0", StringComparison.Ordinal);
+using var context = VulkanContext.Create(window.Instance, window.Surface, (uint)pixelWidth, (uint)pixelHeight, hdr: wantHdr);
+logger.LogInformation("HDR requested {Requested}, presenting scRGB {Active}; display {Display}",
+    context.HdrRequested, context.HdrActive, window.HdrDisplay);
+// The loop applies new display facts to the context itself; this records them and repaints, so an HDR
+// capture is redrawn in whichever form the display now takes.
+window.HdrDisplayChanged += facts =>
+{
+    logger.LogInformation("Display changed: {Display}; presenting scRGB {Active}", facts, context.HdrActive);
+    state.Invalidate();
+};
 using var renderer = new VkRenderer(context, (uint)pixelWidth, (uint)pixelHeight);
 
 var widget = new ViewerWidget(renderer, state, actions, log, fonts)
@@ -199,6 +220,7 @@ logger.LogInformation("Debug inspector listening on loopback port {Port}", inspe
 
 // Start with a scan so the first thing on screen is the list of candidate cameras.
 actions.Scan();
+if (openFile is not null) actions.OpenFile(openFile);
 
 logger.LogInformation("Entering event loop. F5 read properties · Space capture · Ctrl+L live view · Ctrl+D dump");
 

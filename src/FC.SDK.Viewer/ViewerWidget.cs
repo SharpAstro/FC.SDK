@@ -619,7 +619,7 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     /// </summary>
     private void DrawRasterOrHint(DeferredTexture texture, RectF32 rect, string hint)
     {
-        if (texture.Texture is not { } tex || tex.Width <= 0 || tex.Height <= 0)
+        if (texture.Texture is not { } tex || tex.Width <= 0 || tex.Height <= 0 || texture.Image is not { } image)
         {
             DrawText(hint, FontPath, rect.X, rect.Y, rect.Width, rect.Height,
                 SmallFontSize * DpiScale, ViewerTheme.Palette.DimText, TextAlign.Center, TextAlign.Center);
@@ -629,7 +629,18 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         var scale = MathF.Min(rect.Width / tex.Width, rect.Height / tex.Height);
         var w = tex.Width * scale;
         var h = tex.Height * scale;
-        _renderer.DrawTexture(tex.DescriptorSet, rect.X + (rect.Width - w) / 2f, rect.Y + (rect.Height - h) / 2f, w, h);
+        var (x, y) = (rect.X + (rect.Width - w) / 2f, rect.Y + (rect.Height - h) / 2f);
+        if (image is HdrRaster hdr)
+        {
+            // Scene-linear float: scRGB through the composite on an HDR display, tone-mapped to the peak this
+            // image actually reaches on an SDR one. An HDR frame repaints in full, and this runs every frame
+            // the pane is painted, which is what the composite needs.
+            _renderer.DrawHdrImage(tex, x, y, w, h, hdr.Primaries, hdr.PeakNits);
+        }
+        else
+        {
+            _renderer.DrawTexture(tex.DescriptorSet, x, y, w, h);
+        }
     }
 
     // ---------------------------------------------------------------- row primitives
@@ -819,9 +830,11 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     /// </remarks>
     private sealed class DeferredTexture(VulkanContext context) : IDisposable
     {
-        private Raster? _submitted;
+        private PreviewImage? _submitted;
         private VkTexture? _shown;
+        private PreviewImage? _shownImage;
         private VkTexture? _incoming;
+        private PreviewImage? _incomingImage;
 
         public VkTexture? Texture
         {
@@ -832,20 +845,38 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             }
         }
 
+        /// <summary>The image <see cref="Texture"/> was made from: says how to draw it (8-bit or HDR).</summary>
+        public PreviewImage? Image
+        {
+            get
+            {
+                Promote();
+                return _shownImage;
+            }
+        }
+
         public bool IsUploading => _incoming is not null;
 
-        public void Submit(Raster raster)
+        public void Submit(PreviewImage image)
         {
             Promote();
 
             // Same instance as last time means nothing changed, so skip the upload entirely.
-            if (_incoming is not null || ReferenceEquals(raster, _submitted)) return;
+            if (_incoming is not null || ReferenceEquals(image, _submitted)) return;
 
-            var texture = VkTexture.CreateDeferred(context, raster.Rgba, raster.Width, raster.Height,
-                VkFormat.R8G8B8A8Unorm);
+            var texture = image switch
+            {
+                // The 8-bit path, exactly as before HDR existed.
+                Raster raster => VkTexture.CreateDeferred(context, raster.Rgba, raster.Width, raster.Height,
+                    VkFormat.R8G8B8A8Unorm),
+                // Half-float RGBA, for DrawHdrImage.
+                HdrRaster hdr => VkTexture.CreateDeferredFromRgbaFloat(context, hdr.Rgba, hdr.Width, hdr.Height),
+                _ => throw new ArgumentOutOfRangeException(nameof(image), image.GetType().Name, "unknown preview image kind"),
+            };
             context.QueueTextureUpload(texture);
             _incoming = texture;
-            _submitted = raster;
+            _incomingImage = image;
+            _submitted = image;
         }
 
         private void Promote()
@@ -854,7 +885,9 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
 
             _shown?.Dispose();
             _shown = ready;
+            _shownImage = _incomingImage;
             _incoming = null;
+            _incomingImage = null;
         }
 
         public void Dispose()
