@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using FC.SDK.Transport;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -39,16 +40,15 @@ public class EventPollerLossTests
     {
         var transport = new FailingTransport(() => new IOException("WPD ioctl failed with Win32 error 995."));
         await using var camera = new CanonCamera(transport, NullLogger<CanonCamera>.Instance);
-        var lost = new List<CanonConnectionLostEventArgs>();
-        camera.ConnectionLost += (_, e) => { lock (lost) lost.Add(e); };
+        var lost = new ConcurrentQueue<CanonConnectionLostEventArgs>();
+        camera.ConnectionLost += (_, e) => lost.Enqueue(e);
 
         camera.StartEventPolling(TimeSpan.FromMilliseconds(10));
-        for (int i = 0; i < 200 && lost.Count == 0; i++) await Task.Delay(10, TestContext.Current.CancellationToken);
+        for (int i = 0; i < 200 && lost.IsEmpty; i++) await Task.Delay(10, TestContext.Current.CancellationToken);
         int sendsWhenLost = transport.Sends;
         await Task.Delay(100, TestContext.Current.CancellationToken);
 
-        lost.Count.ShouldBe(1);
-        lost[0].Error.ShouldBeOfType<IOException>();
+        lost.ShouldHaveSingleItem().Error.ShouldBeOfType<IOException>();
         transport.Sends.ShouldBe(sendsWhenLost);   // nothing more reaches the dead transport
     }
 
