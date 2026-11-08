@@ -44,7 +44,7 @@ Four layers, bottom-up:
 
 - **`CanonCamera`** — Entry point. Static factories: `ConnectUsb`, `ConnectWifi`, `ConnectWpd`, `ConnectWpdIoctl`. Async session/capture/live-view/property methods. Event handlers (`PropertyChanged`, `ObjectAdded`, `StateChanged`) are subscribed for the object's whole lifetime, not just while the poller runs, because the open-session drain and property reads also pull events. Diagnostics: `DumpPropertiesAsync`, `SupportedOperations`, `GetRawPropertyAsync`/`SetRawPropertyAsync`, `GetAllowedValuesAsync`, `CreateDeviceReportAsync`.
 
-- **`CanonDeviceReport`** — the one artefact to ask a bug reporter for. Markdown: model, transport, every advertised operation, every announced property with its allowed values, and the **decoded Custom Function block in wire order with menu numbers**. That last part is the whole point — a reporter cannot know wire ids, but can read menu numbers off their own camera, and `CanonCustomFunctionBlock.Entries` preserves the order that maps between them. It also refuses to be trusted on a flat battery: a body reporting `0xD111` level ≤ 1 gets a loud warning, because at that level a 450D has been seen to drop live view mid-stream and announce dial movements nobody made. (It does *not* stop capturing — that symptom turned out to be mirror lockup; see the Testing section.)
+- **`CanonDeviceReport`** — the one artefact to ask a bug reporter for. Markdown: model, transport, every advertised operation, every announced property with its allowed values, and the **decoded Custom Function block in wire order with menu numbers**. That last part is the whole point — a reporter cannot know wire ids, but can read menu numbers off their own camera, and `CanonCustomFunctionBlock.Entries` preserves the order that maps between them. It also refuses to be trusted on a weak battery: a body reporting `0xD111` level 0 (libgphoto2's "low") gets a loud warning, and level 1 a milder note. The scale is not linear and 1 means half charged (see `CanonBattery`), but at level 1 a 450D has been seen to drop live view mid-stream and announce dial movements nobody made. (It does *not* stop capturing — that symptom turned out to be mirror lockup; see the Testing section.)
 
 ## What is still missing vs EDSDK
 
@@ -783,8 +783,9 @@ explanations and the tempting one is wrong more often than not:
 - **Low battery is real but narrower than previously claimed.** Capture at `0xD111` level 1 works
   fine with MLU off — verified repeatedly, 11.2 MB CR2s delivered in ~4 s. What *has* been observed
   at level 1 is phantom `PropValueChanged` records for Tv that no one caused, and one session where
-  live view stopped producing frames while still answering every read. `CanonDeviceReport` still
-  warns at level ≤ 1, and that is still worth heeding — just do not let it end the investigation.
+  live view stopped producing frames while still answering every read. `CanonDeviceReport` warns
+  loudly only at level 0 and adds a milder note at level 1 (libgphoto2 reads 1 as half charged, see
+  "EOS R6 over WPD"), and that note is still worth heeding — just do not let it end the investigation.
 
 Test targets so far: Canon EOS 6D (USB VID=0x04A9, PID=0x3215, WiFi AP at 192.168.0.1) and
 EOS 450D (USB PID=0x3145) — the 450D is the body most of the WPD, live-view, C.Fn and raw-ioctl
