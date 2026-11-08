@@ -156,7 +156,7 @@ guessing codes from EDSDK property IDs — which `CLAUDE.md` forbids for good re
 | Gap | Evidence / note |
 |---|---|
 | Movie recording | `Record` (0x510) is in `EdsPropertyId.cs:64`, unmapped. No start/stop. See "Not gaps" below for why this is *not* a live-video gap |
-| Hotplug notification | `EnumerateUsbCameras` / `EnumerateWpdCameras` are polls; EDSDK has `EdsSetCameraAddedHandler`. Losing a body *mid-session* is covered: the event pump raises `ConnectionLost` when the transport fails (measured on an EOS R6 over WPD raw ioctl only) |
+| Hotplug notification | `EnumerateUsbCameras` / `EnumerateWpdCameras` are polls; EDSDK has `EdsSetCameraAddedHandler`. Losing a body *mid-session* is covered: the event pump raises `ConnectionLost` when the transport fails (measured on an EOS R6 over WPD raw ioctl; never raised over WPD COM, see #20) |
 | ~~Image quality~~ | **DONE**: `GetImageFormatAsync` decodes the `ImageFormat` structure (0xD120); the uint32 accessor only ever gave the file count. Read-only — writing it is unmeasured |
 | ~~Battery on EOS bodies~~ | **DONE**: `BatteryLevelPercent` falls back to `BatteryInfoEx` (0xD21C) when 0x5001 is refused, which every EOS does |
 | Direct transfer | `Enter`/`ExitDirectTransfer` status commands absent |
