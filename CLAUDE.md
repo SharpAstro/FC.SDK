@@ -437,8 +437,10 @@ the body and diffing `DumpPropertiesAsync` / `GetRawPropertyBytesAsync` before a
 - **Pulling the cable is invisible to the cache.** A property read still answers OK from it; the first real
   transaction (`GetEvent`, `DumpPropertiesAsync`) throws `IOException` "WPD ioctl failed with Win32 error 995", and
   the body leaves `EnumerateWpdCameras` within 5 s. The event pump now stops on that exception and raises
-  `ConnectionLost` (it used to swallow it and keep failing). Plugging back in, a new connection and `OpenSessionAsync`
-  work without power-cycling the body.
+  `ConnectionLost` (it used to swallow it and keep failing). Raw ioctl, PTP/IP and USB throw `IOException` and so
+  raise it; **WPD COM does not** (`ConnectWpd`, or an auto-connect that fell back): `PtpSession` turns the
+  `COMException` into `GeneralError` and the pump keeps polling. Typed transport failures are #20. Plugging back in, a
+  new connection and `OpenSessionAsync` work without power-cycling the body.
 - **`PropertyChanged` named nothing.** It cast the record's PTP code to `EdsPropertyId`, so an ISO change arrived as
   `(EdsPropertyId)0xD103` and never matched `ISOSpeed`. It now carries `PtpCode` and the mapped id.
 - **Re-checked on a 6D** with the same harness (2026-11-06): image quality decodes across fifteen settings including

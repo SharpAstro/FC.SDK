@@ -17,7 +17,10 @@ namespace FC.SDK.Canon;
 /// and an EOS 6D over WPD (raw ioctl): the first real transaction after the pull throws
 /// <see cref="IOException"/> "WPD ioctl failed with Win32 error 995", every later one too, and the body
 /// leaves <c>EnumerateWpdCameras</c> within 5 s. No false alarm on the 6D over 90 s of live view
-/// (1254 frames) with the pump running. Other transports have not been unplugged under this.
+/// (1254 frames) with the pump running. PTP/IP and USB throw <see cref="IOException"/> too, but neither
+/// has been unplugged under this. WPD COM never gets here: <c>PtpSession</c> turns its
+/// <c>COMException</c> into <c>GeneralError</c> instead of throwing, so over COM a pulled cable still
+/// goes unreported (SharpAstro/FC.SDK#20).
 /// </para>
 /// </remarks>
 internal sealed class EventPoller(CanonPtpSession session, TimeSpan interval, Action<Exception>? lost = null) : IAsyncDisposable

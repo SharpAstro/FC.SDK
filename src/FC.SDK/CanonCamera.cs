@@ -54,6 +54,13 @@ public sealed class CanonCamera : IAsyncDisposable
     /// gone. Raised at most once per pump, from the pump's thread. Without it the only sign of a pulled cable is the
     /// next command failing, because property reads keep answering out of the cache.
     /// </summary>
+    /// <remarks>
+    /// Raised only by transports that report a failed link as an <see cref="IOException"/>: WPD raw ioctl
+    /// (<c>ConnectWpdIoctl</c>, and <c>ConnectWpdAutoAsync</c> when it does not fall back to COM), PTP/IP and USB.
+    /// <b>Not by WPD COM</b> (<c>ConnectWpd</c>): there <c>PtpSession</c> turns the <c>COMException</c> into
+    /// <c>GeneralError</c>, the pump keeps polling, and this never fires. A transport exception that says what kind of
+    /// failure it is, which would fix that, is tracked in SharpAstro/FC.SDK#20.
+    /// </remarks>
     public event EventHandler<CanonConnectionLostEventArgs>? ConnectionLost;
 
     /// <summary>
