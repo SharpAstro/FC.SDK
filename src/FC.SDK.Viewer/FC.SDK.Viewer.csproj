@@ -35,12 +35,23 @@
     <ProjectReference Include="..\..\..\SdlVulkan.Renderer\src\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
     <ProjectReference Include="..\..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj" />
     <ProjectReference Include="..\..\..\AppShell\src\SharpAstro.AppShell\SharpAstro.AppShell.csproj" />
+    <!-- Heif: decodes a .HIF/.HEIC capture (Canon HDR PQ) to linear-light floats for the HDR preview. -->
+    <ProjectReference Include="..\..\..\Codecs\src\SharpAstro.Heif\SharpAstro.Heif.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
-    <PackageReference Include="SdlVulkan.Renderer" Version="7.50.*" />
-    <PackageReference Include="DIR.Lib" Version="11.5.*" />
+    <!-- 7.84 is the first with HDR: VulkanContext.Create(hdr: true), VkTexture.CreateFromRgbaFloat,
+         VkRenderer.DrawHdrImage. -->
+    <PackageReference Include="SdlVulkan.Renderer" Version="7.84.*" />
+    <!-- Not below the DIR.Lib that SdlVulkan.Renderer 7.84 was built against (11.48). -->
+    <PackageReference Include="DIR.Lib" Version="11.48.*" />
     <!-- The single-instance gate, shared with the TianWen viewer and GUI. -->
-    <PackageReference Include="SharpAstro.AppShell" Version="1.1.*" />
+    <!-- 1.2 is SdlVulkan.Renderer 7.84's floor; 1.1 fails restore with NU1605. -->
+    <PackageReference Include="SharpAstro.AppShell" Version="1.2.*" />
+    <!-- PLACEHOLDER VERSION. SharpAstro.Heif is not published yet: it ships with the next Codecs
+         release (3.33, from the Codecs branch heif/external-fixtures). Until then a build without the
+         sibling working copies cannot restore, which is why this branch is not merged. Set this to
+         the real release line once it is on NuGet. -->
+    <PackageReference Include="SharpAstro.Heif" Version="3.33.*" />
   </ItemGroup>
 
   <ItemGroup>

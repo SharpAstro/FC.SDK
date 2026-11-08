@@ -20,8 +20,19 @@ public sealed record ControlReading(EdsError Error, uint Value, uint[]? AllowedV
     public bool Ok => Error is EdsError.OK;
 }
 
-/// <summary>A raster ready to be pushed to the GPU.</summary>
-public sealed record Raster(int Width, int Height, byte[] Rgba);
+/// <summary>An image ready to be pushed to the GPU: 8-bit <see cref="Raster"/> or float <see cref="HdrRaster"/>.</summary>
+public abstract record PreviewImage(int Width, int Height);
+
+/// <summary>An 8-bit sRGB raster: live view, JPEG, CR2/CR3 and the camera's thumbnail.</summary>
+public sealed record Raster(int Width, int Height, byte[] Rgba) : PreviewImage(Width, Height);
+
+/// <summary>
+/// A float raster in linear light, 1.0 = 203 cd/m² (BT.2408), four floats a pixel, in <paramref name="Primaries"/>.
+/// Drawn with <c>VkRenderer.DrawHdrImage</c>: as scRGB on an HDR display, tone-mapped on an SDR one.
+/// </summary>
+/// <param name="PeakNits">The brightest channel in the image, in cd/m²: where the SDR tone curve reaches white.</param>
+public sealed record HdrRaster(int Width, int Height, float[] Rgba, SdlVulkan.Renderer.HdrPrimaries Primaries, float PeakNits)
+    : PreviewImage(Width, Height);
 
 /// <summary>
 /// Which image the preview pane shows. One at a time on purpose: stacked panes halved both images
@@ -73,7 +84,7 @@ public sealed class ViewerState
     /// the camera's embedded thumbnail first because it is small and immediate, then the decoded
     /// file once it is on disk and rendered.
     /// </summary>
-    public Raster? CapturePreview { get; set; }
+    public PreviewImage? CapturePreview { get; set; }
 
     /// <summary>Where <see cref="CapturePreview"/> came from, so the pane can say which it is.</summary>
     public string? CapturePreviewSource { get; set; }

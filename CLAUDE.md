@@ -512,6 +512,17 @@ event-stream property cache side by side, and writes a timestamped log of every 
   stall live view and event draining behind work needing nothing from the camera. The pane label
   says which preview is showing, because "why is my capture soft" has one answer worth checking
   first.
+- **A HEIF capture (`.hif`/`.heic`, Canon HDR PQ) stays float to the GPU.** `HeifPreview` decodes the
+  file's own largest thumbnail item first (1620x1080 on an R7) and then the full image, box-averaged in
+  linear light by a whole factor rounded down (6960x4640 becomes 1740x1160, never smaller than the
+  preview it replaces). Both are `HdrRaster`s (1.0 = 203 cd/m2, BT.2020 passed through) drawn with
+  `DrawHdrImage`: scRGB on an HDR display, tone-mapped to the image's own measured peak on an SDR
+  one. JPEG/CR2/CR3 and live view keep the 8-bit `Raster` path untouched. The context is created
+  `hdr: true`, which costs an SDR display nothing (the context is then the plain SDR one);
+  `FC_VIEWER_HDR=0` declines it. `--open <file>` shows any capture from disk with no camera, which is
+  how this is checked. **The inspector's screenshot cannot show an HDR image**: on an scRGB window it
+  reads the 8-bit layer, where the image's rectangle is a transparent hole (it looks white). Judge
+  HDR on the panel; `FC_VIEWER_HDR=0` gives a capturable tone-mapped control.
 - **An exposure is tracked separately from `BusyOperation`.** `TakePictureAsync` does not return
   until the body finishes the release — 2.1 s on a 450D — and the image arrives later still, via
   `ObjectAdded`. `ViewerState.Exposure` spans shutter-press to image-arrival and drives a ticking
