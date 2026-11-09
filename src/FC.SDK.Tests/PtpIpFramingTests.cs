@@ -115,6 +115,43 @@ public class PtpIpFramingTests
         data.ShouldBe(payload);
     }
 
+    /// <summary>
+    /// A Start_Data body is 12 bytes, but its size came from the packet's own length word, so anything
+    /// answering on port 15740 could make the initiator allocate up to 2 GB before sending a byte more.
+    /// </summary>
+    [Fact]
+    public async Task AStartDataThatDeclaresAHugeBodyIsRefused()
+    {
+        var wire = new MemoryStream(new byte[] { 0xF0, 0xFF, 0xFF, 0x7F, 9, 0, 0, 0 });
+
+        var ex = await Should.ThrowAsync<IOException>(
+            () => PtpIpFraming.ReadDataAndResponseAsync(wire, new byte[32], CancellationToken.None));
+
+        ex.Message.ShouldContain("Start_Data");
+    }
+
+    /// <summary>
+    /// The announced total sized the buffer up to 256 MB before any data arrived. Above a capped amount
+    /// it is not trusted, and the buffer grows with the data that really comes.
+    /// </summary>
+    [Fact]
+    public async Task ALargeAnnouncedTotalReservesNothingUntilTheDataArrives()
+    {
+        var wire = new MemoryStream();
+        Write(wire, 9, 7, BitConverter.GetBytes(200UL * 1024 * 1024));
+        Write(wire, 12, 7, [1, 2, 3]);
+        wire.Write([14, 0, 0, 0, 7, 0, 0, 0, 0x01, 0x20, 7, 0, 0, 0]);
+        wire.Position = 0;
+
+        // A MemoryStream completes every read synchronously, so all of it is allocated on this thread.
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var (data, _) = await PtpIpFraming.ReadDataAndResponseAsync(wire, new byte[32], CancellationToken.None);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        data.ShouldBe(new byte[] { 1, 2, 3 });
+        allocated.ShouldBeLessThan(1024 * 1024);
+    }
+
     private static void Write(Stream wire, uint type, uint txId, byte[] body)
     {
         var header = new byte[12];
