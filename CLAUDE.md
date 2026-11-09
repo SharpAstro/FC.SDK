@@ -513,9 +513,10 @@ event-stream property cache side by side, and writes a timestamped log of every 
   says which preview is showing, because "why is my capture soft" has one answer worth checking
   first.
 - **A HEIF capture (`.hif`/`.heic`, Canon HDR PQ) stays float to the GPU.** `HeifPreview` decodes the
-  file's own largest thumbnail item first (1620x1080 on an R7) and then the full image, box-averaged in
-  linear light by a whole factor rounded down (6960x4640 becomes 1740x1160, never smaller than the
-  preview it replaces). Both are `HdrRaster`s (1.0 = 203 cd/m2, BT.2020 passed through) drawn with
+  file's own largest thumbnail item (1620x1080 on an R7) and nothing more: the pane has no zoom, and a
+  full R7 decode is ~517 MB of floats to gain 1740x1160. The full image is the fallback only for a HEIF
+  with no readable thumbnail item, box-averaged in linear light by a whole factor rounded down. Either
+  is an `HdrRaster` (1.0 = 203 cd/m2, BT.2020 passed through) drawn with
   `DrawHdrImage`: scRGB on an HDR display, tone-mapped to the image's own measured peak on an SDR
   one. JPEG/CR2/CR3 and live view keep the 8-bit `Raster` path untouched. The context is created
   `hdr: true`, which costs an SDR display nothing (the context is then the plain SDR one);
