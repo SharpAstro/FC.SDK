@@ -48,10 +48,8 @@
     <!-- The single-instance gate, shared with the TianWen viewer and GUI. -->
     <!-- 1.2 is SdlVulkan.Renderer 7.84's floor; 1.1 fails restore with NU1605. -->
     <PackageReference Include="SharpAstro.AppShell" Version="1.2.*" />
-    <!-- PLACEHOLDER VERSION. SharpAstro.Heif is not published yet: it ships with the next Codecs
-         release (3.33, from the Codecs branch heif/external-fixtures). Until then a build without the
-         sibling working copies cannot restore, which is why this branch is not merged. Set this to
-         the real release line once it is on NuGet. -->
+    <!-- Heif: decodes a .HIF/.HEIC capture (Canon HDR PQ) to linear-light floats for the HDR preview.
+         3.33 is the first release with it (3.33.1613). -->
     <PackageReference Include="SharpAstro.Heif" Version="3.33.*" />
   </ItemGroup>
 
