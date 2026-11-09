@@ -1115,13 +1115,13 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             var started = Stopwatch.GetTimestamp();
             try
             {
-                // One stage for most formats; a HEIF yields its own preview first and then the full image,
-                // each shown as soon as it is ready.
+                // One stage per format today; the loop allows a format to yield a quick preview and then a
+                // better one, each shown as soon as it is ready.
                 foreach (var (raster, source) in DecodeCapture(path))
                 {
                     // A later capture may have finished while this was rendering; the newest image wins
                     // rather than whichever decode happened to land last. Checked between stages too, so a
-                    // superseded HEIF does not go on to decode its full image.
+                    // superseded capture does not go on to decode a later stage.
                     if (!string.Equals(state.LastSavedPath, path, StringComparison.Ordinal))
                     {
                         _logger.LogDebug("Discarding stale preview for {Path}", Path.GetFileName(path));
@@ -1166,13 +1166,15 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
             case ".jpg" or ".jpeg":
                 if (TryDecodeJpeg(File.ReadAllBytes(path), "capture") is { } jpeg) yield return (jpeg, "full-size JPEG");
                 break;
-            // HEIF (a Canon .HIF, HDR PQ) stays float all the way to the GPU. Its own 1620x1080 preview
-            // item decodes in a fraction of the full image's time, so it goes up first.
+            // HEIF (a Canon .HIF, HDR PQ) stays float all the way to the GPU. Only the file's own 1620x1080
+            // preview item is decoded: the pane has no zoom, and the full image (about 517 MB of floats on an
+            // R7) would only take it to 1740x1160. The full decode is the fallback for a HEIF with no
+            // thumbnail item this decoder can read.
             case var heif when HeifPreview.Handles(heif):
                 var bytes = File.ReadAllBytes(path);
                 if (HeifPreview.DecodeLargestThumbnail(bytes, MaxPreviewDimension) is { } preview)
                     yield return (preview, "HEIF preview (HDR)");
-                if (HeifPreview.DecodeFull(bytes, MaxPreviewDimension) is { } full)
+                else if (HeifPreview.DecodeFull(bytes, MaxPreviewDimension) is { } full)
                     yield return (full, "full HEIF (HDR)");
                 else
                     _logger.LogWarning("The HEIF decoder refused {File}; keeping the lesser preview", Path.GetFileName(path));

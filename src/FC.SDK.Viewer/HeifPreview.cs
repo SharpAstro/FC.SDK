@@ -5,8 +5,9 @@ using SharpAstro.Heif;
 namespace FC.SDK.Viewer;
 
 /// <summary>
-/// Turns a HEIF capture (a Canon <c>.HIF</c>, HDR PQ) into <see cref="HdrRaster"/>s for the capture pane:
-/// the file's own largest preview first, because it decodes in a fraction of the time, then the full image.
+/// Turns a HEIF capture (a Canon <c>.HIF</c>, HDR PQ) into an <see cref="HdrRaster"/> for the capture pane:
+/// the file's own largest preview item, which decodes in a fraction of the time and is all a pane with no zoom
+/// needs, or the full image when the file carries no preview this decoder can read.
 /// </summary>
 /// <remarks>
 /// <para>
