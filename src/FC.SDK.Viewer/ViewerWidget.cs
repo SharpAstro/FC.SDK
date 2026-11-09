@@ -177,19 +177,28 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             ? _state.RemoteMode ? "session + remote mode" : "session (no remote mode)"
             : "no session";
 
-        return Layout.Builder.HStack(
-                Layout.Builder.Text("FC.SDK Viewer", _fontSize + 1f, ViewerTheme.Accent).WAuto().HStar(),
-                Layout.Builder.Text(_state.Model ?? "—", _fontSize, ViewerTheme.Palette.HeaderText).WStar(1.2f).HStar(),
-                Layout.Builder.Text(_state.SerialNumber is { Length: > 0 } sn ? $"S/N {sn}" : "",
-                    SmallFontSize, ViewerTheme.Palette.DimText).WStar().HStar(),
-                Layout.Builder.Text(_state.BatteryPercent is { } level ? $"battery {level}%" : "",
-                    SmallFontSize, BatteryColor(_state.BatteryPercent)).WStar(0.6f).HStar(),
-                // "at connect": a 6D reports the count only in its session-open dump and ignores a
-                // later request, so the figure does not move while the session lasts.
-                Layout.Builder.Text(_state.ShutterCount is { } shots ? $"{shots:N0} shots at connect" : "",
-                    SmallFontSize, ViewerTheme.Palette.DimText).WStar(0.7f).HStar(),
-                Layout.Builder.Text($"{connection} · {session}", SmallFontSize,
-                    _state.SessionOpen ? ViewerTheme.Ok : ViewerTheme.Palette.DimText).WStar(1.6f).HStar())
+        List<Layout.Node> columns =
+        [
+            Layout.Builder.Text("FC.SDK Viewer", _fontSize + 1f, ViewerTheme.Accent).WAuto().HStar(),
+            // Sized to the name: a share of the bar was far wider than any model name, and that room
+            // is what the shutter count takes in a narrow window.
+            Layout.Builder.Text(_state.Model ?? "—", _fontSize, ViewerTheme.Palette.HeaderText).WAuto().HStar(),
+            Layout.Builder.Text(_state.SerialNumber is { Length: > 0 } sn ? $"S/N {sn}" : "",
+                SmallFontSize, ViewerTheme.Palette.DimText).WStar().HStar(),
+            Layout.Builder.Text(_state.BatteryPercent is { } level ? $"battery {level}%" : "",
+                SmallFontSize, BatteryColor(_state.BatteryPercent)).WStar(0.6f).HStar(),
+        ];
+
+        // Only when the body reports it (an R6 does not), and at its own width, so it is never cut and
+        // takes no room from the connection column for nothing.
+        if (_state.ShutterCount is { } shots)
+            columns.Add(Layout.Builder.Text($"{shots:N0} shots", SmallFontSize, ViewerTheme.Palette.DimText).WAuto().HStar()
+                .WithTooltip("Shutter count read when the session opened. A 6D reports it only then, so it does not move during the session."));
+
+        columns.Add(Layout.Builder.Text($"{connection} · {session}", SmallFontSize,
+            _state.SessionOpen ? ViewerTheme.Ok : ViewerTheme.Palette.DimText).WStar(1.6f).HStar());
+
+        return Layout.Builder.HStack([.. columns])
             .WithGap(ViewerTheme.Metrics.Padding)
             .Pad(ViewerTheme.Metrics.Padding)
             .Bg(ViewerTheme.Palette.HeaderBg);
