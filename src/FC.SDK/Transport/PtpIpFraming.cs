@@ -74,6 +74,9 @@ internal static class PtpIpFraming
             throw new IOException($"Expected PTP/IP Start_Data or Operation_Response, got {type}.");
 
         // body: txid(4) totalLength(8). The total only sizes the buffer; the packets decide the length.
+        // The body's size comes from the device's own length word, so it is bounded before allocating.
+        if (length - HeaderSize > MaxStartDataBody)
+            throw new IOException($"PTP/IP Start_Data declares a {length - HeaderSize}-byte body; it carries 12.");
         var startBody = new byte[length - HeaderSize];
         await stream.ReadExactlyAsync(startBody, ct);
         ulong total = startBody.Length >= 12 ? BinaryPrimitives.ReadUInt64LittleEndian(startBody.AsSpan(4)) : 0;
@@ -102,8 +105,15 @@ internal static class PtpIpFraming
         return (data.ToArray(), responseLength);
     }
 
-    /// <summary>A Start_Data total above this is not trusted to size an allocation up front.</summary>
-    private const ulong MaxPreallocation = 256 * 1024 * 1024;
+    /// <summary>
+    /// A Start_Data total above this is not trusted to size an allocation up front: anything answering on
+    /// port 15740 can announce one. A 25 MB CR3 from an R6 still fits in one go; past this the buffer grows
+    /// with the data that actually arrives.
+    /// </summary>
+    private const ulong MaxPreallocation = 64 * 1024 * 1024;
+
+    /// <summary>A Start_Data body is txid(4) + total(8); this leaves room for padding, not for an allocation.</summary>
+    private const int MaxStartDataBody = 64;
 
     private static async Task<int> ReadResponseBodyAsync(Stream stream, int length, Memory<byte> destination, CancellationToken ct)
     {
