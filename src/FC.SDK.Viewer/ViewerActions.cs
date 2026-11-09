@@ -1000,14 +1000,23 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
         _liveViewLoop = Task.Run(() => LiveViewLoopAsync(camera, _shutdown.Token));
     });
 
-    public void StopLiveView() => Enqueue("Stop live view", async ct =>
+    public void StopLiveView() => StopLiveView(afterGiveUp: false);
+
+    /// <param name="afterGiveUp">
+    /// The loop gave up and has already said why (with the R6 "Wi-Fi on" hint over WiFi); keep that on the
+    /// status line unless stopping fails too.
+    /// </param>
+    private void StopLiveView(bool afterGiveUp) => Enqueue("Stop live view", async ct =>
     {
         if (state.Camera is not { } camera) return;
 
         await StopLiveViewLoopAsync();
         var err = await camera.StopLiveViewAsync(ct);
         _logger.LogInformation("StopLiveView = {Error}", err);
-        state.StatusMessage = $"Live view stopped ({err}).";
+        if (!afterGiveUp)
+            state.StatusMessage = $"Live view stopped ({err}).";
+        else if (err is not EdsError.OK)
+            state.StatusMessage += $" Stopping live view on the camera failed too ({err}).";
     });
 
     private const int WifiMenuHintAfter = 30;
@@ -1134,7 +1143,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 
                     // Hand the display back. Without this the body stays on Evf_OutputDevice=PC: an R6
                     // kept its screen black, ignored every button and needed a power cycle.
-                    StopLiveView();
+                    StopLiveView(afterGiveUp: true);
                     break;
                 }
             }
