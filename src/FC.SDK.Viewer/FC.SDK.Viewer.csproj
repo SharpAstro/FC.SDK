@@ -40,8 +40,9 @@
   </ItemGroup>
   <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
     <!-- 7.84 is the first with HDR: VulkanContext.Create(hdr: true), VkTexture.CreateFromRgbaFloat,
-         VkRenderer.DrawHdrImage. -->
-    <PackageReference Include="SdlVulkan.Renderer" Version="7.84.*" />
+         VkRenderer.DrawHdrImage. 7.85 is the floor because the 7.83 and 7.84 packages depended on
+         DIR.Lib.Debug instead of DIR.Lib, which would put two DIR.Lib assemblies in this build. -->
+    <PackageReference Include="SdlVulkan.Renderer" Version="7.85.*" />
     <!-- Not below the DIR.Lib that SdlVulkan.Renderer 7.84 was built against (11.48). -->
     <PackageReference Include="DIR.Lib" Version="11.48.*" />
     <!-- The single-instance gate, shared with the TianWen viewer and GUI. -->
