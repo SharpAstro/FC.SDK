@@ -157,6 +157,51 @@ public class PtpIpTransportTests
         await release; // hold both connections open, answer nothing
     }
 
+    /// <summary>
+    /// A handshake that fails after a connection was opened (here the body answers InitFail, as it does
+    /// to a GUID it did not pair with) left that connection open, and the next attempt opened new ones
+    /// over it.
+    /// </summary>
+    [Fact]
+    public async Task AFailedHandshakeClosesTheConnectionItOpened()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var camera = RefuseHandshakeAsync(listener, timeout.Token);
+
+        await using (var transport = new PtpIpTransport("127.0.0.1", port, "test"))
+        {
+            await Should.ThrowAsync<IOException>(() => transport.ConnectAsync(timeout.Token));
+
+            // Asked while the transport is still alive: disposing it would close the socket anyway.
+            (await camera).ShouldBeTrue("the refused command connection was left open");
+        }
+
+        listener.Stop();
+    }
+
+    /// <summary>Plays a camera that refuses the pairing. Answers whether the initiator then closed its end.</summary>
+    private static async Task<bool> RefuseHandshakeAsync(TcpListener listener, CancellationToken ct)
+    {
+        using var command = await listener.AcceptTcpClientAsync(ct);
+        var commandStream = command.GetStream();
+        (await ReadPacketAsync(commandStream, ct)).Type.ShouldBe(PtpIpPacketType.InitCommandRequest);
+        await commandStream.WriteAsync(Packet(PtpIpPacketType.InitFail, new byte[4]), ct);
+
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        wait.CancelAfter(TimeSpan.FromSeconds(2));
+        try
+        {
+            return await commandStream.ReadAsync(new byte[1], wait.Token) == 0;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>The camera's side of the four-way handshake. The caller owns both connections.</summary>
     private static async Task<(TcpClient Command, TcpClient Events)> AcceptHandshakeAsync(TcpListener listener, CancellationToken ct)
     {

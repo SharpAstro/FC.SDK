@@ -69,6 +69,23 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         // connection the body never answered, and it dropped both a minute later.
         if (_connected) return;
 
+        try
+        {
+            await HandshakeAsync(ct);
+        }
+        catch
+        {
+            // Close whatever the handshake opened before it failed, or the next attempt opens new
+            // connections over it and the old ones live until finalized.
+            await CloseAsync();
+            throw;
+        }
+
+        _connected = true;
+    }
+
+    private async Task HandshakeAsync(CancellationToken ct)
+    {
         // Step 1: Command connection
         _commandClient = new TcpClient();
         _commandClient.ReceiveTimeout = HandshakeTimeoutMs;
@@ -117,7 +134,6 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         // Reset timeouts for normal operation
         _commandClient.ReceiveTimeout = 10000;
         _commandClient.SendTimeout = 10000;
-        _connected = true;
     }
 
     public async ValueTask SendAsync(ReadOnlyMemory<byte> packet, CancellationToken ct = default)
@@ -248,12 +264,16 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         return buf;
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync() => CloseAsync();
+
+    private async ValueTask CloseAsync()
     {
         if (_commandStream is not null) await _commandStream.DisposeAsync();
         if (_eventStream is not null) await _eventStream.DisposeAsync();
         _commandClient?.Dispose();
         _eventClient?.Dispose();
+        _commandStream = null;
+        _eventStream = null;
         _commandClient = null;
         _eventClient = null;
     }
