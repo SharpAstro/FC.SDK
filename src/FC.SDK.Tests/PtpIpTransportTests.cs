@@ -12,6 +12,9 @@ namespace FC.SDK.Tests;
 /// <see cref="PtpIpTransport"/> against a scripted PTP/IP responder on loopback, each test playing the
 /// camera's side of one exchange an EOS R6 got wrong or exposed.
 /// </summary>
+// Real sockets, so not a unit test: the category lets a unit-only run leave them out
+// (`dotnet test --filter "Category!=Integration"`). CI still runs everything.
+[Trait("Category", "Integration")]
 public class PtpIpTransportTests
 {
     /// <summary>
@@ -173,7 +176,8 @@ public class PtpIpTransportTests
 
         await using (var transport = new PtpIpTransport("127.0.0.1", port, "test"))
         {
-            await Should.ThrowAsync<IOException>(() => transport.ConnectAsync(timeout.Token));
+            var refused = await Should.ThrowAsync<IOException>(() => transport.ConnectAsync(timeout.Token));
+            refused.Message.ShouldContain("GUID", Case.Sensitive, "the error should say the pairing was refused");
 
             // Asked while the transport is still alive: disposing it would close the socket anyway.
             (await camera).ShouldBeTrue("the refused command connection was left open");

@@ -77,7 +77,15 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         {
             // Close whatever the handshake opened before it failed, or the next attempt opens new
             // connections over it and the old ones live until finalized.
-            await CloseAsync();
+            try
+            {
+                await CloseAsync();
+            }
+            catch
+            {
+                // The handshake's own failure is the one to report, not a failure to tidy up after it.
+            }
+
             throw;
         }
 
@@ -100,6 +108,8 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         var ackBuf = new byte[512];
         int ackLen = await ReadPtpIpPacketAsync(_commandStream, ackBuf, ct);
         var ackType = (PtpIpPacketType)BinaryPrimitives.ReadUInt32LittleEndian(ackBuf.AsSpan(4));
+        if (ackType is PtpIpPacketType.InitFail)
+            throw InitFailed(ackBuf, ackLen);
         if (ackType is not PtpIpPacketType.InitCommandAck)
             throw new IOException($"Expected InitCommandAck, got {ackType}");
 
@@ -128,12 +138,28 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         var eventAckBuf = new byte[64];
         int eventAckLen = await ReadPtpIpPacketAsync(_eventStream, eventAckBuf, ct);
         var eventAckType = (PtpIpPacketType)BinaryPrimitives.ReadUInt32LittleEndian(eventAckBuf.AsSpan(4));
+        if (eventAckType is PtpIpPacketType.InitFail)
+            throw InitFailed(eventAckBuf, eventAckLen);
         if (eventAckType is not PtpIpPacketType.InitEventAck)
             throw new IOException($"Expected InitEventAck, got {eventAckType}");
 
         // Reset timeouts for normal operation
         _commandClient.ReceiveTimeout = 10000;
         _commandClient.SendTimeout = 10000;
+    }
+
+    /// <summary>
+    /// A Canon body pairs with the client GUID of its first connection and answers Init_Fail to any other
+    /// afterwards, so say that rather than only naming the packet type.
+    /// </summary>
+    private IOException InitFailed(byte[] packet, int length)
+    {
+        var reason = length >= PtpIpHeaderSize + 4
+            ? $" (reason 0x{BinaryPrimitives.ReadUInt32LittleEndian(packet.AsSpan(PtpIpHeaderSize)):X})"
+            : "";
+        return new IOException(
+            $"PTP/IP {_host} refused the connection with Init_Fail{reason}. A Canon body pairs with one client GUID " +
+            "and refuses any other: reconnect with the GUID it was paired under, or clear the pairing on the camera.");
     }
 
     public async ValueTask SendAsync(ReadOnlyMemory<byte> packet, CancellationToken ct = default)
