@@ -684,6 +684,58 @@ event-stream property cache side by side, and writes a timestamped log of every 
   Release and does not contain it. See `src/Directory.Build.props`. It lets the app answer `screenshot` /
   `describe_ui` / synthesized clicks over loopback, which is how the UI gets verified without a camera.
 
+## Camera scripts (`src/FC.SDK.Scripting`, `scripts/*.camscript`)
+
+A script is a measurement with an operator in the loop: a fixed sequence of camera operations,
+checks on what the body reports, and prompts for what only a person at the camera can do. The viewer
+runs one from the **Scripts** section of the left panel and shows each prompt as a bar under the top
+bar (Done / Skip / Abort, or Yes / No / Abort); every step and every answer goes to the log and to
+`script-<name>-<timestamp>.txt` in the output directory. That transcript is what to ask a reporter
+for when the question needs their hands on the body.
+
+```
+let rest = read Evf_OutputDevice
+for output in [EvfOutputDevice.PC, EvfOutputDevice.TFT | EvfOutputDevice.PC] {
+    start-liveview output
+    expect read Evf_OutputDevice == output
+    frames 3s min 5
+    confirm "Press the shutter button on the body, let go, then click Done"
+    wait-object 10s
+    stop-liveview
+    expect read Evf_OutputDevice == rest
+}
+```
+
+- **Statements**: `let`, `set <code> = <value>`, `expect`, `log`, `start-liveview [output]`,
+  `stop-liveview`, `frames <duration> [min <n>]`, `release`, `wait-object <duration>`, `confirm`,
+  `sleep`, `for x in [...] { }`. Each starts with its keyword and needs no terminator; `#` comments.
+- **Expressions**: `read <code>` (past the cache), `ask "question"` (1 or 0), `== != < > <= >=`,
+  `| & ~`, brackets, hex and decimal numbers, strings. Comparison binds loosest, so
+  `read 0xD1B0 == rest | EvfOutputDevice.PC` needs no brackets.
+- **Constants**: every member of the SDK's value enums as `Type.Member`, with or without the
+  `Eds`/`Canon` prefix. A property name (`Evf_OutputDevice`, `PropertyId.ISOSpeed`) is its **PTP
+  code**, taken from `CanonPropertyMap`, so only verified ids exist; a raw code always works.
+- **A script is checked before it runs.** A syntax error or an undefined name is refused with its
+  line, before the camera is touched. The old diagnostics dispatch ran its default experiment on a
+  mistyped mode name, and that is the failure this exists to rule out.
+- **A failed check does not stop a run**; the rows after it usually explain it. The operator
+  (Abort), an unanswered `read`, or a dropped link does, and live view the script started is stopped
+  for it either way.
+- **In the viewer each step takes the action gate for itself.** A script is not one queued action:
+  the live-view loop and the auto-download need the camera between its steps. `frames` counts the
+  viewer's own decoded frames (about 4 a second on a 6D there, against 20 headless), so keep `min`
+  low; it asks "is live view delivering", not "how fast".
+- The grammar is `ScriptGrammar.lalr.yaml`, compiled by LALR.CC's source generator at build time
+  (tables, AST records, visitor). `SharpAstro.LALR.CC` is a dependency of `FC.SDK.Scripting` and so
+  of the viewer, and **not of `FC.SDK`**. The project is internal (not packed) while the language
+  is young. `IScriptCamera` and `IScriptHost` are the seams: the viewer implements both over its own
+  state, `CanonScriptCamera` is the plain one for a console host, and the tests use fakes.
+
+**Verified on a 6D through the viewer (2026-11-12)**: an operator-free script of 21 checks passed,
+covering PC and `TFT | PC` starts, the default start, a PTP release with both RAW+JPEG objects
+arriving, and two starts with one stop. The prompt bar was seen on screen. An operator run of
+`scripts/evf-output.camscript` (body presses) has not been completed yet.
+
 ## Sibling working copies
 
 `src/Directory.Build.props` owns one `UseLocalSiblings` switch for the whole repo: when the Codecs,

@@ -71,6 +71,15 @@ public sealed class ViewerState
     public Raster? LiveViewFrame { get; set; }
     public int LiveViewFrameCount { get; set; }
 
+    /// <summary>Size of the last live-view JPEG that decoded, for a script's <c>frames</c> report.</summary>
+    public int LiveViewFrameBytes { get; set; }
+
+    /// <summary>The camera script that is running, or null. Its prompt, if any, is on screen.</summary>
+    public ScriptSession? Script { get; set; }
+
+    /// <summary>Scripts on offer in the left panel: shipped ones, and any in the output directory.</summary>
+    public IReadOnlyList<string> ScriptFiles { get; set; } = [];
+
     /// <summary>
     /// The pane the preview area shows. The tabs set it directly; actions auto-switch it — starting
     /// live view selects <see cref="PreviewPane.LiveView"/>, a downloaded capture selects

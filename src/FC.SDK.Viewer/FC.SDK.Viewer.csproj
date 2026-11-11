@@ -26,6 +26,12 @@
     <!-- Raw: decodes a downloaded CR2/CR3 so a capture can be verified in-app. Also the path
          through which SharpAstro.Jpeg (live-view + thumbnail JPEG decode) arrives. -->
     <ProjectReference Include="..\FC.SDK.Raw\FC.SDK.Raw.csproj" />
+    <!-- Camera scripts: a measurement with an operator in the loop, run from the left panel. -->
+    <ProjectReference Include="..\FC.SDK.Scripting\FC.SDK.Scripting.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Shipped beside the binary, so a released viewer can run them with nothing else installed. -->
+    <Content Include="..\..\scripts\*.camscript" LinkBase="scripts" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Renderer siblings (SdlVulkan.Renderer + DIR.Lib). ProjectReference when the working copies
