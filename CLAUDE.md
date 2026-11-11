@@ -437,7 +437,12 @@ right for both (issue #21, measured by its reporter on both bodies over WPD raw 
 
 The arithmetic is in `CanonEvfOutput` and pinned by `EvfOutputTests`. **What the bodies do with the
 new values has not been re-measured**: the 3.3 change was written from the issue's tables with no
-camera attached, and the hardware check is with the reporter.
+camera attached, and the hardware check is with the reporter. `FC.SDK.Diagnostics evfout` is that
+check: it reads the property past the cache at rest, during and after each of three starts (default,
+PC alone, `TFT | PC`), counts real frames, and covers two starts with one stop and a body found on PC
+alone. With `--shoot` it also asks the operator to press the shutter button on the body in each
+state, behind a live-view-off control, which costs four actuations. That press test is the open
+question on a 6D: whether PC alone silences its controls as it does an R6's was never measured.
 
 ## EOS R6 over WPD, verified 2026-11-05/06
 
@@ -772,7 +777,7 @@ dotnet run --project src/FC.SDK.Diagnostics -- evf [--host]
 ```
 
 Each experiment is a **System.CommandLine subcommand** (`matrix`, `diag`, `mlucheck`, `mluself`,
-`clack`, `evf`, `zoom`, `zoompix`, `lens`), so `--help` is the list and a typo is an error. That last
+`clack`, `evf`, `evfout`, `zoom`, `zoompix`, `lens`), so `--help` is the list and a typo is an error. That last
 part is not cosmetic: the old `args.Contains("--evf")` dispatch treated an unrecognised argument as
 "no mode given" and therefore ran the **default** one, so a mistyped `--evff` fired the mirror-lockup
 matrix — minutes of shutter actuations — instead of reading a few properties.
