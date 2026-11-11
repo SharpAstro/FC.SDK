@@ -1367,7 +1367,48 @@ public sealed class CanonCamera : IAsyncDisposable
     public Task<EdsError> ResetTransferAsync(uint objectHandle, CancellationToken ct = default) =>
         _canon.ResetTransferAsync(objectHandle, ct);
 
-    public async Task<EdsError> StartLiveViewAsync(CancellationToken ct = default)
+    /// <summary>
+    /// What <c>Evf_OutputDevice</c> read before live view started, for <see cref="StopLiveViewAsync"/>
+    /// to put back. Null when it was never read, or was read with frames already going to the host.
+    /// </summary>
+    private uint? _evfOutputBeforeLiveView;
+
+    /// <summary>
+    /// Starts live view, adding the host to whatever the body's display already shows.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>Evf_OutputDevice</c> is a bit mask and this writes <c>current | PC</c>. A DSLR at rest
+    /// reads 0 and gets <see cref="EdsEvfOutputDevice.PC"/> alone: mirror up, its own screen dark. A
+    /// mirrorless body reads <see cref="EdsEvfOutputDevice.TFT"/> and keeps its display, which
+    /// matters: an EOS R6 given PC alone ignores its wired remote and its own dial and buttons
+    /// (issue #21). Use the overload that takes the output to choose it yourself.
+    /// </para>
+    /// <para>
+    /// The value read here is what <see cref="StopLiveViewAsync"/> writes back.
+    /// </para>
+    /// </remarks>
+    public Task<EdsError> StartLiveViewAsync(CancellationToken ct = default) =>
+        StartLiveViewAsync(output: null, ct);
+
+    /// <summary>
+    /// Starts live view with exactly this output, in place of "the host as well as what the body
+    /// shows now".
+    /// </summary>
+    /// <param name="output">
+    /// Must include <see cref="EdsEvfOutputDevice.PC"/> or <see cref="EdsEvfOutputDevice.PC_Small"/>,
+    /// or no frame would ever reach the host; anything else answers
+    /// <see cref="EdsError.InvalidParameter"/>. <see cref="EdsEvfOutputDevice.PC"/> alone darkens a
+    /// mirrorless body's display and, on an EOS R6, stops its controls and wired remote responding
+    /// until live view stops.
+    /// </param>
+    /// <param name="ct">Cancellation.</param>
+    public Task<EdsError> StartLiveViewAsync(EdsEvfOutputDevice output, CancellationToken ct = default) =>
+        CanonEvfOutput.SendsToHost((uint)output)
+            ? StartLiveViewAsync((uint?)output, ct)
+            : Task.FromResult(EdsError.InvalidParameter);
+
+    private async Task<EdsError> StartLiveViewAsync(uint? output, CancellationToken ct)
     {
         // Mirrors libgphoto2's camera_capture_preview order for EOS bodies. Two steps beyond just
         // "output to PC":
@@ -1383,7 +1424,18 @@ public sealed class CanonCamera : IAsyncDisposable
             if (setMode is not EdsError.OK and not EdsError.DeviceBusy) return setMode;
         }
 
-        var err = await SetPropertyAsync(EdsPropertyId.Evf_OutputDevice, (uint)EdsEvfOutputDevice.PC, ct);
+        // Read before writing: the value at rest differs by body (0 on a 6D, 1 on an R6), it decides
+        // what to write now, and it is the only thing a stop can correctly put back.
+        var (readErr, reading) = await GetPropertyAsync(EdsPropertyId.Evf_OutputDevice, ct);
+        uint? current = readErr is EdsError.OK ? reading : null;
+        _evfOutputBeforeLiveView = CanonEvfOutput.Remember(current, _evfOutputBeforeLiveView);
+
+        var target = output ?? CanonEvfOutput.StartValue(current);
+        _logger.LogDebug(
+            "StartLiveView: Evf_OutputDevice reads {Current}, writing {Target}",
+            current is { } c ? (EdsEvfOutputDevice)c : null, (EdsEvfOutputDevice)target);
+
+        var err = await SetPropertyAsync(EdsPropertyId.Evf_OutputDevice, target, ct);
         if (err is not EdsError.OK) return err;
 
         await _canon.KeepDeviceOnAsync(ct);
@@ -1701,12 +1753,31 @@ public sealed class CanonCamera : IAsyncDisposable
         return err;
     }
 
+    /// <summary>
+    /// Stops live view and puts <c>Evf_OutputDevice</c> back to what it read before
+    /// <see cref="StartLiveViewAsync(CancellationToken)"/>.
+    /// </summary>
+    /// <remarks>
+    /// That value differs by body: a DSLR reads 0 at rest and a mirrorless body
+    /// <see cref="EdsEvfOutputDevice.TFT"/>. Writing TFT to both, as this did before 3.3, left an
+    /// EOS 6D with live view running on its own screen (issue #21). TFT is still the answer when the
+    /// state at rest is unknown and the body is sending frames to the host, since a body left on PC
+    /// alone can stop answering its buttons. A body that is not sending to the host, and that this
+    /// object never started, is left as it is.
+    /// </remarks>
     public async Task<EdsError> StopLiveViewAsync(CancellationToken ct = default)
     {
         var err = await _canon.TerminateViewfinderAsync(ct);
 
-        // Reset live view output
-        await SetPropertyAsync(EdsPropertyId.Evf_OutputDevice, (uint)EdsEvfOutputDevice.TFT, ct);
+        var (readErr, reading) = await GetPropertyAsync(EdsPropertyId.Evf_OutputDevice, ct);
+        var target = CanonEvfOutput.StopValue(
+            _evfOutputBeforeLiveView, readErr is EdsError.OK ? reading : null);
+        _evfOutputBeforeLiveView = null;
+
+        // Not folded into the result, as before: a caller asks "did live view stop", and the
+        // write's own failure is already logged by SetPropertyAsync.
+        if (target is { } value)
+            await SetPropertyAsync(EdsPropertyId.Evf_OutputDevice, value, ct);
 
         return err;
     }
