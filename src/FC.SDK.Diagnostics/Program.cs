@@ -83,6 +83,7 @@ hostOpt.Recursive = releaseOpt.Recursive = true;
     ("mluself",  "Watch 0xD1BF across a self-timer countdown.", [driveOpt, waitOpt]),
     ("clack",    "A/B listening test: self-timer with lockup off, then on.", [driveOpt]),
     ("evf",      "String properties, live-view zoom / pan / autofocus, envelope record dump.", []),
+    ("evfout",   "Evf_OutputDevice across live-view start and stop: restored? Body controls alive? (#21)", [shootOpt]),
     ("zoom",     "Why a zoom is ignored: sweep factors and LV AF systems against the zoom rect.", []),
     ("zoompix",  "Visual proof of magnification and panning — writes JPEGs to compare.", [avOpt, tvOpt, isoOpt]),
     ("lens",     "Dump the lens / focus properties. Run with no lens, lens at AF, lens at MF and diff.", []),
@@ -1218,6 +1219,174 @@ try
         var (c2, c2Bytes) = await CollectAsync("CTRL-2", TimeSpan.FromSeconds(15));
         Log($"  control 2: {(c2 ? $"IMAGE {c2Bytes:N0} bytes" : "*** NO IMAGE — the body stopped mid-run")}");
         if (!c2) failures++;
+        return failures;
+    }
+
+    if (mode is "evfout")
+    {
+        // Issue #21: Evf_OutputDevice (0xD1B0) is a bit mask whose value at rest differs by body, and
+        // what the SDK writes to it at live-view start and stop decides two things nobody can read off
+        // a response code: whether the body's own controls still work during live view (an R6 on PC
+        // alone ignored its wired remote, dial and buttons), and whether a stop really leaves the body
+        // as it was found (a 6D was left with live view on its own screen).
+        //
+        // Every reading here bypasses the cache (refresh: true). The cache mirrors our own writes, so
+        // a cached read after a write is this harness agreeing with itself.
+        async Task<uint?> ReadOutput()
+        {
+            await camera!.DrainEventsAsync();
+            var (e, bytes) = await camera.GetRawPropertyBytesAsync(0xD1B0, refresh: true);
+            return e is EdsError.OK && bytes.Length >= 4 ? BitConverter.ToUInt32(bytes, 0) : null;
+        }
+        static string Show(uint? v) => v is { } x ? $"0x{x:X} ({(EdsEvfOutputDevice)(x & 0x7FFF_FFFF)})" : "unreadable";
+
+        // Real frames only: a JPEG start-of-image and a plausible size. Counting OK answers would
+        // count the zero-length frames an idle body hands out forever.
+        async Task<(int Frames, int Bytes)> CountFrames(TimeSpan window)
+        {
+            var (frames, last) = (0, 0);
+            var sw = Stopwatch.StartNew();
+            while (sw.Elapsed < window)
+            {
+                var (e, jpeg) = await camera!.GetLiveViewFrameAsync();
+                if (e is EdsError.OK && jpeg.Length > 1000 && jpeg[0] == 0xFF && jpeg[1] == 0xD8)
+                {
+                    frames++;
+                    last = jpeg.Length;
+                }
+                else await Task.Delay(30);
+            }
+            return (frames, last);
+        }
+
+        // The operator's part, and the only one that spends shutter actuations: does a press on the
+        // BODY (its shutter button, or a wired remote) still expose? Three beeps, then press and hold
+        // for two seconds. Judged on an object arriving, which is the only evidence there is.
+        var pressTest = parse.GetValue(shootOpt);
+        async Task<string> BodyPress(string id)
+        {
+            if (!pressTest) return "not tested (pass --shoot)";
+            objects.Clear();
+            Log("    >>> after the third beep, press the shutter button ON THE BODY and hold it 2 s <<<");
+            for (int i = 0; i < 3; i++)
+            {
+                if (OperatingSystem.IsWindows()) Console.Beep(1200, 120);
+                await Task.Delay(880);
+            }
+            Log("    >>> PRESS NOW <<<");
+            // Frames keep being read while waiting: the issue's remote failed with frames flowing, and
+            // a press against a stalled stream would be a different experiment.
+            var sw = Stopwatch.StartNew();
+            while (sw.Elapsed < TimeSpan.FromSeconds(10) && objects.IsEmpty)
+                await CountFrames(TimeSpan.FromMilliseconds(300));
+            var (delivered, size) = await CollectAsync(id, TimeSpan.FromSeconds(1));
+            return delivered ? $"EXPOSED ({size:N0} bytes)" : "NOTHING in 10 s";
+        }
+
+        var allowedOutputs = await camera.GetRawAllowedValuesAsync(0xD1B0);
+        Log("Evf_OutputDevice allowed: " + (allowedOutputs is null
+            ? "none announced"
+            : string.Join(", ", allowedOutputs.Select(v => $"0x{v:X}"))));
+
+        var atRest = await ReadOutput();
+        Log($"Evf_OutputDevice at rest: {Show(atRest)}");
+        if (atRest is null)
+        {
+            Log("Cannot read the property, so nothing below could be judged. Stopping.");
+            return 1;
+        }
+        if ((atRest.Value & 0x0A) != 0)
+            Log("  NOTE: the body is ALREADY sending to the host, so this is not its value at rest. "
+                + "Power-cycle it and run again for the restore rows to mean anything.");
+
+        if (pressTest)
+        {
+            // The control. If a press with live view off does not expose, the operator, the lens or
+            // the card is the reason, and every "NOTHING" below would say nothing about live view.
+            Log("\n--- control: body press with live view off ---");
+            var control = await BodyPress("evfout-control");
+            Log($"  control: {control}");
+            if (!control.StartsWith("EXPOSED"))
+            {
+                Log("  The control did not expose. The press rows below are VOID.");
+                failures++;
+            }
+        }
+
+        (string Name, Func<Task<EdsError>> Start)[] rows =
+        [
+            ("default (current | PC)", () => camera.StartLiveViewAsync()),
+            ("PC alone", () => camera.StartLiveViewAsync(EdsEvfOutputDevice.PC)),
+            ("TFT | PC", () => camera.StartLiveViewAsync(EdsEvfOutputDevice.TFT | EdsEvfOutputDevice.PC)),
+        ];
+
+        var summary = new List<string>();
+        foreach (var (name, start) in rows)
+        {
+            Log($"\n--- start: {name} ---");
+            Log($"  StartLiveView = {await start()}");
+            await Task.Delay(1500);
+            var during = await ReadOutput();
+            var (frames, bytes) = await CountFrames(TimeSpan.FromSeconds(3));
+            Log($"  during: {Show(during)}   {frames} real frames in 3 s (last {bytes:N0} bytes)");
+            if (frames is 0)
+            {
+                Log("  NO FRAMES. Live view did not start, so this row says nothing about the body's controls.");
+                failures++;
+            }
+
+            var press = await BodyPress($"evfout-{name.Replace(' ', '_').Replace('|', '+')}");
+            Log($"  body press: {press}");
+
+            Log($"  StopLiveView = {await camera.StopLiveViewAsync()}");
+            await Task.Delay(1500);
+            var after = await ReadOutput();
+            var restored = after == atRest;
+            Log($"  after stop: {Show(after)}   {(restored ? "back to its value at rest" : "NOT RESTORED")}");
+            if (!restored) failures++;
+
+            summary.Add($"{name,-24} during {Show(during),-16} frames {frames,3}  press: {press,-28} after stop {Show(after)}"
+                + (restored ? "" : "  <-- NOT RESTORED"));
+        }
+
+        // Two starts and one stop: the second start reads the value the first one wrote, and must
+        // not take that for the body's value at rest.
+        Log("\n--- two starts, one stop ---");
+        Log($"  StartLiveView = {await camera.StartLiveViewAsync()}");
+        await Task.Delay(1000);
+        Log($"  StartLiveView = {await camera.StartLiveViewAsync()}");
+        await Task.Delay(1000);
+        Log($"  StopLiveView = {await camera.StopLiveViewAsync()}");
+        await Task.Delay(1500);
+        var afterDouble = await ReadOutput();
+        Log($"  after: {Show(afterDouble)}   {(afterDouble == atRest ? "back to its value at rest" : "NOT RESTORED")}");
+        if (afterDouble != atRest) failures++;
+        summary.Add($"{"two starts, one stop",-24} after stop {Show(afterDouble)}"
+            + (afterDouble == atRest ? "" : "  <-- NOT RESTORED"));
+
+        // A body an earlier session left on PC alone. The SDK cannot know its value at rest and
+        // writes TFT; this row only records what that leaves, then puts the real value back.
+        Log("\n--- found already on PC alone (an earlier session's leftover) ---");
+        Log($"  raw write 0xD1B0 = 2: {await camera.SetRawPropertyAsync(0xD1B0, 2)}");
+        await Task.Delay(1500);
+        Log($"  found: {Show(await ReadOutput())}");
+        Log($"  StartLiveView = {await camera.StartLiveViewAsync()}");
+        await Task.Delay(1500);
+        Log($"  StopLiveView = {await camera.StopLiveViewAsync()}");
+        await Task.Delay(1500);
+        var afterLeftover = await ReadOutput();
+        Log($"  after: {Show(afterLeftover)}   (TFT is the documented fallback; value at rest was {Show(atRest)})");
+        summary.Add($"{"leftover PC alone",-24} after stop {Show(afterLeftover)}");
+        if (afterLeftover != atRest)
+        {
+            Log($"  putting the value at rest back: {await camera.SetRawPropertyAsync(0xD1B0, atRest.Value & 0x7FFF_FFFF)}");
+            await Task.Delay(1500);
+            Log($"  now: {Show(await ReadOutput())}");
+        }
+
+        Console.WriteLine();
+        Log($"======== {camera.Model}: Evf_OutputDevice at rest {Show(atRest)} ========");
+        foreach (var line in summary) Log("  " + line);
         return failures;
     }
 
