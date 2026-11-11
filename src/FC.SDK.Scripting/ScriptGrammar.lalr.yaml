@@ -1,0 +1,168 @@
+# The camera script language: a sequence of keyword-led statements over a small expression
+# grammar. Run by FC.SDK.Scripting's interpreter, in the viewer or headless.
+#
+# Shape decisions, so the grammar stays conflict-free without precedence groups:
+#   - Every statement starts with its own keyword and needs no terminator. Newlines are plain
+#     whitespace. An expression can never start with a statement keyword, so "where does this
+#     statement end" is always decided by one token of lookahead.
+#   - `read` and `ask` are expression keywords only. An `ask` STATEMENT would collide with
+#     `start-liveview` followed by an optional expression; `log ask "..."` records an answer.
+#   - Operator precedence is stratified into Cmp > Or > And > Unary > Primary, loosest first, so
+#     `read 0xD1B0 == rest | pc` is (read 0xD1B0) == (rest | pc) with no derivation hints.
+#   - Every production carries an action, pass-throughs included: the parser is run with
+#     trimReductions off, so the visitor sees each one and nothing depends on what a default
+#     reduction leaves behind.
+
+symbols:
+  - S            # start
+  - Stmts
+  - Stmt
+  - Exprs
+  - Expr
+  - Cmp
+  - Or
+  - And
+  - Unary
+  - Primary
+  - 'let'
+  - 'set'
+  - 'expect'
+  - 'log'
+  - 'start-liveview'
+  - 'stop-liveview'
+  - 'frames'
+  - 'min'
+  - 'release'
+  - 'wait-object'
+  - 'confirm'
+  - 'sleep'
+  - 'for'
+  - 'in'
+  - 'read'
+  - 'ask'
+  - '='
+  - '=='
+  - '!='
+  - '<='
+  - '>='
+  - '<'
+  - '>'
+  - '|'
+  - '&'
+  - '~'
+  - '('
+  - ')'
+  - '['
+  - ']'
+  - '{'
+  - '}'
+  - ','
+  - duration
+  - number
+  - qualified
+  - ident
+  - string
+  - WS
+  - COMMENT
+
+productions:
+  - derivation: none
+    rules:
+      - { lhs: S, rhs: [Stmts], action: script }
+
+  # Right-recursive lists, as in LALR.CC's JSON example: leftmost picks the one-rule path.
+  - derivation: leftmost
+    rules:
+      - { lhs: Stmts, rhs: [Stmt],             action: stmtsOne }
+      - { lhs: Stmts, rhs: [Stmt, Stmts],      action: stmtsCons }
+      - { lhs: Exprs, rhs: [Expr],             action: exprsOne }
+      - { lhs: Exprs, rhs: [Expr, ',', Exprs], action: exprsCons }
+
+  - derivation: none
+    rules:
+      - { lhs: Stmt, rhs: ['let', ident, '=', Expr],          action: letStmt }
+      - { lhs: Stmt, rhs: ['set', Unary, '=', Expr],          action: setStmt }
+      - { lhs: Stmt, rhs: ['expect', Expr],                   action: expectStmt }
+      - { lhs: Stmt, rhs: ['log', Expr],                      action: logStmt }
+      - { lhs: Stmt, rhs: ['start-liveview'],                 action: startLiveView }
+      - { lhs: Stmt, rhs: ['start-liveview', Expr],           action: startLiveViewWith }
+      - { lhs: Stmt, rhs: ['stop-liveview'],                  action: stopLiveView }
+      - { lhs: Stmt, rhs: ['frames', duration],               action: framesStmt }
+      - { lhs: Stmt, rhs: ['frames', duration, 'min', Expr],  action: framesMinStmt }
+      - { lhs: Stmt, rhs: ['release'],                        action: releaseStmt }
+      - { lhs: Stmt, rhs: ['wait-object', duration],          action: waitObjectStmt }
+      - { lhs: Stmt, rhs: ['confirm', string],                action: confirmStmt }
+      - { lhs: Stmt, rhs: ['sleep', duration],                action: sleepStmt }
+      - { lhs: Stmt, rhs: ['for', ident, 'in', '[', Exprs, ']', '{', Stmts, '}'], action: forStmt }
+
+  - derivation: none
+    rules:
+      - { lhs: Expr,    rhs: [Cmp],              action: exprCmp }
+      - { lhs: Cmp,     rhs: [Or],               action: cmpOr }
+      - { lhs: Cmp,     rhs: [Or, '==', Or],     action: cmpEq }
+      - { lhs: Cmp,     rhs: [Or, '!=', Or],     action: cmpNe }
+      - { lhs: Cmp,     rhs: [Or, '<', Or],      action: cmpLt }
+      - { lhs: Cmp,     rhs: [Or, '>', Or],      action: cmpGt }
+      - { lhs: Cmp,     rhs: [Or, '<=', Or],     action: cmpLe }
+      - { lhs: Cmp,     rhs: [Or, '>=', Or],     action: cmpGe }
+      - { lhs: Or,      rhs: [And],              action: orAnd }
+      - { lhs: Or,      rhs: [Or, '|', And],     action: bitOr }
+      - { lhs: And,     rhs: [Unary],            action: andUnary }
+      - { lhs: And,     rhs: [And, '&', Unary],  action: bitAnd }
+      - { lhs: Unary,   rhs: [Primary],          action: unaryPrimary }
+      - { lhs: Unary,   rhs: ['~', Unary],       action: bitNot }
+      - { lhs: Unary,   rhs: ['read', Unary],    action: readExpr }
+      - { lhs: Primary, rhs: [number],           action: numberLit }
+      - { lhs: Primary, rhs: [string],           action: stringLit }
+      - { lhs: Primary, rhs: [ident],            action: nameRef }
+      - { lhs: Primary, rhs: [qualified],        action: qualifiedRef }
+      - { lhs: Primary, rhs: ['ask', string],    action: askExpr }
+      - { lhs: Primary, rhs: ['(', Expr, ')'],   action: parenExpr }
+
+# Longest match, first rule wins a tie: keywords sit above `ident` so `let` is a keyword and
+# `letter` an identifier. No alternation in the pattern language, hence two duration rules and
+# two number rules sharing a symbol.
+lexer:
+  root:
+    - { symbol: COMMENT,          match: '#[^\n]*',         action: ignore }
+    - { symbol: WS,               match: '[ \t\r\n]+',      action: ignore }
+    - { symbol: 'let',            match: 'let' }
+    - { symbol: 'set',            match: 'set' }
+    - { symbol: 'expect',         match: 'expect' }
+    - { symbol: 'log',            match: 'log' }
+    - { symbol: 'start-liveview', match: 'start\-liveview' }
+    - { symbol: 'stop-liveview',  match: 'stop\-liveview' }
+    - { symbol: 'frames',         match: 'frames' }
+    - { symbol: 'min',            match: 'min' }
+    - { symbol: 'release',        match: 'release' }
+    - { symbol: 'wait-object',    match: 'wait\-object' }
+    - { symbol: 'confirm',        match: 'confirm' }
+    - { symbol: 'sleep',          match: 'sleep' }
+    - { symbol: 'for',            match: 'for' }
+    - { symbol: 'in',             match: 'in' }
+    - { symbol: 'read',           match: 'read' }
+    - { symbol: 'ask',            match: 'ask' }
+    - { symbol: '==',             match: '==' }
+    - { symbol: '!=',             match: '!=' }
+    - { symbol: '<=',             match: '<=' }
+    - { symbol: '>=',             match: '>=' }
+    - { symbol: '=',              match: '=' }
+    - { symbol: '<',              match: '<' }
+    - { symbol: '>',              match: '>' }
+    - { symbol: '|',              match: '\|' }
+    - { symbol: '&',              match: '&' }
+    - { symbol: '~',              match: '~' }
+    - { symbol: '(',              match: '\(' }
+    - { symbol: ')',              match: '\)' }
+    - { symbol: '[',              match: '\[' }
+    - { symbol: ']',              match: '\]' }
+    - { symbol: '{',              match: '\{' }
+    - { symbol: '}',              match: '\}' }
+    - { symbol: ',',              match: ',' }
+    - { symbol: duration,         match: '[0-9]+(\.[0-9]+)?s' }
+    - { symbol: duration,         match: '[0-9]+ms' }
+    - { symbol: number,           match: '0x[0-9A-Fa-f]+' }
+    - { symbol: number,           match: '[0-9]+' }
+    - { symbol: qualified,        match: '[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*' }
+    - { symbol: ident,            match: '[A-Za-z_][A-Za-z0-9_]*' }
+    - { symbol: string,           match: '"[^"]*"' }

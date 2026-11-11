@@ -38,6 +38,9 @@
 	<!-- CommandGate and the protocol types are internal; the deadline behaviour is only testable
 	     from inside the assembly. -->
 	<InternalsVisibleTo Include="FC.SDK.Tests" />
+	<!-- For ScriptConstants: a property name in a script resolves to its PTP code through
+	     CanonPropertyMap, which is the one verified table and stays internal. -->
+	<InternalsVisibleTo Include="FC.SDK.Scripting" />
   </ItemGroup>
 
   <ItemGroup>
