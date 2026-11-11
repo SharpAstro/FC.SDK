@@ -1270,6 +1270,13 @@ try
         async Task<string> BodyPress(string id)
         {
             if (!pressTest) return "not tested (pass --shoot)";
+            // Self-paced when someone is at the keyboard: a run started remotely gave the operator
+            // no way to know a prompt was up, and its control was void for that reason alone.
+            if (!Console.IsInputRedirected)
+            {
+                Console.Write($"    [{id}] hand on the camera? Press Enter here, then wait for the beeps... ");
+                Console.ReadLine();
+            }
             objects.Clear();
             Log("    >>> after the third beep, press the shutter button ON THE BODY and hold it 2 s <<<");
             for (int i = 0; i < 3; i++)
