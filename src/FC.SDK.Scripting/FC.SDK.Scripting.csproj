@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Internal for now: the script language is young and must be free to change, so this is not
+         a package. The viewer and the diagnostics harness reference it as a project. -->
+    <IsPackable>false</IsPackable>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FC.SDK\FC.SDK.csproj" />
+    <!-- Parser runtime plus, in the package's analyzers folder, the source generator that turns
+         ScriptGrammar.lalr.yaml into the parse tables, AST records and visitor interface at build
+         time. No YAML is read at run time. Kept out of FC.SDK itself on purpose: the library's
+         consumers should not inherit a parser. -->
+    <PackageReference Include="SharpAstro.LALR.CC" Version="4.11.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AdditionalFiles Include="ScriptGrammar.lalr.yaml" />
+    <InternalsVisibleTo Include="FC.SDK.Scripting.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,50 @@
+# Live view output across start and stop (issue #21).
+#
+# Evf_OutputDevice (0xD1B0) is a bit mask whose value at rest differs by body: 0 on an EOS 6D,
+# 1 (TFT) on an EOS R6. This checks that a stop puts back what the start found, and asks the
+# operator whether the body's own shutter button still works in each state.
+#
+# Run it on a freshly power-cycled body, so "at rest" is real. It costs up to four shutter
+# actuations: one control with live view off, and one per start mode.
+
+let rest = read Evf_OutputDevice
+log rest
+
+# The control. If a press with live view off does not expose, the lens, the card or the operator
+# is the reason, and a "nothing" further down would say nothing about live view.
+confirm "CONTROL, live view off: press the shutter button on the body, let go, then click Done"
+wait-object 10s
+
+for output in [EvfOutputDevice.PC, EvfOutputDevice.TFT | EvfOutputDevice.PC] {
+    start-liveview output
+    sleep 1500ms
+    expect read Evf_OutputDevice == output
+    frames 3s min 30
+
+    confirm "Live view is running: press the shutter button on the body, let go, then click Done"
+    wait-object 10s
+    log ask "Is the camera's rear screen showing live view right now?"
+
+    stop-liveview
+    sleep 1500ms
+    expect read Evf_OutputDevice == rest
+}
+
+# The SDK's default: the host as well as whatever the body showed at rest.
+start-liveview
+sleep 1500ms
+expect read Evf_OutputDevice == rest | EvfOutputDevice.PC
+frames 3s min 30
+stop-liveview
+sleep 1500ms
+expect read Evf_OutputDevice == rest
+
+# Two starts and one stop: the second start reads what the first one wrote, and must not take
+# that for the body's value at rest.
+start-liveview
+sleep 1s
+start-liveview
+sleep 1s
+stop-liveview
+sleep 1500ms
+expect read Evf_OutputDevice == rest
