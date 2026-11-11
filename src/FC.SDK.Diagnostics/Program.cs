@@ -64,6 +64,10 @@ var shootOpt = new Option<bool>("--shoot")
 {
     Description = "Spend one shutter actuation to find out whether a still release is honoured here.",
 };
+var ptpReleaseOpt = new Option<bool>("--ptp-release")
+{
+    Description = "Also release over PTP during live view, then watch whether the stop restores. Two actuations.",
+};
 var avOpt = new Option<EdsAv>("--av") { Description = "Aperture.", DefaultValueFactory = _ => EdsAv.Av_5_6 , HelpName = "aperture" };
 var tvOpt = new Option<EdsTv>("--tv") { Description = "Shutter speed.", DefaultValueFactory = _ => EdsTv.Tv_1_125 , HelpName = "shutter" };
 var isoOpt = new Option<EdsISOSpeed>("--iso") { Description = "ISO.", DefaultValueFactory = _ => EdsISOSpeed.ISO_400 , HelpName = "iso" };
@@ -83,7 +87,7 @@ hostOpt.Recursive = releaseOpt.Recursive = true;
     ("mluself",  "Watch 0xD1BF across a self-timer countdown.", [driveOpt, waitOpt]),
     ("clack",    "A/B listening test: self-timer with lockup off, then on.", [driveOpt]),
     ("evf",      "String properties, live-view zoom / pan / autofocus, envelope record dump.", []),
-    ("evfout",   "Evf_OutputDevice across live-view start and stop: restored? Body controls alive? (#21)", [shootOpt]),
+    ("evfout",   "Evf_OutputDevice across live-view start and stop: restored? Body controls alive? (#21)", [shootOpt, ptpReleaseOpt]),
     ("zoom",     "Why a zoom is ignored: sweep factors and LV AF systems against the zoom rect.", []),
     ("zoompix",  "Visual proof of magnification and panning — writes JPEGs to compare.", [avOpt, tvOpt, isoOpt]),
     ("lens",     "Dump the lens / focus properties. Run with no lens, lens at AF, lens at MF and diff.", []),
@@ -1347,6 +1351,48 @@ try
 
             summary.Add($"{name,-24} during {Show(during),-16} frames {frames,3}  press: {press,-28} after stop {Show(after)}"
                 + (restored ? "" : "  <-- NOT RESTORED"));
+        }
+
+        // An exposure during live view, then a stop. Found by accident on a 6D: after a body press at
+        // TFT | PC the stop left the output at 3. The stop's own write is not visible from outside, so
+        // this releases over PTP (no operator needed), stops, and then writes the value at rest
+        // itself every half second, logging each answer, until the body holds it. How long that takes
+        // and what the refusals say is the finding.
+        if (parse.GetValue(ptpReleaseOpt))
+        {
+            foreach (var output in new[] { EdsEvfOutputDevice.PC, EdsEvfOutputDevice.TFT | EdsEvfOutputDevice.PC })
+            {
+                Log($"\n--- PTP release during live view at {output}, then stop ---");
+                Log($"  StartLiveView = {await camera.StartLiveViewAsync(output)}");
+                await Task.Delay(1500);
+                var (frames, _) = await CountFrames(TimeSpan.FromSeconds(1));
+                Log($"  during: {Show(await ReadOutput())}   {frames} real frames in 1 s");
+
+                objects.Clear();
+                var release = Stopwatch.StartNew();
+                Log($"  TakePicture = {await camera.TakePictureAsync()} after {release.ElapsedMilliseconds} ms");
+                var (delivered, size) = await CollectAsync($"evfout-ptp-{(uint)output}", TimeSpan.FromSeconds(10));
+                Log($"  {(delivered ? $"EXPOSED ({size:N0} bytes)" : "NOTHING: this row is void")}");
+                if (!delivered) failures++;
+
+                var sinceStop = Stopwatch.StartNew();
+                Log($"  StopLiveView = {await camera.StopLiveViewAsync()} after {sinceStop.ElapsedMilliseconds} ms");
+                var held = false;
+                for (int i = 0; i < 30 && !held; i++)
+                {
+                    var now = await ReadOutput();
+                    held = now == atRest;
+                    Log($"    +{sinceStop.Elapsed.TotalSeconds,4:F1}s reads {Show(now)}"
+                        + (held ? "   holds its value at rest" : ""));
+                    if (held) break;
+                    Log($"    +{sinceStop.Elapsed.TotalSeconds,4:F1}s write {Show(atRest)}: "
+                        + $"{await camera.SetRawPropertyAsync(0xD1B0, atRest.Value & 0x7FFF_FFFF)}");
+                    await Task.Delay(500);
+                }
+                summary.Add($"{$"PTP release at {output}",-24} stop restored "
+                    + (held ? $"by +{sinceStop.Elapsed.TotalSeconds:F1}s" : "NEVER in 15 s"));
+                if (!held) failures++;
+            }
         }
 
         // Two starts and one stop: the second start reads the value the first one wrote, and must
