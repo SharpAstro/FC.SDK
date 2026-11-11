@@ -420,6 +420,25 @@ and the whole 0xD180–0xD1A0 range is absent from EDSDK's own property table).
   better. Battery level in particular proves nothing on its own — level 0 streamed live view and delivered bulb
   exposures, and the level-0 MLU results reproduced exactly at level 2.
 
+## Live view output is a bit mask, and its value at rest differs by body
+
+`Evf_OutputDevice` (0xD1B0) reads **0 on a 6D at rest and 1 (`TFT`) on an R6**, so no fixed value is
+right for both (issue #21, measured by its reporter on both bodies over WPD raw ioctl). Since 3.3:
+
+- **`StartLiveViewAsync()` writes `current | PC`.** A 6D gets PC alone, as before. An R6 gets
+  `TFT | PC`, because with PC alone it ignores its wired remote and its own dial and buttons, at no
+  gain in frame rate. `StartLiveViewAsync(EdsEvfOutputDevice)` writes exactly what it is given.
+- **`StopLiveViewAsync()` writes back what the start read.** It used to write `TFT` always, which
+  left a 6D with live view running on its own screen. `TFT` remains the fallback for a body found
+  already sending to the host (an earlier session's leftover), and a stop with no start behind it on
+  a body not sending to the host writes nothing.
+- **A 6D announces a change twice, `0x80000002` then `2`.** The top bit looks like a transition flag;
+  `CanonEvfOutput` masks it off before using a reading. `PropertyChanged` still passes it through.
+
+The arithmetic is in `CanonEvfOutput` and pinned by `EvfOutputTests`. **What the bodies do with the
+new values has not been re-measured**: the 3.3 change was written from the issue's tables with no
+camera attached, and the hardware check is with the reporter.
+
 ## EOS R6 over WPD, verified 2026-11-05/06
 
 Measured with FC.SDK alone (EOS Utility and EDSDK closed), `ConnectWpdAutoAsync` → raw ioctl, by changing a setting on

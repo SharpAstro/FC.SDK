@@ -129,9 +129,16 @@ public enum EdsMirrorUpSetting : uint
     On = 1,
 }
 
+/// <summary>
+/// Where live view is shown: a bit mask, so <c>TFT | PC</c> is the body's own display and the host
+/// together.
+/// </summary>
 [Flags]
 public enum EdsEvfOutputDevice : uint
 {
+    /// <summary>Live view off. What a DSLR (an EOS 6D) reads at rest.</summary>
+    None = 0x00,
+    /// <summary>The body's own display. What a mirrorless body (an EOS R6) reads at rest.</summary>
     TFT = 0x01,
     PC = 0x02,
     PC_Small = 0x08,
