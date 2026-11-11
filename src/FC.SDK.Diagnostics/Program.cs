@@ -28,6 +28,7 @@ using System.Runtime.InteropServices;
 using FC.SDK.Diagnostics;
 using FC.SDK;
 using FC.SDK.Canon;
+using FC.SDK.Scripting;
 
 // Hex throughout, because every drive-mode and property value in this domain is quoted in hex —
 // and taken off the body's own allowed-value list, never from EdsDriveMode, whose numbering is
@@ -109,11 +110,44 @@ foreach (var (name, description, options) in modes)
 }
 root.SetAction(_ => { mode = "matrix"; return 0; });
 
+// `script <file>` runs a camera script (the language the viewer runs, see FC.SDK.Scripting) from the
+// console. Declared apart from the experiments above because it takes a file, and because it changes
+// nothing on the body the script did not ask for: no capture destination, no drive mode.
+var scriptFileArg = new Argument<FileInfo>("file") { Description = "The .camscript to run." };
+var checkOpt = new Option<bool>("--check") { Description = "Parse the script and stop. Needs no camera." };
+var scriptCmd = new Command("script", "Run a camera script: checks, operator prompts, a transcript. `--check` parses only.");
+scriptCmd.Arguments.Add(scriptFileArg);
+scriptCmd.Options.Add(checkOpt);
+scriptCmd.SetAction(_ => { mode = "script"; return 0; });
+root.Subcommands.Add(scriptCmd);
+
 var parse = root.Parse(args);
 int parseExit = parse.Invoke();
 // Help, version and parse errors all leave the mode unset — they have already printed, so the only
 // thing left to do is carry their exit code out.
 if (mode is null) return parseExit;
+
+// Parsed before the camera is opened, and before anything else can happen to it: a script with a typo
+// must cost nothing. The old dispatch here ran its default experiment on a mistyped mode name.
+CameraScript? cameraScript = null;
+if (mode is "script")
+{
+    var file = parse.GetValue(scriptFileArg)!;
+    try
+    {
+        cameraScript = CameraScript.Parse(File.ReadAllText(file.FullName));
+    }
+    catch (Exception ex) when (ex is ScriptSyntaxException or IOException or UnauthorizedAccessException)
+    {
+        Console.Error.WriteLine($"{file.Name}: {ex.Message}");
+        return 2;
+    }
+    if (parse.GetValue(checkOpt))
+    {
+        Console.WriteLine($"{file.Name}: parses.");
+        return 0;
+    }
+}
 
 int settleSeconds = parse.GetValue(settleOpt);
 uint SelfTimerDrive = parse.GetValue(driveOpt);
@@ -185,6 +219,35 @@ if (mode is "diag")
     camera.StateChanged += (_, e) => Log($"       evt state {e.EventType} param=0x{e.Param:X}");
 }
 camera.StartEventPolling(TimeSpan.FromMilliseconds(200));
+
+if (cameraScript is not null)
+{
+    // None of the experiments' setup below: a script states what it wants, and leaves the rest of the
+    // body as it found it.
+    var file = parse.GetValue(scriptFileArg)!;
+    Log($"Model: {camera.Model}  Serial: {camera.SerialNumber}  Battery: {camera.BatteryLevelPercent}%");
+    Log($"Running {file.Name}");
+    ScriptRunResult result;
+    try
+    {
+        using var scriptCamera = new CanonScriptCamera(camera);
+        result = await new ScriptRunner(scriptCamera, new ConsoleScriptHost(Log)).RunAsync(cameraScript);
+    }
+    finally
+    {
+        await camera.StopEventPollingAsync();
+        Log($"CloseSession = {await camera.CloseSessionAsync()}");
+        await camera.DisposeAsync();
+    }
+
+    var transcript = Path.Combine(outDir, $"script-{Path.GetFileNameWithoutExtension(file.Name)}.txt");
+    await File.WriteAllLinesAsync(transcript,
+        [$"{file.Name} on {camera.Model} ({camera.TransportName})", result.Summary, "", .. result.Steps.Select(s => s.ToString())]);
+    Console.WriteLine();
+    Log($"======== {file.Name}: {result.Summary} ========");
+    Log($"Transcript: {transcript}");
+    return result.Succeeded ? 0 : 1;
+}
 
 int failures = 0;
 try
