@@ -449,8 +449,27 @@ The arithmetic is in `CanonEvfOutput` and pinned by `EvfOutputTests`. **Measured
 So the stop restores, the body's display in the mask costs no frame rate here either, and a 6D
 found on PC alone does end with live view on its own screen. Its allowed list for 0xD1B0 is every
 value `0x0` to `0xB`, so the list cannot tell a body that rests at 0 from one that rests at 1.
-**Not measured on a 6D**: whether its own controls survive PC alone (the `--shoot` rows). **Not
-re-measured on an R6 at all**: that is with the issue's reporter.
+**A 6D's shutter button is dead on PC alone too** (2026-11-12, one run of
+`scripts/evf-output.camscript` in the viewer, operator at the body, lens at MF):
+
+| 6D state | body shutter press | rear screen shows live view |
+|---|---|---|
+| live view off (control) | exposed, RAW+JPEG | |
+| live view, `PC` | **nothing in 10 s** | no |
+| live view, `TFT \| PC` | exposed, RAW+JPEG | yes |
+
+So the R6 finding in issue #21 is not a mirrorless quirk: a body whose display is out of the mask
+does not answer its own release. `StartLiveViewAsync()` still gives a 6D `PC` alone, because it
+reads 0 at rest and the rule is "what it shows now, plus the host"; a caller who needs the body's
+button during live view must ask for `TFT | PC`. That is n=1 with a control either side, and the
+default has not been changed on it. An earlier run saw a stop fail to restore after a body press
+at `TFT | PC`; it did not recur here (the stop put back 0) and the likeliest cause was a button
+still held. **Not re-measured on an R6 at all**: that is with the issue's reporter.
+
+**The viewer must stop live view before it closes the session.** Closing its window during live view
+used to stop only its own loop, and left a 6D on `PC` alone; the next session then read 2 as the
+value at rest and its stop fell back to `TFT`. `TearDownAsync` now calls `StopLiveViewAsync` first,
+bounded to 5 s. Written after it happened; the fix itself has not been re-run on a body.
 
 `evfout` reads the property past the cache at rest, during and after each of three starts (default,
 PC alone, `TFT | PC`), counts real frames, and covers two starts with one stop and a body found on PC
@@ -725,6 +744,13 @@ for output in [EvfOutputDevice.PC, EvfOutputDevice.TFT | EvfOutputDevice.PC] {
   the live-view loop and the auto-download need the camera between its steps. `frames` counts the
   viewer's own decoded frames (about 4 a second on a 6D there, against 20 headless), so keep `min`
   low; it asks "is live view delivering", not "how fast".
+- **From a console**: `dotnet run --project src/FC.SDK.Diagnostics -- script <file>` runs the same
+  script with `CanonScriptCamera` (about 20 frames a second, no viewer loop in the way), prompts at
+  the terminal with a beep (Enter / s / a, or y / n / a), and writes the transcript beside its other
+  artefacts. `--check` parses only and needs no camera. Exit code 0 passed, 1 failed or stopped,
+  2 the script did not parse. With stdin redirected nobody can answer: a `confirm` is recorded as
+  skipped and an `ask` stops the run, since an answer nobody gave must not be written down as "no".
+  Unlike the experiments it sets nothing up: no capture destination, no drive mode.
 - The grammar is `ScriptGrammar.lalr.yaml`, compiled by LALR.CC's source generator at build time
   (tables, AST records, visitor). `SharpAstro.LALR.CC` is a dependency of `FC.SDK.Scripting` and so
   of the viewer, and **not of `FC.SDK`**. The project is internal (not packed) while the language
@@ -733,8 +759,9 @@ for output in [EvfOutputDevice.PC, EvfOutputDevice.TFT | EvfOutputDevice.PC] {
 
 **Verified on a 6D through the viewer (2026-11-12)**: an operator-free script of 21 checks passed,
 covering PC and `TFT | PC` starts, the default start, a PTP release with both RAW+JPEG objects
-arriving, and two starts with one stop. The prompt bar was seen on screen. An operator run of
-`scripts/evf-output.camscript` (body presses) has not been completed yet.
+arriving, and two starts with one stop. An operator then ran `scripts/evf-output.camscript` through
+the prompt bar (three confirms, two questions); its findings are under "Live view output" above. The
+console runner ran the operator-free script on the same body, at 61 to 68 frames in 3 s.
 
 ## Sibling working copies
 

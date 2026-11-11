@@ -16,6 +16,8 @@
     <!-- FocusScore decodes the delivered CR2, because the 0x9128 autofocus question cannot be
          answered from a response code: every row answers OK and delivers a frame either way. -->
     <ProjectReference Include="..\FC.SDK.Raw\FC.SDK.Raw.csproj" />
+    <!-- `script <file>`: the same camera scripts the viewer runs, from a console. -->
+    <ProjectReference Include="..\FC.SDK.Scripting\FC.SDK.Scripting.csproj" />
   </ItemGroup>
 
   <ItemGroup>
