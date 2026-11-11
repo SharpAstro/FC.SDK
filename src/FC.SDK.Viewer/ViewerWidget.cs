@@ -113,15 +113,58 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
 
     // ---------------------------------------------------------------- shell
 
-    private Layout.Node Shell() =>
-        Layout.Builder.Dock(
-            // Centre: preview area. Docked strips are pinned around it.
+    private Layout.Node Shell()
+    {
+        List<Layout.DockChild> docked = [Layout.Builder.Top(TopBar(), TopBarHeight)];
+
+        // A running script that needs the operator gets the full width directly under the top bar:
+        // the person it is for is looking at a camera, not at this window, and has to find it at a
+        // glance when they look back.
+        if (_state.Script is { Prompt: { } prompt } script)
+            docked.Add(Layout.Builder.Top(PromptBar(script, prompt), PromptBarHeight));
+
+        docked.Add(Layout.Builder.Bottom(StatusBar(), StatusBarHeight));
+        docked.Add(Layout.Builder.Bottom(Panel("Log", "log", _logScroll), LogPanelHeight));
+        docked.Add(Layout.Builder.Left(Panel("Camera", "actions", _actionScroll), LeftPanelWidth));
+        docked.Add(Layout.Builder.Right(Panel("Controls", "controls", _controlScroll), RightPanelWidth));
+
+        // Centre: preview area. Docked strips are pinned around it.
+        return Layout.Builder.Dock(
             Layout.Builder.Fill(key: "preview").Stretch().Bg(ViewerTheme.Palette.ContentBg),
-            Layout.Builder.Top(TopBar(), TopBarHeight),
-            Layout.Builder.Bottom(StatusBar(), StatusBarHeight),
-            Layout.Builder.Bottom(Panel("Log", "log", _logScroll), LogPanelHeight),
-            Layout.Builder.Left(Panel("Camera", "actions", _actionScroll), LeftPanelWidth),
-            Layout.Builder.Right(Panel("Controls", "controls", _controlScroll), RightPanelWidth));
+            [.. docked]);
+    }
+
+    private const float PromptBarHeight = 64f;
+    private const float PromptButtonWidth = 96f;
+
+    /// <summary>
+    /// What a script is asking the operator, with its answers. An instruction offers Done / Skip /
+    /// Abort and a question Yes / No / Abort; every answer goes into the transcript.
+    /// </summary>
+    private Layout.Node PromptBar(ScriptSession script, ScriptPrompt prompt)
+    {
+        Layout.Node Answer(string label, string action, int answer, RGBAColor32 background, string tooltip) =>
+            Actionable(
+                Layout.Builder.Text(label, _fontSize + 1f, ViewerTheme.Palette.HeaderText, TextAlign.Center)
+                    .W(Layout.Sizing.Fixed(PromptButtonWidth)).HStar()
+                    .Radius(4f),
+                action, () => _actions.AnswerScriptPrompt(answer), disabledReason: null, background, tooltip: tooltip);
+
+        return Layout.Builder.HStack(
+                Layout.Builder.VStack(
+                        Layout.Builder.Text($"{script.Name} needs you", SmallFontSize, ViewerTheme.Warn).WStar().HAuto(),
+                        Layout.Builder.Text(prompt.Text, _fontSize + 2f, ViewerTheme.Palette.HeaderText).WStar().HStar())
+                    .WithGap(2f)
+                    .WStar().HStar(),
+                Answer(prompt.IsQuestion ? "Yes" : "Done", "script-yes", 0, ViewerTheme.ActiveBg,
+                    prompt.IsQuestion ? "Recorded in the transcript as yes" : "You did it; the script carries on"),
+                Answer(prompt.IsQuestion ? "No" : "Skip", "script-no", 1, ViewerTheme.ButtonBg,
+                    prompt.IsQuestion ? "Recorded in the transcript as no" : "You did not; the script says so and carries on"),
+                Answer("Abort", "script-abort", 2, ViewerTheme.DangerBg, "Stop the script here"))
+            .WithGap(ViewerTheme.Metrics.Padding)
+            .Pad(ViewerTheme.Metrics.Padding + 2f)
+            .Bg(ViewerTheme.BusyBg);
+    }
 
     /// <summary>
     /// A titled panel whose body is an app-drawn, scrollable region routed by <paramref name="key"/>.
@@ -412,6 +455,30 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             () => _actions.DriveLens(EdsDriveLensStep.FarMedium), needRemote));
         rows.Add(GlyphButton(_glyphs.FocusNear, "Focus near", "lensnear",
             () => _actions.DriveLens(EdsDriveLensStep.NearMedium), needRemote));
+
+        // A script is a measurement with the operator in the loop: it runs the buttons above in a
+        // fixed order, asks for what it cannot do itself, and writes a transcript beside the log.
+        rows.Add(SectionHeader("Scripts"));
+        if (_state.Script is { } running)
+        {
+            rows.Add(Note($"{running.Name}: {running.Passed} passed, {running.Failed} failed"));
+            rows.Add(Button("Abort script", "script-stop", _actions.AbortScript, background: ViewerTheme.DangerBg));
+        }
+        else if (_state.ScriptFiles.Count == 0)
+        {
+            rows.Add(Note("No .camscript in the output folder."));
+        }
+        else
+        {
+            foreach (var file in _state.ScriptFiles)
+            {
+                var path = file;
+                rows.Add(Button($"Run {Path.GetFileNameWithoutExtension(path)}", $"script-{Path.GetFileName(path)}",
+                    () => _actions.RunScript(path), needRemote, tooltip: path));
+            }
+        }
+        rows.Add(Button("Rescan scripts", "script-rescan", () => _actions.FindScripts(),
+            _state.Script is null ? null : "A script is running"));
 
         rows.Add(SectionHeader("Diagnostics"));
         // First in the section on purpose: it is what a bug report needs, and a reporter should not

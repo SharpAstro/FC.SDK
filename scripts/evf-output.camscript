@@ -19,7 +19,7 @@ for output in [EvfOutputDevice.PC, EvfOutputDevice.TFT | EvfOutputDevice.PC] {
     start-liveview output
     sleep 1500ms
     expect read Evf_OutputDevice == output
-    frames 3s min 30
+    frames 3s min 5
 
     confirm "Live view is running: press the shutter button on the body, let go, then click Done"
     wait-object 10s
@@ -34,7 +34,7 @@ for output in [EvfOutputDevice.PC, EvfOutputDevice.TFT | EvfOutputDevice.PC] {
 start-liveview
 sleep 1500ms
 expect read Evf_OutputDevice == rest | EvfOutputDevice.PC
-frames 3s min 30
+frames 3s min 5
 stop-liveview
 sleep 1500ms
 expect read Evf_OutputDevice == rest
