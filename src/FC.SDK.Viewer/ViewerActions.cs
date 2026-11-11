@@ -276,6 +276,8 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
 
     private async Task TearDownAsync()
     {
+        // Read before the loop is stopped, which clears it.
+        var wasLive = state.LiveViewActive;
         await StopLiveViewLoopAsync();
 
         // Whatever the camera was doing, we are no longer in a position to hear about it finishing.
@@ -286,6 +288,25 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
         camera.ObjectAdded -= OnObjectAdded;
         camera.PropertyChanged -= OnPropertyChanged;
         camera.StateChanged -= OnStateChanged;
+
+        try
+        {
+            // Hand the display back before the session goes. Closing the window during live view
+            // used to stop only the loop: a 6D was left on Evf_OutputDevice = PC, where its own
+            // shutter button does nothing, and the next session then took that for its value at
+            // rest. Bounded, because a teardown must finish even against a body that has stopped
+            // answering.
+            if (wasLive && state.SessionOpen)
+            {
+                using var bounded = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var err = await camera.StopLiveViewAsync(bounded.Token);
+                _logger.LogInformation("StopLiveView at teardown = {Error}", err);
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or InvalidOperationException)
+        {
+            _logger.LogWarning("Could not stop live view at teardown: {Message}", ex.Message);
+        }
 
         try
         {
