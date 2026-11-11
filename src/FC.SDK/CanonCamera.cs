@@ -1772,12 +1772,16 @@ public sealed class CanonCamera : IAsyncDisposable
         var (readErr, reading) = await GetPropertyAsync(EdsPropertyId.Evf_OutputDevice, ct);
         var target = CanonEvfOutput.StopValue(
             _evfOutputBeforeLiveView, readErr is EdsError.OK ? reading : null);
-        _evfOutputBeforeLiveView = null;
 
         // Not folded into the result, as before: a caller asks "did live view stop", and the
         // write's own failure is already logged by SetPropertyAsync.
-        if (target is { } value)
-            await SetPropertyAsync(EdsPropertyId.Evf_OutputDevice, value, ct);
+        var restored = target is not { } value
+            || await SetPropertyAsync(EdsPropertyId.Evf_OutputDevice, value, ct) is EdsError.OK;
+
+        // Forget the value at rest only once it is back. A refused write leaves the body sending to
+        // the host, and the next start would otherwise read that, remember nothing, and have its
+        // stop fall back to TFT: a 6D ended on 1 that way after a stop that did not take.
+        if (restored) _evfOutputBeforeLiveView = null;
 
         return err;
     }
