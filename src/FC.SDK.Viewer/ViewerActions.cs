@@ -11,7 +11,7 @@ namespace FC.SDK.Viewer;
 /// half-duplex protocol is never asked to do two things at once, and every step is logged — the log
 /// file is the deliverable when a body misbehaves.
 /// </summary>
-public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactory) : IAsyncDisposable
+public sealed partial class ViewerActions(ViewerState state, ILoggerFactory loggerFactory) : IAsyncDisposable
 {
     private static readonly TimeSpan LiveViewFrameInterval = TimeSpan.FromMilliseconds(100);
 
@@ -1086,6 +1086,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
                     if (TryDecodeJpeg(jpeg, "live view") is { } raster)
                     {
                         state.LiveViewFrame = raster;
+                        state.LiveViewFrameBytes = jpeg.Length;
                         state.LiveViewFrameCount++;
                         state.Invalidate();
                     }
@@ -1360,6 +1361,8 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
     {
         _logger.LogInformation("ObjectAdded: handle=0x{Handle:X8}", e.ObjectHandle);
         state.LastObjectHandle = e.ObjectHandle;
+        // A running script's wait-object is listening for exactly this.
+        _scriptObjects?.Enqueue(e.ObjectHandle);
 
         // The image the exposure indicator was waiting for. Ends the wait whether or not this
         // viewer asked for the shot — a release from the camera's own shutter button lands here too.
@@ -1388,6 +1391,7 @@ public sealed class ViewerActions(ViewerState state, ILoggerFactory loggerFactor
 
     public async ValueTask DisposeAsync()
     {
+        AbortScript();
         await _shutdown.CancelAsync();
         await StopLiveViewLoopAsync();
         await DisconnectCoreAsync();

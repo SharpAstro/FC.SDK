@@ -7,12 +7,15 @@ using SharpAstro.AppShell;
 // The viewer's reason to exist is the log file: everything it does to the camera is recorded so the
 // output can be attached to a bug report. Wire the sink before anything else can fail.
 //
-// Usage: fc-viewer [output-directory] [--open <file>]. --open shows a capture from disk (JPEG, CR2, CR3,
-// HEIF) in the capture pane with no camera attached.
-string? outputArgument = null, openFile = null;
+// Usage: fc-viewer [output-directory] [--open <file>] [--script <file>]. --open shows a capture from
+// disk (JPEG, CR2, CR3, HEIF) in the capture pane with no camera attached. --script adds a camera
+// script to the Scripts section of the left panel; it runs when its button is pressed, not at start,
+// because a script needs an open session and a person at the camera.
+string? outputArgument = null, openFile = null, scriptFile = null;
 for (var i = 0; i < args.Length; i++)
 {
     if (args[i] == "--open" && i + 1 < args.Length) openFile = args[++i];
+    else if (args[i] == "--script" && i + 1 < args.Length) scriptFile = args[++i];
     else if (outputArgument is null && args[i] is { Length: > 0 } positional) outputArgument = positional;
 }
 var outputDirectory = outputArgument ?? Path.Combine(Environment.CurrentDirectory, "fc-viewer-output");
@@ -211,6 +214,8 @@ using var inspector = DebugInspector.Attach(loop, new DebugInspectorOptions
         writer.Set("busy", state.BusyOperation);
         writer.Set("exposure", state.Exposure is { } e ? $"{e.Label} {e.Elapsed.TotalSeconds:F1}s" : null);
         writer.Set("status", state.StatusMessage);
+        writer.Set("script", state.Script?.Name);
+        writer.Set("scriptPrompt", state.Script?.Prompt?.Text);
         writer.Set("devices", state.Devices.Count);
         writer.Set("cachedProperties", state.RawProperties.Count);
     },
@@ -220,6 +225,7 @@ logger.LogInformation("Debug inspector listening on loopback port {Port}", inspe
 
 // Start with a scan so the first thing on screen is the list of candidate cameras.
 actions.Scan();
+actions.FindScripts(scriptFile);
 if (openFile is not null) actions.OpenFile(openFile);
 
 logger.LogInformation("Entering event loop. F5 read properties · Space capture · Ctrl+L live view · Ctrl+D dump");
