@@ -435,10 +435,24 @@ right for both (issue #21, measured by its reporter on both bodies over WPD raw 
 - **A 6D announces a change twice, `0x80000002` then `2`.** The top bit looks like a transition flag;
   `CanonEvfOutput` masks it off before using a reading. `PropertyChanged` still passes it through.
 
-The arithmetic is in `CanonEvfOutput` and pinned by `EvfOutputTests`. **What the bodies do with the
-new values has not been re-measured**: the 3.3 change was written from the issue's tables with no
-camera attached, and the hardware check is with the reporter. `FC.SDK.Diagnostics evfout` is that
-check: it reads the property past the cache at rest, during and after each of three starts (default,
+The arithmetic is in `CanonEvfOutput` and pinned by `EvfOutputTests`. **Measured on a 6D**
+(2026-11-12, WPD raw ioctl, `FC.SDK.Diagnostics evfout`, every reading past the cache):
+
+| 6D, at rest `0` | during | real frames in 3 s | after stop |
+|---|---|---|---|
+| `StartLiveViewAsync()` | `2` | 56 | `0` |
+| `StartLiveViewAsync(PC)` | `2` | 60 | `0` |
+| `StartLiveViewAsync(TFT \| PC)` | `3` | 58 | `0` |
+| two starts, one stop | | | `0` |
+| found on `2`, then start and stop | | | `1`, the `TFT` fallback |
+
+So the stop restores, the body's display in the mask costs no frame rate here either, and a 6D
+found on PC alone does end with live view on its own screen. Its allowed list for 0xD1B0 is every
+value `0x0` to `0xB`, so the list cannot tell a body that rests at 0 from one that rests at 1.
+**Not measured on a 6D**: whether its own controls survive PC alone (the `--shoot` rows). **Not
+re-measured on an R6 at all**: that is with the issue's reporter.
+
+`evfout` reads the property past the cache at rest, during and after each of three starts (default,
 PC alone, `TFT | PC`), counts real frames, and covers two starts with one stop and a body found on PC
 alone. With `--shoot` it also asks the operator to press the shutter button on the body in each
 state, behind a live-view-off control, which costs four actuations. That press test is the open
