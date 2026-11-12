@@ -450,6 +450,18 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
         rows.Add(Button(_state.LiveViewActive ? "Stop live view" : "Start live view", "lv",
             () => { if (_state.LiveViewActive) _actions.StopLiveView(); else _actions.StartLiveView(); },
             needRemote, background: _state.LiveViewActive ? ViewerTheme.ActiveBg : null, tooltip: "Ctrl+L"));
+        // Which output the next start asks for. Not a live toggle: the mask is written when live
+        // view starts, so the row says so and is inert while it runs.
+        rows.Add(Layout.Builder.Checkbox("Keep camera screen + buttons", _actions.LiveViewKeepsCameraScreen,
+                on => { if (!_state.LiveViewActive) _actions.LiveViewKeepsCameraScreen = on; _state.Invalidate(); },
+                ViewerTheme.Checkbox, SmallFontSize, new HitResult.ButtonHit("lvscreen"))
+            .PadX(6f)
+            .RowH(ViewerTheme.Metrics.ButtonHeight)
+            .Radius(4f)
+            .WithTooltip(_state.LiveViewActive
+                ? "Applies at the next start: the output is written when live view starts"
+                : "On: start on TFT | PC, so the body's screen, shutter button and wired remote keep working. "
+                  + "Off: the default, PC alone on a DSLR (dark screen, dead shutter button)"));
         rows.Add(Button("Save one frame", "lvsave", _actions.SaveLiveViewFrame, needRemote));
         rows.Add(GlyphButton(_glyphs.FocusFar, "Focus far", "lensfar",
             () => _actions.DriveLens(EdsDriveLensStep.FarMedium), needRemote));
