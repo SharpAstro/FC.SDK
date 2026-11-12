@@ -466,6 +466,12 @@ default has not been changed on it. An earlier run saw a stop fail to restore af
 at `TFT | PC`; it did not recur here (the stop put back 0) and the likeliest cause was a button
 still held. **Not re-measured on an R6 at all**: that is with the issue's reporter.
 
+**Both outputs are reachable from every front end.** A script writes `start-liveview` for the
+default or `start-liveview EvfOutputDevice.TFT | EvfOutputDevice.PC` (any mask) for an explicit one.
+The viewer's Live view section has a "Keep camera screen + buttons" checkbox, off by default like
+the SDK; it decides what the next Start live view asks for and does nothing to one already running,
+since the mask is written at the start.
+
 **The viewer must stop live view before it closes the session.** Closing its window during live view
 used to stop only its own loop, and left a 6D on `PC` alone; the next session then read 2 as the
 value at rest and its stop fell back to `TFT`. `TearDownAsync` now calls `StopLiveViewAsync` first,
