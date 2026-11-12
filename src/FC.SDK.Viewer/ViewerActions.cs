@@ -64,6 +64,14 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
     public bool AutoDownload { get; set; } = true;
 
     /// <summary>
+    /// Start live view on <c>TFT | PC</c> instead of the SDK's default. Off by default, as the SDK is:
+    /// a DSLR then gets PC alone, its rear screen dark, which suits a body on a telescope. On, the
+    /// body keeps its screen and, measured on a 6D and an R6, its own shutter button and wired
+    /// remote, which do nothing on PC alone.
+    /// </summary>
+    public bool LiveViewKeepsCameraScreen { get; set; }
+
+    /// <summary>
     /// Runs <paramref name="body"/> on the thread pool, serialized against every other camera
     /// operation. Failures are logged rather than thrown — a debug tool must survive a camera that
     /// disconnects mid-command.
@@ -1005,8 +1013,11 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
     {
         if (state.Camera is not { } camera) return;
 
-        var err = await camera.StartLiveViewAsync(ct);
-        _logger.LogInformation("StartLiveView = {Error}", err);
+        var err = LiveViewKeepsCameraScreen
+            ? await camera.StartLiveViewAsync(EdsEvfOutputDevice.TFT | EdsEvfOutputDevice.PC, ct)
+            : await camera.StartLiveViewAsync(ct);
+        _logger.LogInformation("StartLiveView ({Output}) = {Error}",
+            LiveViewKeepsCameraScreen ? "TFT | PC" : "default", err);
         if (err is not EdsError.OK)
         {
             state.StatusMessage = $"Live view failed: {err}";
