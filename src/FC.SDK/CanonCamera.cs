@@ -1385,6 +1385,13 @@ public sealed class CanonCamera : IAsyncDisposable
     /// (issue #21). Use the overload that takes the output to choose it yourself.
     /// </para>
     /// <para>
+    /// <b>On PC alone a DSLR's own shutter button does nothing either.</b> Measured on an EOS 6D with
+    /// a control either side: a press on the body exposed with live view off and at
+    /// <c>TFT | PC</c>, and did nothing at PC. The default stays as it is, because a dark rear screen
+    /// is what a body on a telescope wants; a caller who needs the body's controls during live view
+    /// passes <c>EdsEvfOutputDevice.TFT | EdsEvfOutputDevice.PC</c> to the other overload.
+    /// </para>
+    /// <para>
     /// The value read here is what <see cref="StopLiveViewAsync"/> writes back.
     /// </para>
     /// </remarks>
