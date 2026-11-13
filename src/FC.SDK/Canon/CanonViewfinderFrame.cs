@@ -36,6 +36,107 @@ internal static class CanonViewfinderFrame
     /// <summary>Four 256-bin uint32 histograms, 4096 bytes in total.</summary>
     private const uint HistogramRecord = 17;
 
+    /// <summary>One uint32: the magnification, 1, 5 or 10.</summary>
+    private const uint MagnificationRecord = 4;
+
+    /// <summary>One uint32: 2 while the body drives autofocus, 1 otherwise.</summary>
+    private const uint AfBusyRecord = 7;
+
+    /// <summary>The AF frames: a count, then (for one frame) state, 1, x, y, w, h.</summary>
+    private const uint AfFramesRecord = 8;
+
+    /// <summary>Four uint32s: the magnifier rect, x, y, width, height.</summary>
+    private const uint MagnifierRecord = 13;
+
+    /// <summary>Record 8's length when it carries exactly one frame: seven uint32s.</summary>
+    private const int OneAfFrameLength = 7 * sizeof(uint);
+
+    /// <summary>
+    /// The JPEG and what the body says about it, from one walk over the envelope.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The JPEG is a slice of <paramref name="payload"/>, not a copy, so it lives as long as the
+    /// caller keeps the envelope. Empty when the envelope carries no image record, which happens for
+    /// the metadata-only frames a body emits while it settles. A bare JPEG comes back whole, with no
+    /// information.
+    /// </para>
+    /// <para>
+    /// Records 4, 7, 8 and 13 were identified on an EOS R6 and an EOS 6D (issue #21) by driving the
+    /// bodies through known zoom, pan and focus states while the bytes were watched. A record that is
+    /// missing, or shorter than the layout read here, leaves its field null rather than guessed.
+    /// </para>
+    /// </remarks>
+    internal static ReadOnlyMemory<byte> Decode(byte[] payload, out CanonEvfFrameInfo info)
+    {
+        info = default;
+        if (payload.Length >= 2 && payload[0] == 0xFF && payload[1] == 0xD8)
+            return payload;
+
+        var jpeg = ReadOnlyMemory<byte>.Empty;
+        uint? magnification = null;
+        CanonEvfRect? magnifier = null;
+        CanonEvfPoint? imageOrigin = null;
+        CanonEvfSize? shownSize = null;
+        CanonEvfSize? sensor = null;
+        bool? afBusy = null;
+        CanonEvfAfFrame? afFrame = null;
+        var afFrames = ReadOnlyMemory<byte>.Empty;
+
+        var offset = 0;
+        while (offset + RecordHeaderSize <= payload.Length)
+        {
+            var length = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(offset));
+            var type = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(offset + 4));
+            if (length < RecordHeaderSize || length > (uint)(payload.Length - offset))
+                break;
+
+            var body = new ReadOnlyMemory<byte>(payload, offset + RecordHeaderSize, (int)length - RecordHeaderSize);
+            var s = body.Span;
+            switch (type)
+            {
+                case var _ when jpeg.IsEmpty && Array.IndexOf(JpegTypes, type) >= 0:
+                    jpeg = body;
+                    break;
+                case MagnificationRecord when s.Length >= 4:
+                    magnification = Read(s, 0);
+                    break;
+                case AfBusyRecord when s.Length >= 4:
+                    // Only 1 and 2 have been seen; anything else is reported as unknown.
+                    afBusy = Read(s, 0) switch { 1 => false, 2 => true, _ => null };
+                    break;
+                case AfFramesRecord when s.Length >= 4:
+                    afFrames = body;
+                    if (Read(s, 0) == 1 && s.Length == OneAfFrameLength)
+                        afFrame = new CanonEvfAfFrame(Read(s, 4), Read(s, 12), Read(s, 16), Read(s, 20), Read(s, 24));
+                    break;
+                case MagnifierRecord when s.Length >= 16:
+                    magnifier = new CanonEvfRect(Read(s, 0), Read(s, 4), Read(s, 8), Read(s, 12));
+                    break;
+                case ZoomRectRecord when s.Length >= 16:
+                    imageOrigin = new CanonEvfPoint(Read(s, 0), Read(s, 4));
+                    shownSize = new CanonEvfSize(Read(s, 8), Read(s, 12));
+                    break;
+                case SensorSizeRecord when s.Length >= 8:
+                    sensor = new CanonEvfSize(Read(s, 0), Read(s, 4));
+                    break;
+            }
+
+            offset += (int)length;
+        }
+
+        info = new CanonEvfFrameInfo(magnification, magnifier, imageOrigin, shownSize, sensor, afBusy, afFrame, afFrames);
+        return jpeg;
+
+        static uint Read(ReadOnlySpan<byte> s, int at) => BinaryPrimitives.ReadUInt32LittleEndian(s[at..]);
+    }
+
+    /// <summary>The zoom rect (records 18 and 14) as <see cref="TryGetZoomRect"/> reads it, or null without record 18.</summary>
+    internal static CanonEvfZoomRect? ZoomRectOf(CanonEvfFrameInfo info) =>
+        info is { ImageOrigin: { } o, ShownSize: { } s }
+            ? new CanonEvfZoomRect(o.X, o.Y, s.Width, s.Height, info.Sensor?.Width ?? 0, info.Sensor?.Height ?? 0)
+            : null;
+
     private const int HistogramBins = 256;
     private const int HistogramChannels = 4;
 
@@ -245,6 +346,85 @@ public readonly record struct CanonEvfZoomRect(
 
     public override string ToString() => $"({X},{Y}) {Width}x{Height} of {SensorWidth}x{SensorHeight} [{Factor:F2}x]";
 }
+
+/// <summary>A point in sensor pixels.</summary>
+public readonly record struct CanonEvfPoint(uint X, uint Y);
+
+/// <summary>A size in sensor pixels.</summary>
+public readonly record struct CanonEvfSize(uint Width, uint Height);
+
+/// <summary>A rectangle in sensor pixels.</summary>
+public readonly record struct CanonEvfRect(uint X, uint Y, uint Width, uint Height);
+
+/// <summary>
+/// One AF frame from record 8, read only when the record holds exactly one frame.
+/// </summary>
+/// <param name="State">
+/// The state word, raw. 16 at rest; 17 from the moment focus is achieved until the focus line opens
+/// (an EOS R6, 1-point AF, issue #21). A 6D at rest also reads 16.
+/// </param>
+/// <param name="X">Left edge of the AF frame.</param>
+/// <param name="Y">Top edge.</param>
+/// <param name="Width">Width; smaller than the magnifier, and per body (400 on an R6 at 1×, 552 on a 6D).</param>
+/// <param name="Height">Height.</param>
+public readonly record struct CanonEvfAfFrame(uint State, uint X, uint Y, uint Width, uint Height)
+{
+    /// <summary>
+    /// Focus achieved: the low bit of <see cref="State"/>, the only bit seen to change (16 → 17).
+    /// </summary>
+    public bool InFocus => (State & 1) != 0;
+}
+
+/// <summary>
+/// What a live-view frame's envelope says about the frame, decoded from the same envelope as its
+/// JPEG. Each field is null when the body did not send its record.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Fields are named for what the records say, and nothing is derived from them. In particular there
+/// is no factor: at 10× record 18 holds the origin of the 5× image with the size of the 10× area, so
+/// a ratio of its width to the sensor would describe neither.
+/// </para>
+/// <para>
+/// Measured on an EOS R6 and an EOS 6D over WPD raw ioctl, sensor 5472×3648, magnifier centred:
+/// </para>
+/// <code>
+///                 1×                  5×                    10×                   10×, panned to (1000,700)
+/// Magnification   1                   5                     10                    10
+/// Magnifier (13)  2184,1456 1104x736  2184,1456 1104x736    2460,1640 552x368     1000,700 552x368
+/// Image (18)      0,0 5472x3648       2184,1456 1104x736    2184,1456 552x368     724,516 552x368
+/// JPEG            960x640             1104x736              1104x736              1104x736
+/// </code>
+/// <para>
+/// At 10× the JPEG is the 5× image (the same field, checked on the 6D's pixels), and the 10× area
+/// sits at <c>Magnifier − ImageOrigin</c> inside it: (276,184) when centred.
+/// </para>
+/// </remarks>
+/// <param name="Magnification">Record 4: 1, 5 or 10.</param>
+/// <param name="Magnifier">
+/// Record 13: the magnifier rect, which a pan moves at every magnification, 1× included. At 1× it has
+/// the 5× size (1104×736 on both bodies), and in 1-point AF the AF frame stays centred in it.
+/// </param>
+/// <param name="ImageOrigin">Record 18, first half: where the image sent starts on the sensor.</param>
+/// <param name="ShownSize">Record 18, second half: the size of the area shown.</param>
+/// <param name="Sensor">Record 14: the sensor size.</param>
+/// <param name="AfBusy">Record 7: true while the body drives autofocus. Null for a value other than the 1 and 2 seen.</param>
+/// <param name="AfFrame">Record 8 decoded, when it holds exactly one frame in the layout measured.</param>
+/// <param name="AfFrames">
+/// Record 8 raw, empty when absent. With more than one frame (zone AF, faces) the per-frame layout is
+/// unmeasured, so this is all there is. It is a slice of the envelope, so holding it keeps the whole
+/// envelope alive; copy it to keep it past the frame. Being a <see cref="ReadOnlyMemory{T}"/>, it takes
+/// part in this struct's equality by reference (same array, offset and length), not by content.
+/// </param>
+public readonly record struct CanonEvfFrameInfo(
+    uint? Magnification,
+    CanonEvfRect? Magnifier,
+    CanonEvfPoint? ImageOrigin,
+    CanonEvfSize? ShownSize,
+    CanonEvfSize? Sensor,
+    bool? AfBusy,
+    CanonEvfAfFrame? AfFrame,
+    ReadOnlyMemory<byte> AfFrames);
 
 /// <summary>
 /// The exposure histogram the camera computes for its own live-view display: four 256-bin channels

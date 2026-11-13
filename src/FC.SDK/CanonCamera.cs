@@ -1466,6 +1466,29 @@ public sealed class CanonCamera : IAsyncDisposable
             : (err, []);
     }
 
+    /// <summary>
+    /// One live-view frame with what the body says about it, from a single envelope fetch: the
+    /// magnification, the magnifier rect, the image origin and shown size, the sensor size and the
+    /// AF state. See <see cref="CanonEvfFrameInfo"/>.
+    /// </summary>
+    /// <remarks>
+    /// Every other metadata read (<see cref="GetEvfZoomRectAsync"/>, <see cref="GetEvfHistogramAsync"/>)
+    /// fetches an envelope of its own and drops its JPEG, and the body is the limiter at about 20
+    /// frames a second, so each costs the stream a frame. This one does not. <c>Jpeg</c> is a slice of
+    /// the envelope, not a copy, and is empty when the poll found no frame (the body answers
+    /// <c>ObjectNotReady</c> between frames, roughly every other poll).
+    /// </remarks>
+    /// <param name="ct">Cancellation.</param>
+    public async Task<(EdsError Error, ReadOnlyMemory<byte> Jpeg, CanonEvfFrameInfo Info)> GetLiveViewFrameAndInfoAsync(
+        CancellationToken ct = default)
+    {
+        var (err, envelope) = await _canon.GetViewfinderEnvelopeAsync(ct);
+        if (err is not EdsError.OK || envelope.Length is 0) return (err, ReadOnlyMemory<byte>.Empty, default);
+
+        var jpeg = CanonViewfinderFrame.Decode(envelope, out var info);
+        return (EdsError.OK, jpeg, info);
+    }
+
     // --- Live view magnification ---
     //
     // Zoom is the DSLR planetary/focusing regime: at 5x or 10x the live feed is a near-1:1-pixel
