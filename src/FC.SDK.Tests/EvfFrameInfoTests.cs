@@ -287,4 +287,66 @@ public class EvfFrameInfoTests
         jpeg.IsEmpty.ShouldBeFalse();     // the 64-byte header record and the 14-byte JPEG record fit in 80
         info.Magnification.ShouldBeNull(); // record 4 does not
     }
+
+    // ------------------------------------------------------------------ the pan check
+
+    /// <summary>The R6 at 1× after a pan to (1000,1000): record 13 moved there, record 18 is still the whole sensor.</summary>
+    internal static byte[] R61xPannedTo1000() => Envelope(
+        (1, "JPEG"),
+        (18, "000000000000000060150000400E0000"),
+        (13, "E8030000E803000050040000E0020000"),     // 1000,1000 1104x736
+        (14, "60150000400E0000"));
+
+    private static CanonEvfFrameInfo Info(byte[] envelope)
+    {
+        CanonViewfinderFrame.Decode(envelope, out var info);
+        return info;
+    }
+
+    /// <summary>
+    /// A 1× pan as both bodies report it: record 13 moves to the requested origin and record 18
+    /// stays the whole sensor. Judged on record 18 this never settled, and
+    /// <c>SetEvfZoomPositionAsync</c> waited out its 3 s timeout (3021–3144 ms, twelve tries on an R6
+    /// and a 6D over WPD raw ioctl).
+    /// </summary>
+    [Fact]
+    public void A_pan_at_one_times_settles_on_the_magnifier()
+    {
+        var before = Info(R61x());
+        var after = Info(R61xPannedTo1000());
+
+        after.ImageOrigin.ShouldBe(before.ImageOrigin);   // 18 did not move
+        CanonViewfinderFrame.PanSettled(before, after, 1000, 1000).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void A_pan_that_has_not_shown_up_yet_is_not_settled()
+    {
+        var before = Info(SixD1x());
+
+        CanonViewfinderFrame.PanSettled(before, Info(SixD1x()), 1000, 1000).ShouldBeFalse();
+    }
+
+    /// <summary>A clamped pan lands somewhere other than asked, and somewhere other than it started.</summary>
+    [Fact]
+    public void A_clamped_pan_is_settled_once_the_magnifier_moves()
+    {
+        var before = Info(R610x());
+
+        CanonViewfinderFrame.PanSettled(before, Info(R610xPanned()), 900, 650).ShouldBeTrue();
+    }
+
+    /// <summary>Without record 13 the zoom rect is the only account left, as before.</summary>
+    [Fact]
+    public void Without_the_magnifier_the_zoom_rect_decides()
+    {
+        static CanonEvfFrameInfo Only18(string rect) =>
+            Info(Envelope((1, "JPEG"), (18, rect), (14, "60150000400E0000")));
+
+        var before = Only18("88080000B005000050040000E0020000");          // 2184,1456 at 5x
+        var moved = Only18("E8030000E803000050040000E0020000");           // 1000,1000
+
+        CanonViewfinderFrame.PanSettled(before, before, 1000, 1000).ShouldBeFalse();
+        CanonViewfinderFrame.PanSettled(before, moved, 1000, 1000).ShouldBeTrue();
+    }
 }

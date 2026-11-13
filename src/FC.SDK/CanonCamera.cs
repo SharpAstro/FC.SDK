@@ -1685,12 +1685,11 @@ public sealed class CanonCamera : IAsyncDisposable
     /// not carry a constant between models.
     /// </para>
     /// <para>
-    /// <b>Set this only while magnified.</b> The accepted range is <c>[0, sensor - crop]</c> per axis,
-    /// so at 1x the crop is the whole frame, the range collapses to <c>[0, 0]</c>, and there is
-    /// nowhere to pan to. To centre the frame, magnify first, set the position, then zoom back out:
-    /// the position persists across zoom changes. (That the range collapses is arithmetic from the
-    /// measured accept/discard rule rather than a separate measurement; a pan at 1x was never
-    /// actually sent.)
+    /// <b>A pan at 1× is accepted.</b> This corrects what was written here before, that the range
+    /// collapses to <c>[0, 0]</c> at 1× (arithmetic, never sent). Sent on an EOS 6D and an EOS R6
+    /// (issue #21), (1000,1000) at 1× moves the magnifier rect (record 13) and, in 1-point AF, the AF
+    /// frame (record 8) there, clamped by the body to its AF area, while the zoom rect (record 18)
+    /// stays the whole sensor. The position persists across zoom changes.
     /// </para>
     /// <para>
     /// <b>In <see cref="CanonEvfAfSystem.Live"/> this is also the autofocus point</b>, because the
@@ -1703,14 +1702,22 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </para>
     /// </remarks>
     /// <param name="verify">
-    /// Wait for the move to appear in the zoom rect and return where it landed. On by default: the
-    /// body streams pre-move frames for up to a second afterwards, so an immediate read of the rect
-    /// reports the <i>previous</i> position — which looks exactly like a pan that did not work.
+    /// Wait for the move to appear in the magnifier rect (record 13), or in the zoom rect when the
+    /// body sends no record 13, and return the zoom rect of that frame. On by default: the body
+    /// streams pre-move frames for up to a second afterwards, so an immediate read reports the
+    /// <i>previous</i> position — which looks exactly like a pan that did not work. Settling on record
+    /// 13 is what makes a 1× pan return at once: on record 18, which does not move at 1×, it waited
+    /// out the whole 3 s timeout (3021–3144 ms on an R6 and a 6D before; 151–408 ms after).
+    /// At 1× the returned rect is the whole sensor; the magnifier is in
+    /// <see cref="CanonEvfFrameInfo.Magnifier"/>.
     /// </param>
     public async Task<(EdsError Error, CanonEvfZoomRect? Landed)> SetEvfZoomPositionAsync(
         uint x, uint y, bool verify = true, CancellationToken ct = default)
     {
-        var before = verify ? await GetEvfZoomRectAsync(ct) : null;
+        var start = verify
+            ? await WaitForFrameInfoAsync(i => i.Magnifier is not null || i.ImageOrigin is not null, ZoomReadTimeout, ct)
+            : null;
+        var before = start is { } s ? CanonViewfinderFrame.ZoomRectOf(s) : null;
 
         // Clamp into the range the body will even look at. Measured on a 6D: a coordinate up to
         // (sensor - crop) is accepted and then clamped inwards by the body itself, but anything
@@ -1738,17 +1745,41 @@ public sealed class CanonCamera : IAsyncDisposable
 
         if (!verify) return (EdsError.OK, null);
 
-        // Settled means either the exact coordinate asked for, or — when the camera clamped, which
-        // it does silently and by an amount that cannot be predicted without knowing the crop size —
-        // any origin other than the one it started from.
-        var landed = await WaitForZoomRectAsync(
-            r => (r.X == x && r.Y == y) || before is not { } b || r.X != b.X || r.Y != b.Y,
-            ZoomSettleTimeout, ct);
+        // Settled on the magnifier rect (record 13) when the body sends it: a pan moves it at every
+        // magnification, where the zoom rect (record 18) stays the whole sensor at 1x and used to run
+        // the whole settle timeout out. See CanonViewfinderFrame.PanSettled.
+        var from = start ?? default;
+        var settled = await WaitForFrameInfoAsync(
+            i => CanonViewfinderFrame.PanSettled(from, i, x, y), ZoomSettleTimeout, ct);
 
-        if (landed is { } l && (l.X != x || l.Y != y))
-            _logger.LogDebug("SetEvfZoomPosition({X},{Y}) clamped to ({LX},{LY})", x, y, l.X, l.Y);
+        if (settled?.Magnifier is { } m && (m.X != x || m.Y != y))
+            _logger.LogDebug("SetEvfZoomPosition({X},{Y}) clamped to ({LX},{LY})", x, y, m.X, m.Y);
 
-        return (EdsError.OK, landed);
+        return (EdsError.OK, settled is { } info ? CanonViewfinderFrame.ZoomRectOf(info) : null);
+    }
+
+    /// <summary>
+    /// Polls live view until a frame's information satisfies <paramref name="settled"/>, returning
+    /// the last information seen if none does, or null when no frame arrived at all.
+    /// </summary>
+    private async Task<CanonEvfFrameInfo?> WaitForFrameInfoAsync(
+        Func<CanonEvfFrameInfo, bool> settled, TimeSpan timeout, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        CanonEvfFrameInfo? last = null;
+
+        while (true)
+        {
+            var (err, _, info) = await GetLiveViewFrameAndInfoAsync(ct);
+            if (err is EdsError.OK && (info.Magnifier is not null || info.ImageOrigin is not null))
+            {
+                last = info;
+                if (settled(info)) return info;
+            }
+
+            if (DateTime.UtcNow >= deadline) return last;
+            await Task.Delay(100, ct);
+        }
     }
 
     /// <summary>

@@ -137,6 +137,28 @@ internal static class CanonViewfinderFrame
             ? new CanonEvfZoomRect(o.X, o.Y, s.Width, s.Height, info.Sensor?.Width ?? 0, info.Sensor?.Height ?? 0)
             : null;
 
+    /// <summary>
+    /// Whether a pan to (<paramref name="x"/>, <paramref name="y"/>) has shown up in a frame.
+    /// </summary>
+    /// <remarks>
+    /// Judged on the magnifier rect (record 13) when both frames carry it, because that is the record
+    /// a pan moves at every magnification. Record 18 does not move at 1× (it stays the whole sensor),
+    /// so judging on it there waited out the whole settle timeout for a pan that had landed (3.1 s on
+    /// an R6 and a 6D, issue #21). Without record 13 the zoom rect is the only account left. Settled
+    /// means the exact position asked for, or any origin other than the one it started from, since
+    /// the body clamps silently.
+    /// </remarks>
+    internal static bool PanSettled(CanonEvfFrameInfo before, CanonEvfFrameInfo now, uint x, uint y)
+    {
+        if (before.Magnifier is { } from && now.Magnifier is { } to)
+            return (to.X == x && to.Y == y) || to.X != from.X || to.Y != from.Y;
+
+        if (now.ImageOrigin is not { } origin) return false;
+        return (origin.X == x && origin.Y == y)
+               || before.ImageOrigin is not { } start
+               || origin.X != start.X || origin.Y != start.Y;
+    }
+
     private const int HistogramBins = 256;
     private const int HistogramChannels = 4;
 
