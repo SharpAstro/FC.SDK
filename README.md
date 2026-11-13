@@ -253,7 +253,7 @@ The write-ups behind the non-obvious parts, each recording what was measured and
 |---|---|
 | [`canon-windows-transports.md`](docs/canon-windows-transports.md) | How EDSDK actually reaches an EOS body on Windows, and the dead hypotheses behind the live-view fix |
 | [`wpd-ioctl-wire-format.md`](docs/wpd-ioctl-wire-format.md) | The ioctl buffer format decoded: Microsoft's undocumented property-bag serialization, not a Canon one |
-| [`canon-live-view-zoom.md`](docs/canon-live-view-zoom.md) | Magnification is an operation, not a property, and the zoom rect is the only honest read-out |
+| [`canon-live-view-zoom.md`](docs/canon-live-view-zoom.md) | Magnification is an operation, not a property, and the zoom rect is the only honest read-out of magnification |
 | [`canon-custom-functions.md`](docs/canon-custom-functions.md) | The C.Fn wire layout, and why EDSDK is no help for per-model ids |
 | [`edsdk-feature-gaps.md`](docs/edsdk-feature-gaps.md) | What is still missing against EDSDK. Read before concluding something is absent by design |
 

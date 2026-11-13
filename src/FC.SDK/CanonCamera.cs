@@ -1455,7 +1455,8 @@ public sealed class CanonCamera : IAsyncDisposable
 
     /// <summary>
     /// Every record in a live-view frame, image and undecoded metadata alike. For identifying what
-    /// the body puts alongside the picture — the zoom rect, focus points, histogram.
+    /// the body puts alongside the picture; the records already identified are decoded by
+    /// <see cref="GetLiveViewFrameAndInfoAsync"/>.
     /// </summary>
     public async Task<(EdsError Error, IReadOnlyList<CanonViewfinderRecord> Records)> GetLiveViewRecordsAsync(
         CancellationToken ct = default)
@@ -1590,10 +1591,17 @@ public sealed class CanonCamera : IAsyncDisposable
     }
 
     /// <summary>
-    /// The region of the sensor live view is currently showing, as the body reports it — the only
-    /// trustworthy account of whether a zoom or pan actually took effect. Null when no frame
+    /// The zoom rect as the body reports it (record 18): the origin of the image sent and the size
+    /// of the area shown — the trustworthy account of whether a zoom took effect. Null when no frame
     /// arrives, or when the body does not describe its zoom rect.
     /// </summary>
+    /// <remarks>
+    /// At 10× this is the 5× origin with the 10× size, because the 10× JPEG is still the 5× image
+    /// (an EOS 6D and an EOS R6, issue #21); see <see cref="CanonEvfZoomRect"/>. For where the
+    /// magnifier sits, and so where a pan landed at any magnification, read
+    /// <see cref="CanonEvfFrameInfo.Magnifier"/> from <see cref="GetLiveViewFrameAndInfoAsync"/>,
+    /// which also keeps the frame.
+    /// </remarks>
     /// <param name="ct">Cancellation.</param>
     public Task<CanonEvfZoomRect?> GetEvfZoomRectAsync(CancellationToken ct = default) =>
         WaitForZoomRectAsync(_ => true, ZoomReadTimeout, ct);
@@ -1704,10 +1712,11 @@ public sealed class CanonCamera : IAsyncDisposable
     /// <param name="verify">
     /// Wait for the move to appear in the magnifier rect (record 13), or in the zoom rect when the
     /// body sends no record 13, and return the zoom rect of that frame. On by default: the body
-    /// streams pre-move frames for up to a second afterwards, so an immediate read reports the
-    /// <i>previous</i> position — which looks exactly like a pan that did not work. Settling on record
-    /// 13 is what makes a 1× pan return at once: on record 18, which does not move at 1×, it waited
-    /// out the whole 3 s timeout (3021–3144 ms on an R6 and a 6D before; 151–408 ms after).
+    /// streams pre-move frames afterwards (for up to a second over WPD, up to 2 s on an R6 over
+    /// PTP/IP), so an immediate read reports the <i>previous</i> position — which looks exactly like a
+    /// pan that did not work. Settling on record 13 is what makes a 1× pan return at once: on record
+    /// 18, which does not move at 1×, it waited out the whole 3 s timeout (3021–3144 ms on an R6 and a
+    /// 6D over WPD raw ioctl before; 151–408 ms after).
     /// At 1× the returned rect is the whole sensor; the magnifier is in
     /// <see cref="CanonEvfFrameInfo.Magnifier"/>.
     /// </param>

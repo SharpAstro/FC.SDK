@@ -61,7 +61,8 @@ also unblocks §2.
 > (0x9158 / 0x9159), not a property, so the point/rect accessor TianWen was waiting for was never
 > needed. What actually blocks magnification is `Evf_AFMode` (0xD1BA), which silently discards the
 > zoom in its default setting. Full measurements in **`docs/canon-live-view-zoom.md`**. Live-view AF
-> (`AutoFocusLiveViewAsync`, 0x9154) works too. Still undecoded: envelope record types 4, 5, 7, 12.
+> (`AutoFocusLiveViewAsync`, 0x9154) works too. Records 4, 7, 8 and 13 are decoded as `CanonEvfFrameInfo` (issue #21); still undecoded: 12 on
+> both bodies, and 16, 19, 20, 21, 22, 24, 28 and 29, which only an R6 sends.
 >
 > **The histogram (record 17) is now decoded too** — `CanonEvfHistogram` /
 > `CanonCamera.GetEvfHistogramAsync`, four 256-bin channels with mean level, percentiles and
@@ -78,11 +79,11 @@ also unblocks §2.
 Functionally the biggest gap, and the one a consumer has already hit (see below): **5×/10× EVF zoom
 is how you focus on a star, and it is the only planetary regime a DSLR has.**
 
-- **The envelope is parsed for the image record and nothing else.**
-  `CanonViewfinderFrame.ExtractJpeg` (`src/FC.SDK/Canon/CanonViewfinderFrame.cs:34`) walks
-  `[length][type][payload]` records looking for types 1/9/11 and steps past the rest. Its own
-  comment names what it discards: focus points, histogram, zoom metadata. EDSDK surfaces these as
-  properties on the EVF image ref.
+- **The envelope is parsed for the image record and nothing else.** *(Closed: `GetLiveViewFrameAndInfoAsync`
+  returns the JPEG with records 4, 7, 8, 13, 14 and 18 from one walk over the envelope, issue #21.)*
+  Before that, `CanonViewfinderFrame.ExtractJpeg` walked `[length][type][payload]` records looking
+  for types 1/9/11 and stepped past the rest: focus points, histogram, zoom metadata. EDSDK surfaces
+  these as properties on the EVF image ref.
 - **No zoom control.** `Evf_Zoom` (0x507), `Evf_ZoomPosition` (0x508), `Evf_ZoomRect` (0x541) and
   `Evf_CoordinateSystem` (0x540) are all present in `EdsPropertyId` (`:59`, `:60`, `:70`, `:69`) and
   **absent from `CanonPropertyMap`**. `PtpOperationCode.CanonZoom` (0x9158,

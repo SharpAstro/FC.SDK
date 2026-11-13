@@ -75,6 +75,12 @@ So only 1 / 5 / 10 exist; anything else rounds down to the next real step, and n
 5× is really 4.96× — the crop is a whole number of pixels, not an exact fifth. Ask for what you want
 and read `GetEvfZoomRectAsync` for what you got.
 
+**This corrects how the 10× row was read.** `(2184,1456) 552x368` is not the area shown at 10×: the
+rect (record 18) is the origin of the image sent, then the size of the area shown, and at 10× the
+image sent is still the 5× one. The 10× area itself is the magnifier rect, record 13:
+`(2460,1640) 552x368` when centred. Measured on a 6D and an R6 over WPD raw ioctl in issue #21
+(2026-11-13), identical on both; see "The envelope records" below.
+
 ## Panning: two different out-of-range behaviours, and only one of them is a clamp
 
 `ZoomPosition(x, y)` sets the **rect origin in sensor pixels**. Each axis is handled independently,
@@ -99,7 +105,28 @@ and there are three regimes — the third one is the trap:
 with the frame being the AF frame in `Live` mode: no lens, no AF-frame constraint, no inset. The
 acceptance limit is unchanged either way, so clamping to `sensor − crop` is correct in both.
 
-That last row cost a whole measurement pass. Asking for "the far corner" with a big number such as
+**A pan at 1× is accepted too.** This was long assumed to be discarded, by arithmetic on the rule
+above rather than by sending one. Sent on an R6 and a 6D (issue #21): at 1×, `ZoomPosition`
+moves the magnifier rect (record 13), record 5, and in `Live` the AF frame (record 8), clamped by the
+body to its AF area — (300,200) lands on `(300,212)` on an R6 — while the zoom rect (record 18) stays
+`(0,0) 5472x3648`. `SetEvfZoomPositionAsync` therefore settles on record 13: on record 18 a 1× pan
+waited out the whole 3 s timeout.
+
+| `SetEvfZoomPositionAsync(1000,1000)`, default `verify` | Before (settles on 18) | After (settles on 13) |
+|---|---|---|
+| 6D at 1× | 3034–3144 ms, 6 tries | 151–289 ms, 6 tries |
+| R6 at 1× | 3021–3134 ms, 6 tries | 371–408 ms, 6 tries |
+| 6D at 5×, there and back | 375–509 ms | 366–501 ms |
+| R6 at 5×, there and back | 142–395 ms | 257–392 ms |
+
+Same sitting, builds alternated, WPD raw ioctl, 2026-11-13. Record 13 read the position asked for
+after every call. Re-run over WPD COM and PTP/IP on 2026-11-14, the 1× pan went from 3039–3554 ms
+to 174–657 ms on a 6D, and from 3099–3146 ms to 391–425 ms on an R6 over COM. An R6 over PTP/IP
+sometimes stalls a fetch for 1.6–1.8 s, and there a 1× pan took 609–4595 ms and a 5× one up to
+5640 ms. On that transport a pan can also return a position from before the move, as the settle on
+record 18 could too; the rule that would rule it out is still open.
+
+That last row of the pan table above cost a whole measurement pass. Asking for "the far corner" with a big number such as
 9999 moves nothing at all, and since the previous position is still reported it looks exactly like a
 pan that does not work — the first reading of this table recorded 9999 as "clamped to (4097,2548)"
 purely because the preceding request had legitimately clamped there.
@@ -119,6 +146,9 @@ Two structural corroborations came out of that comparison:
 - **The JPEG's own dimensions change with the zoom.** 1× streams 960×640 — the whole frame,
   downscaled. 5× streams **1104×736, exactly the rect size**. The feed is a true 1:1 sensor crop,
   not a magnified preview: an upscale of the 960×640 image could not resolve the weave.
+- **10× streams the 5× image.** Still 1104×736, and on a 6D the 5× and 10× frames show the same
+  field, the same edges at the same places, not a 2× enlargement (issue #21). The 10× area is the
+  magnifier rect inside it, at `(13.x − 18.x, 13.y − 18.y)` = (276,184) when centred.
 - Frames must be exposed properly before any of this is visible. An early pass ran wide open and
   every frame — cropped or not — was a white rectangle, a visual test that could not have failed.
 
@@ -136,19 +166,40 @@ and watching which tracked:
 |---|---|---|
 | 1 / 9 / 11 | JPEG | the preview image (9 is movie mode) |
 | **14** | `5472, 3648` | **full sensor size** |
-| **18** | `x, y, w, h` | **the zoom rect** |
-| 13 | `2184, 1456, 1104, 736` | LV readout size, then display size |
+| **18** | `x, y, w, h` | **the zoom rect**: origin of the image sent, then size of the area shown |
+| **13** | `x, y, w, h` | **the magnifier rect**, moved by a pan at every magnification |
+| **4** | `1` / `5` / `10` | **magnification** |
+| 5 | `x, y` | magnifier origin, the first half of 13 |
+| **8** | `count, state, 1, x, y, w, h` | **the AF frame**; state 16 at rest, 17 while focus is achieved |
+| **7** | `1` / `2` | **AF busy**: 2 while the body drives AF |
 | **17** | 4096 bytes | **exposure histogram** — 4 channels × 256 bins × uint32, decoded and confirmed |
 | 10 | `0x6A70974B, …` | a Unix timestamp and a counter |
-| 0xFFFFFFFF | 32 bytes | frame header |
-| 4, 5, 7, 12 | small | not identified |
+| 0xFFFFFFFF | 32–56 bytes | frame header |
+| 12 | `0` | not identified (a 6D sends it, an R6 does not) |
 
-Types 14 and 18 are what `CanonViewfinderFrame.TryGetZoomRect` reads, and
-`ViewfinderEnvelopeTests` pins the layout against this transcript. **libgphoto2 decodes none of
-them** — its `camera_capture_preview` logs every non-JPEG record without interpreting it — so there
-is no second implementation to check against. A body that numbers its records differently gets
-`null` rather than a wrong answer, and `IsMagnified` stays false when the sensor record is missing
-rather than being inferred from the crop alone.
+**This corrects the row that read 13 as "LV readout size, then display size".** That reading came
+from one transcript taken centred, where 13 and the 5× rect coincide. Records 4, 5, 7, 8 and 13 were
+identified on an R6 and a 6D in issue #21 by zooming, panning and closing the focus line while the
+bytes were watched. Centred, sensor 5472×3648, identical on both bodies except record 8's size:
+
+| Type | 1× | 5× | 10× | 10×, panned to (1000,700) |
+|---|---|---|---|---|
+| 4 | `1` | `5` | `10` | `10` |
+| 13 | `2184,1456,1104,736` | `2184,1456,1104,736` | `2460,1640,552,368` | `1000,700,552,368` |
+| 18 | `0,0,5472,3648` | `2184,1456,1104,736` | `2184,1456,552,368` | `724,516,552,368` |
+| 8, 6D | `1,16,1,2460,1456,552,736` | `1,16,1,2554,1640,364,368` | `1,16,1,2645,1732,182,184` | `1,16,1,1185,792,182,184` |
+| 8, R6 | `1,16,1,2536,1608,400,432` | `1,16,1,2552,1640,368,368` | `1,16,1,2644,1732,184,184` | `1,16,1,1184,792,184,184` |
+| JPEG | 960×640 | 1104×736 | 1104×736 | 1104×736 |
+
+`CanonCamera.GetLiveViewFrameAndInfoAsync` returns the JPEG (a slice of the envelope, no copy) with
+these decoded as `CanonEvfFrameInfo`, from one fetch; record 8 is decoded only for one frame, the
+layout measured, and returned raw otherwise. Types 14 and 18 are also what
+`CanonViewfinderFrame.TryGetZoomRect` reads. `ViewfinderEnvelopeTests` and `EvfFrameInfoTests` pin the
+layout against 6D and R6 transcripts. **libgphoto2 decodes none of them** — its
+`camera_capture_preview` logs every non-JPEG record without interpreting it — so there is no second
+implementation to check against. A body that numbers its records differently gets `null` rather than
+a wrong answer, and `IsMagnified` stays false when the sensor record is missing rather than being
+inferred from the crop alone.
 
 ### Record 17 is a real light meter, and it is linear
 
@@ -214,8 +265,10 @@ up.
 await camera.StartLiveViewAsync(ct);
 await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live, ct);   // or the zoom is silently ignored
 await camera.SetEvfZoomAsync(CanonEvfZoom.X5, ct: ct);         // verifies; OperationRefused if blocked
-await camera.SetEvfZoomPositionAsync(x, y, ct);
-var rect = await camera.GetEvfZoomRectAsync(ct);               // where it actually landed
+var (_, landed) = await camera.SetEvfZoomPositionAsync(x, y, ct: ct);  // waits for the move to show
+var (err, jpeg, info) = await camera.GetLiveViewFrameAndInfoAsync(ct);
+// About half the polls answer ObjectNotReady with no image: read again until err is OK and jpeg is
+// not empty. info.Magnifier: where the magnifier is; info.ImageOrigin + ShownSize: the zoom rect.
 ```
 
 ## The telescope case works
@@ -237,8 +290,12 @@ the whole sensor.
 
 ## Open
 
-- **One body.** Record numbering, the AF-method condition, the pan insets and the 1/5/10 steps are
-  all n=1. A 450D has no `0x9159` to test against.
+- **The AF-method condition is n=1** (a 6D). The 1/5/10 steps, the record numbering and the pan
+  inset are confirmed on an R6 too (issue #21): at 5× it moves `(0,0)` to `(196,212)`, where a 6D
+  moves it to `(271,364)`. A 450D has no `0x9159` to test against.
+- **Record 8 with more than one frame** (zone AF, faces) has never been captured: whether the state
+  word is per frame or shared is unknown, so `CanonEvfFrameInfo` returns that record raw.
 - **`DoAf` answers `OK` with no lens** and emits an `OLCInfoChanged` — it cannot be taken as
   evidence that focus happened. Not a problem for a telescope, where nothing would drive it anyway.
-- Record types 4, 5, 7 and 12 are unidentified.
+- Record type 12 is unidentified, as are the records only an R6 sends (16, 19, 20, 21, 22, 24, 28,
+  29).

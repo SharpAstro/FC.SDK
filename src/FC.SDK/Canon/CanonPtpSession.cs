@@ -467,7 +467,7 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
     /// <remarks>
     /// Coordinates are in the body's own sensor-coordinate space and the units are not the same
     /// across generations, so a caller that needs a pixel-accurate pan has to calibrate against the
-    /// zoom rect the viewfinder envelope reports rather than assume.
+    /// magnifier rect the viewfinder envelope reports (record 13) rather than assume.
     /// </remarks>
     internal async Task<EdsError> EvfZoomPositionAsync(uint x, uint y, CancellationToken ct = default)
     {

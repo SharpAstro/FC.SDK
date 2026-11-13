@@ -10,7 +10,8 @@ namespace FC.SDK.Canon;
 /// The payload is NOT a bare JPEG — it is a sequence of records, each
 /// <c>[length:u32][type:u32][payload…]</c> where <c>length</c> covers the whole record including
 /// those two words. The image lives in a record whose type is one of <see cref="JpegTypes"/>; the
-/// others carry focus points, histogram and zoom metadata we do not use yet. Feeding the envelope
+/// others carry the zoom, magnifier, AF and histogram metadata that <see cref="Decode"/> and
+/// <see cref="TryGetHistogram"/> read, and a few still unidentified. Feeding the envelope
 /// straight to a JPEG decoder fails with "no SOI", since the first bytes are the length word rather
 /// than <c>FF D8</c>.
 /// </para>
@@ -27,7 +28,10 @@ internal static class CanonViewfinderFrame
 
     private const int RecordHeaderSize = 8;
 
-    /// <summary>Four uint32s — x, y, width, height — describing the magnified region in sensor pixels.</summary>
+    /// <summary>
+    /// Four uint32s in sensor pixels: the origin of the image sent, then the size of the area shown.
+    /// At 10× that is the 5× image's origin with the 10× size.
+    /// </summary>
     private const uint ZoomRectRecord = 18;
 
     /// <summary>Two uint32s — the full sensor dimensions.</summary>
@@ -222,16 +226,26 @@ internal static class CanonViewfinderFrame
     }
 
     /// <summary>
-    /// The magnified region the body is currently showing, or null when the envelope does not
-    /// describe one.
+    /// The zoom rect (record 18, with the sensor size from record 14), or null when the envelope does
+    /// not carry one.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Both record types were identified on an EOS 6D by driving the body through known zoom states
     /// and watching which records tracked: type 14 held 5472×3648 (that body's exact sensor size)
     /// and type 18 went from <c>(0,0) 5472×3648</c> at 1× to a centred <c>(2184,1456) 1104×736</c>
     /// at 5×, a 4.96× crop. libgphoto2 does not decode either — it logs every non-JPEG record
     /// without interpreting it — so this is not corroborated by a second implementation, and a body
     /// that numbers its records differently will simply get null rather than a wrong answer.
+    /// </para>
+    /// <para>
+    /// <b>This corrects what was written here before: record 18 is not the area shown at 10×.</b> It
+    /// is the origin of the image sent, then the size of the area shown. At 5× the two coincide. At
+    /// 10× the JPEG is still the 1104×736 5× image, so 18 reads <c>(2184,1456) 552×368</c>: the 5×
+    /// origin with the 10× size. The 10× area itself is the magnifier rect, record 13
+    /// (<c>(2460,1640) 552×368</c>). Measured on an EOS 6D and an EOS R6 over WPD raw ioctl
+    /// (issue #21, 2026-11-13); see <see cref="CanonEvfFrameInfo"/>.
+    /// </para>
     /// </remarks>
     internal static CanonEvfZoomRect? TryGetZoomRect(List<CanonViewfinderRecord> records)
     {
@@ -261,11 +275,11 @@ internal static class CanonViewfinderFrame
     /// Every record in the envelope, image and metadata alike.
     /// </summary>
     /// <remarks>
-    /// Only the image record is understood so far. The rest carry focus points, histogram and the
-    /// zoom rect, and are exposed undecoded because identifying them needs a body that can be driven
-    /// through known states while the bytes are watched — which is how the image record itself was
-    /// pinned. libgphoto2 is no help here: its <c>camera_capture_preview</c> dumps every non-JPEG
-    /// record to a debug log without interpreting any of them.
+    /// Exposed undecoded, for identifying records: that needs a body driven through known states
+    /// while the bytes are watched, which is how 4, 7, 8, 13, 14, 17 and 18 were pinned (see
+    /// <see cref="Decode"/> and <see cref="TryGetHistogram"/>). libgphoto2 is no help here: its
+    /// <c>camera_capture_preview</c> dumps every non-JPEG record to a debug log without
+    /// interpreting any of them.
     /// </remarks>
     internal static List<CanonViewfinderRecord> ParseRecords(byte[] payload)
     {
@@ -340,18 +354,26 @@ internal static class CanonViewfinderFrame
 public readonly record struct CanonViewfinderRecord(uint Type, bool IsImage, ReadOnlyMemory<byte> Payload);
 
 /// <summary>
-/// The region of the sensor the live-view feed is currently showing, in sensor pixels.
+/// The zoom rect the live-view envelope reports (record 18): where the image sent starts on the
+/// sensor, and the size of the area shown, in sensor pixels.
 /// </summary>
 /// <remarks>
-/// This is the body's own account of its magnification, and the only trustworthy one: a Canon
-/// answers the zoom operation with OK whether or not it acts on it, so the response code cannot
-/// distinguish "zoomed" from "ignored". Also the read-out for panning — the camera silently clamps a
-/// zoom position to keep the crop on the sensor and then reports where it actually landed.
+/// <para>
+/// This is the body's own account of its magnification: a Canon answers the zoom operation with OK
+/// whether or not it acts on it, so the response code cannot distinguish "zoomed" from "ignored".
+/// </para>
+/// <para>
+/// <b>At 5× it is the area shown; at 10× it is not.</b> The 10× JPEG is still the 5× image, so this
+/// holds the 5× origin with the 10× size, <c>(2184,1456) 552×368</c> centred on a 6D and an R6. For
+/// where a pan landed, read the magnifier rect (record 13, <see cref="CanonEvfFrameInfo.Magnifier"/>):
+/// it moves at every magnification, where this one stays the whole sensor at 1×. This corrects the
+/// earlier description of this type as "the region the feed is currently showing" (issue #21).
+/// </para>
 /// </remarks>
-/// <param name="X">Left edge of the magnified region.</param>
-/// <param name="Y">Top edge.</param>
-/// <param name="Width">Width of the magnified region; equals <paramref name="SensorWidth"/> at 1×.</param>
-/// <param name="Height">Height of the magnified region.</param>
+/// <param name="X">Left edge of the image sent.</param>
+/// <param name="Y">Top edge of the image sent.</param>
+/// <param name="Width">Width of the area shown; equals <paramref name="SensorWidth"/> at 1×.</param>
+/// <param name="Height">Height of the area shown.</param>
 /// <param name="SensorWidth">Full sensor width, or 0 if the body did not report it.</param>
 /// <param name="SensorHeight">Full sensor height, or 0 if the body did not report it.</param>
 public readonly record struct CanonEvfZoomRect(

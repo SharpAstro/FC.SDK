@@ -965,9 +965,9 @@ try
         // left it in the bottom-right corner, so contrast AF was hunting on the corner of the room
         // rather than the subject, and answering OK for it.
         //
-        // It has to be centred while magnified: at 1x the rect is the whole frame, so the accepted
-        // range for a position is [0, sensor - crop] = [0, 0] and every request is discarded. Zoom
-        // in, centre, zoom back out — the centred frame carries over.
+        // Centred while magnified, then zoomed back out: the centred frame carries over. (A pan at
+        // 1x is accepted too, measured on a 6D and an R6 in issue #21; this comment used to say it
+        // was discarded, which was arithmetic rather than a measurement.)
         await camera.SetEvfZoomAsync((uint)CanonEvfZoom.X5, verify: false);
         await Task.Delay(1200);
         if (await camera.GetEvfZoomRectAsync() is { SensorWidth: > 0, Width: > 0 } r)

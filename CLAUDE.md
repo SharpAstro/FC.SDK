@@ -74,10 +74,14 @@ Full write-up in **`docs/canon-live-view-zoom.md`**. Three things that are easy 
   `OperationRefused` only when the frame really did not crop — same pattern as the mirror-lockup
   refusal, and it gets both configurations right without knowing which it is in. Set `Live` anyway;
   it worked in every configuration measured.
-- **The zoom rect is the only honest read-out**, and it comes from the live-view envelope, not a
+- **The zoom rect is the only honest read-out of magnification**, and it comes from the live-view envelope, not a
   property: record type 18 is `[x][y][w][h]`, type 14 the sensor size. The factor is a *threshold*
   (5–8 all give 5×) and "5×" is really 4.96×, so read `GetEvfZoomRectAsync` rather than trusting what
-  was asked for. Panning is exact and silently clamped, and the body reports where it landed.
+  was asked for. **But 18 is the origin of the image sent plus the size of the area shown, and at
+  10× the JPEG is still the 5× image**, so 18 reads the 5× origin with the 10× size. Where the
+  magnifier (and so a pan) actually is, at every magnification 1× included, is record 13.
+  `GetLiveViewFrameAndInfoAsync` decodes 4, 7, 8, 13, 14 and 18 from the same envelope as the
+  frame; panning is exact and silently clamped, and record 13 reports where it landed.
 
 **Allowed values are what you may *write*, not what a property can *report*.** `Evf_AFMode`/`AFMode`
 (0xD108) follows the lens's own AF/MF switch and reads `ManualFocus` when it is at MF — a value
@@ -128,9 +132,10 @@ Getting to a usable measurement took four void runs, and each failure is a metho
   walked the lens onto its near mechanical stop by row 2 — after which contrast AF had no gradient to
   climb and all eight frames were equally, maximally blurred.
 - **The AF frame is the zoom frame in `Live` mode**, so a pan left over from the zoom measurements
-  had AF hunting in the bottom-right corner of the room while answering `OK`. Centring it has to
-  happen *while magnified*: at 1× the accepted position range is `[0, sensor − crop]` = `[0, 0]` and
-  every request is discarded. Focused frames went 112K → 124–138K once it was centred.
+  had AF hunting in the bottom-right corner of the room while answering `OK`. Focused frames went
+  112K → 124–138K once it was centred. (This used to add that centring had to happen while
+  magnified, because a 1× pan was "discarded". That was arithmetic, never sent: a pan at 1× is
+  accepted and moves the magnifier and the AF frame, measured on a 6D and an R6 in issue #21.)
 - **Defocus by measured effect, not step count.** A subject at ~80 cm is near an EF50mm's 0.35 m
   minimum, so the near stop barely blurs it — 14 steps plateau at 12% below the focused JPEG size.
   A threshold picked for a scene that did not exist voided every row twice.
