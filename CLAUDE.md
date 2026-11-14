@@ -881,7 +881,7 @@ dotnet run --project src/FC.SDK.Diagnostics -- evf [--host]
 ```
 
 Each experiment is a **System.CommandLine subcommand** (`matrix`, `diag`, `mlucheck`, `mluself`,
-`clack`, `evf`, `evfout`, `zoom`, `zoompix`, `lens`), so `--help` is the list and a typo is an error. That last
+`clack`, `evf`, `evfout`, `zoom`, `zoompix`, `pan`, `lens`), so `--help` is the list and a typo is an error. That last
 part is not cosmetic: the old `args.Contains("--evf")` dispatch treated an unrecognised argument as
 "no mode given" and therefore ran the **default** one, so a mistyped `--evff` fired the mirror-lockup
 matrix — minutes of shutter actuations — instead of reading a few properties.

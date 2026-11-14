@@ -71,6 +71,7 @@ var ptpReleaseOpt = new Option<bool>("--ptp-release")
 };
 var avOpt = new Option<EdsAv>("--av") { Description = "Aperture.", DefaultValueFactory = _ => EdsAv.Av_5_6 , HelpName = "aperture" };
 var tvOpt = new Option<EdsTv>("--tv") { Description = "Shutter speed.", DefaultValueFactory = _ => EdsTv.Tv_1_125 , HelpName = "shutter" };
+var roundsOpt = new Option<int>("--rounds") { Description = "How many times to run each pan.", DefaultValueFactory = _ => 3 };
 var isoOpt = new Option<EdsISOSpeed>("--iso") { Description = "ISO.", DefaultValueFactory = _ => EdsISOSpeed.ISO_400 , HelpName = "iso" };
 
 var root = new RootCommand("Canon hardware diagnostics — judged on delivered bytes, not response codes.");
@@ -90,6 +91,7 @@ hostOpt.Recursive = releaseOpt.Recursive = true;
     ("evf",      "String properties, live-view zoom / pan / autofocus, envelope record dump.", []),
     ("evfout",   "Evf_OutputDevice across live-view start and stop: restored? Body controls alive? (#21)", [shootOpt, ptpReleaseOpt]),
     ("zoom",     "Why a zoom is ignored: sweep factors and LV AF systems against the zoom rect.", []),
+    ("pan",      "SetEvfZoomPositionAsync at 1x and 5x: timed, judged on record 13, numbered checks (#21).", [roundsOpt]),
     ("zoompix",  "Visual proof of magnification and panning — writes JPEGs to compare.", [avOpt, tvOpt, isoOpt]),
     ("lens",     "Dump the lens / focus properties. Run with no lens, lens at AF, lens at MF and diff.", []),
     ("press",    "0x9128's two parameters: press stage x AF/MF, judged on delivered files.", [avOpt, tvOpt, isoOpt, cappedOpt]),
@@ -1627,6 +1629,102 @@ try
         Log($"\nStopLiveView = {await camera.StopLiveViewAsync()}");
         Log($"Images in {outDir}");
         return 0;
+    }
+
+    if (mode is "pan")
+    {
+        // SetEvfZoomPositionAsync with its default verify, timed, then judged on record 13 (the
+        // magnifier) in a frame read after it returned. At 1x the settle used to wait on record 18,
+        // which does not move there, so every 1x pan ran the 3 s timeout out (issue #21). A check
+        // passes under 700 ms, the most any pan took over WPD on a 6D or an R6 (raw ioctl and COM).
+        // Each target differs from the position before it: a frame from before the move then cannot
+        // pass for the landing.
+        const long MaxMs = 700;
+        int rounds = parse.GetValue(roundsOpt);
+        Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
+        var (afErr, afSystem) = await camera.GetEvfAfSystemAsync();
+        Log($"Evf_AFMode = {afSystem} ({afErr}). With a lens attached, the 5x rows need Live or Quick.");
+
+        // About half the polls answer ObjectNotReady with no image, so a read waits for a real frame.
+        async Task<CanonEvfFrameInfo?> Info()
+        {
+            for (var t = Stopwatch.StartNew(); t.ElapsedMilliseconds < 3000;)
+            {
+                var (e, jpeg, info) = await camera!.GetLiveViewFrameAndInfoAsync();
+                if (e is EdsError.OK && !jpeg.IsEmpty) return info;
+                await Task.Delay(30);
+            }
+            return null;
+        }
+
+        // Frames keep coming from before a move for a while, so each pan starts from a settled body.
+        async Task Settle()
+        {
+            for (var t = Stopwatch.StartNew(); t.ElapsedMilliseconds < 1500;) await Info();
+        }
+
+        if (await Info() is not { Magnifier: { } m0, Sensor: { } sensor })
+        {
+            Log("No frame with records 13 and 14: nothing below this line means anything.");
+            Log($"StopLiveView = {await camera.StopLiveViewAsync()}");
+            return 1;
+        }
+        var (cx, cy) = ((sensor.Width - m0.Width) / 2, (sensor.Height - m0.Height) / 2);
+        Log($"sensor {sensor.Width}x{sensor.Height}, magnifier {m0.Width}x{m0.Height}, centre ({cx},{cy})");
+
+        async Task ZoomCentred(uint z)
+        {
+            Log($"  zoom {z} = {await camera!.SetEvfZoomAsync(z, verify: false)}");
+            await camera.SetEvfZoomPositionAsync(cx, cy, verify: false);
+            await Settle();
+        }
+
+        var rows = new List<(string Check, string Expect, long Ms, bool Ok)>();
+        async Task Pan(string check, string expect, uint x, uint y, Func<CanonEvfRect, bool> landedRight)
+        {
+            var sw = Stopwatch.StartNew();
+            var (e, _) = await camera!.SetEvfZoomPositionAsync(x, y);
+            var ms = sw.ElapsedMilliseconds;
+            var now = (await Info())?.Magnifier;
+            var ok = e is EdsError.OK && ms < MaxMs && now is { } r && landedRight(r);
+            rows.Add((check, expect, ms, ok));
+            Log($"  {check}: ({x},{y}) = {e}, {ms} ms, record 13 {(now is { } g ? $"({g.X},{g.Y})" : "no frame")}"
+                + $"  {(ok ? "ok" : "FAIL")}");
+        }
+
+        for (int round = 1; round <= rounds; round++)
+        {
+            Log($"--- round {round}");
+            await ZoomCentred(1);
+            await Pan("P1 1x, to (1000,1000)",
+                "record 13 at (1000,1000), under 0.7 s (3 s, the settle timeout, before #21)",
+                1000, 1000, r => r.X == 1000 && r.Y == 1000);
+            await ZoomCentred(5);
+            await Pan("P2 5x, to (3000,2000)", "record 13 at (3000,2000), under 0.7 s",
+                3000, 2000, r => r.X == 3000 && r.Y == 2000);
+            await Pan("P3 5x, back to the centre", $"record 13 at ({cx},{cy}), under 0.7 s",
+                cx, cy, r => r.X == cx && r.Y == cy);
+            // The body clamps (0,0) to the corner of its AF area, so the landing is near the corner,
+            // not on it: within 600 px of it covers every body measured, and leaves the centre out.
+            await Pan("P4 5x, to (0,0), clamped",
+                "record 13 near (0,0): (271,364) on a 6D with a lens, (196,212) on an R6, (0,0) bare; under 0.7 s",
+                0, 0, r => r.X <= 600 && r.Y <= 600);
+        }
+
+        await ZoomCentred(1);
+        Log($"StopLiveView = {await camera.StopLiveViewAsync()}");
+
+        Console.WriteLine();
+        Log("================ PAN SUMMARY ================");
+        foreach (var check in rows.GroupBy(r => r.Check))
+        {
+            var passed = check.Count(r => r.Ok);
+            Log($"{check.Key,-26} {check.Min(r => r.Ms)}-{check.Max(r => r.Ms)} ms, {passed}/{check.Count()} ok."
+                + $" Expected: {check.First().Expect}");
+            failures += check.Count() - passed;
+        }
+        Log($"pan: {failures} check(s) failed, exit code {failures}");
+        return failures;
     }
 
     if (mode is "zoom")
