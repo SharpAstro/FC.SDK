@@ -110,6 +110,7 @@ hostOpt.Recursive = releaseOpt.Recursive = transportOpt.Recursive = true;
     ("evf",      "String properties, live-view zoom / pan / autofocus, envelope record dump.", []),
     ("evfout",   "Evf_OutputDevice across live-view start and stop: restored? Body controls alive? (#21)", [shootOpt, ptpReleaseOpt]),
     ("zoom",     "Why a zoom is ignored: sweep factors and LV AF systems against the zoom rect.", []),
+    ("zoompan",  "Is a 0x9159 sent just after a 0x9158 zoom change dropped? Zoom pair x delay x target, judged on record 13.", [roundsOpt]),
     ("pan",      "SetEvfZoomPositionAsync at 1x and 5x: timed, judged on record 13, numbered checks (#21).", [roundsOpt]),
     ("rec10",    "Record 10 across every frame, at rest and across raw 0x9159 pans with their send times (#30).", [roundsOpt]),
     ("zoompix",  "Visual proof of magnification and panning — writes JPEGs to compare.", [avOpt, tvOpt, isoOpt]),
@@ -2084,6 +2085,113 @@ try
 
         await camera.SetEvfZoomAsync(1);
         Log($"\nStopLiveView = {await camera.StopLiveViewAsync()}");
+        return 0;
+    }
+
+    if (mode is "zoompan")
+    {
+        // Seen in rec10 (#30): a pan sent 5 ms after zooming 5x -> 1x never moved record 13, where the
+        // same pan after a zoom that changed nothing did. Each trial starts settled at a known zoom and
+        // position, sends the zoom, waits, sends the pan, and watches record 13 for 2.5 s. The 1->1 and
+        // 5->5 pairs are the controls: the same zoom command, no change of magnification.
+        int rounds = parse.GetValue(roundsOpt);
+        static uint U32(ReadOnlySpan<byte> s, int at) => BitConverter.ToUInt32(s[at..(at + 4)]);
+
+        async Task<((uint X, uint Y)? Mag, uint? Zoom, (uint W, uint H)? Sensor, (uint W, uint H)? Size)> Frame()
+        {
+            for (var t = ClockWatch.StartNew(time); t.ElapsedMilliseconds < 1000;)
+            {
+                var (e, records) = await camera!.GetLiveViewRecordsAsync();
+                if (e is EdsError.OK && records.Any(r => r.IsImage))
+                {
+                    (uint, uint)? mag = null, sensor = null, size = null; uint? zoom = null;
+                    foreach (var r in records)
+                    {
+                        var p = r.Payload.Span;
+                        if (r.Type == 13 && p.Length >= 16) { mag = (U32(p, 0), U32(p, 4)); size = (U32(p, 8), U32(p, 12)); }
+                        else if (r.Type == 14 && p.Length >= 8) sensor = (U32(p, 0), U32(p, 4));
+                        else if (r.Type == 4 && p.Length >= 4) zoom = U32(p, 0);
+                    }
+                    return (mag, zoom, sensor, size);
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(10), time);
+            }
+            return (null, null, null, null);
+        }
+        async Task<((uint X, uint Y)? Mag, uint? Zoom)> Settle(int ms)
+        {
+            ((uint X, uint Y)? Mag, uint? Zoom) last = (null, null);
+            for (var t = ClockWatch.StartNew(time); t.ElapsedMilliseconds < ms;)
+                if (await Frame() is { Mag: not null } f) last = (f.Mag, f.Zoom);
+            return last;
+        }
+
+        Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
+        var (afErr, afSystem) = await camera.GetEvfAfSystemAsync();
+        Log($"Evf_AFMode = {afSystem} ({afErr}).");
+        await Settle(1500);
+        if (await Frame() is not { Sensor: { } sz, Size: { } m0 })
+        {
+            Log("No frame with records 13 and 14: nothing below this line means anything.");
+            Log($"StopLiveView = {await camera.StopLiveViewAsync()}");
+            return 1;
+        }
+        var centre = ((sz.W - m0.W) / 2, (sz.H - m0.H) / 2);
+        Log($"sensor {sz.W}x{sz.H}, magnifier {m0.W}x{m0.H}, centre {centre}");
+
+        var trials = new List<(string Pair, int Delay, string Target, bool Moved, long FirstMoveMs, string Detail)>();
+        (uint, uint)[] targets = [centre, (1000, 1000)];
+        (uint From, uint To)[] pairs = [(5, 1), (1, 5), (1, 1), (5, 5)];
+        int[] delays = [0, 100, 300, 1000];
+        for (int round = 1; round <= rounds; round++)
+        {
+            Log($"--- round {round}");
+            foreach (var (from, to) in pairs)
+            foreach (var delay in delays)
+            foreach (var target in targets)
+            {
+                // Settled start: magnification `from`, magnifier at (0,0), which lands near a corner,
+                // far from both targets.
+                await camera.SetEvfZoomAsync(from, verify: false);
+                await Settle(1200);
+                await camera.SetEvfZoomPositionAsync(0, 0, verify: false);
+                var start = await Settle(1200);
+
+                var sw = ClockWatch.StartNew(time);
+                var zErr = await camera.SetEvfZoomAsync(to, verify: false);
+                if (delay > 0) await Task.Delay(TimeSpan.FromMilliseconds(delay), time);
+                var panAt = sw.ElapsedMilliseconds;
+                var (pErr, _) = await camera.SetEvfZoomPositionAsync(target.Item1, target.Item2, verify: false);
+                var panSent = ClockWatch.StartNew(time);
+
+                long firstMove = -1;
+                ((uint X, uint Y)? Mag, uint? Zoom) last = (null, null);
+                while (panSent.ElapsedMilliseconds < 2500)
+                {
+                    var f = await Frame();
+                    if (f.Mag is null) continue;
+                    last = (f.Mag, f.Zoom);
+                    if (firstMove < 0 && f.Mag != start.Mag) firstMove = panSent.ElapsedMilliseconds;
+                }
+                var moved = last.Mag is { } l && l != start.Mag;
+                var pair = $"{from}x->{to}x";
+                var t = $"({target.Item1},{target.Item2})";
+                var detail = $"start {start.Mag} z{start.Zoom}, zoom={zErr}, pan at +{panAt} ms ={pErr}, end {last.Mag} z{last.Zoom}";
+                trials.Add((pair, delay, t, moved, firstMove, detail));
+                Log($"  {pair} delay {delay,4} ms target {t,-12} {(moved ? $"moved, first at {firstMove} ms" : "NOT MOVED")}   {detail}");
+            }
+        }
+
+        await camera.SetEvfZoomAsync(1, verify: false);
+        await Settle(800);
+        await camera.SetEvfZoomPositionAsync(centre.Item1, centre.Item2, verify: false);
+        Log($"StopLiveView = {await camera.StopLiveViewAsync()}");
+
+        Console.WriteLine();
+        Log("================ ZOOM THEN PAN ================");
+        foreach (var g in trials.GroupBy(r => (r.Pair, r.Delay)))
+            Log($"{g.Key.Pair,-7} delay {g.Key.Delay,4} ms: moved {g.Count(r => r.Moved)}/{g.Count()}"
+                + $"  ({string.Join(", ", g.GroupBy(r => r.Target).Select(tg => $"{tg.Key} {tg.Count(r => r.Moved)}/{tg.Count()}"))})");
         return 0;
     }
 
