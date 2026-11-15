@@ -35,7 +35,7 @@ public static class CanonDeviceReport
 
         report.AppendLine("# FC.SDK device report");
         report.AppendLine();
-        report.AppendLine($"- Generated: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}");
+        report.AppendLine($"- Generated: {camera.TimeProvider.GetLocalNow():yyyy-MM-dd HH:mm:ss zzz}");
         report.AppendLine($"- FC.SDK: {typeof(CanonDeviceReport).Assembly.GetName().Version}");
         report.AppendLine($"- OS: {Environment.OSVersion} ({System.Runtime.InteropServices.RuntimeInformation.OSArchitecture})");
         report.AppendLine($"- Model: `{camera.Model ?? "(unknown)"}`");

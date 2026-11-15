@@ -4,24 +4,26 @@ namespace FC.SDK.Transport;
 /// Fails a read that sees no byte for <paramref name="idle"/>. A deadline on the whole reply would cut
 /// a 25 MB download short over a slow link; silence is what marks a camera that stopped answering.
 /// </summary>
-internal sealed class IdleTimeoutStream(Stream inner, TimeSpan idle) : Stream
+internal sealed class IdleTimeoutStream(Stream inner, TimeSpan idle, TimeProvider? time = null) : Stream
 {
-    private long _lastRead = System.Diagnostics.Stopwatch.GetTimestamp();
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
+    private long _lastRead = (time ?? TimeProvider.System).GetTimestamp();
 
     /// <summary>
-    /// When the last byte arrived (a <see cref="System.Diagnostics.Stopwatch"/> timestamp), for a
+    /// When the last byte arrived (a timestamp of this stream's <see cref="TimeProvider"/>), for a
     /// caller that holds a read to a tighter silence than <paramref name="idle"/>.
     /// </summary>
     public long LastReadTimestamp => Volatile.Read(ref _lastRead);
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
     {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(idle);
+        // The silence limit is a source of its own, on the transport's clock, linked with the caller's.
+        using var silence = new CancellationTokenSource(idle, _time);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, silence.Token);
         try
         {
             var read = await inner.ReadAsync(buffer, deadline.Token);
-            if (read > 0) Volatile.Write(ref _lastRead, System.Diagnostics.Stopwatch.GetTimestamp());
+            if (read > 0) Volatile.Write(ref _lastRead, _time.GetTimestamp());
             return read;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)

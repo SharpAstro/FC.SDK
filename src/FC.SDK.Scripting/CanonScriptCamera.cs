@@ -20,12 +20,15 @@ public sealed class CanonScriptCamera : IScriptCamera, IDisposable
     private static readonly TimeSpan SecondObjectGrace = TimeSpan.FromMilliseconds(1500);
 
     private readonly CanonCamera _camera;
+    private readonly TimeProvider _time;
     private readonly ConcurrentQueue<uint> _objects = new();
 
     /// <summary>Wraps an open camera and starts listening for the images it announces.</summary>
     public CanonScriptCamera(CanonCamera camera)
     {
         _camera = camera;
+        // The camera's own clock, so one fake clock moves the camera's waits and these.
+        _time = camera.TimeProvider;
         _camera.ObjectAdded += OnObjectAdded;
     }
 
@@ -54,8 +57,8 @@ public sealed class CanonScriptCamera : IScriptCamera, IDisposable
     public async Task<ScriptFrameCount> CountFramesAsync(TimeSpan window, CancellationToken ct)
     {
         var (frames, last) = (0, 0);
-        var clock = Stopwatch.StartNew();
-        while (clock.Elapsed < window)
+        var started = _time.GetTimestamp();
+        while (_time.GetElapsedTime(started) < window)
         {
             var (err, jpeg) = await _camera.GetLiveViewFrameAsync(ct);
             if (err is EdsError.OK && jpeg.Length > 1000 && jpeg[0] == 0xFF && jpeg[1] == 0xD8)
@@ -65,7 +68,7 @@ public sealed class CanonScriptCamera : IScriptCamera, IDisposable
             }
             else
             {
-                await Task.Delay(30, ct);
+                await Task.Delay(TimeSpan.FromMilliseconds(30), _time, ct);
             }
         }
         return new ScriptFrameCount(frames, last);
@@ -77,13 +80,13 @@ public sealed class CanonScriptCamera : IScriptCamera, IDisposable
     /// <inheritdoc/>
     public async Task<IReadOnlyList<uint>> WaitForObjectsAsync(TimeSpan window, CancellationToken ct)
     {
-        var clock = Stopwatch.StartNew();
-        while (_objects.IsEmpty && clock.Elapsed < window)
-            await Task.Delay(100, ct);
+        var started = _time.GetTimestamp();
+        while (_objects.IsEmpty && _time.GetElapsedTime(started) < window)
+            await Task.Delay(TimeSpan.FromMilliseconds(100), _time, ct);
 
         if (_objects.IsEmpty) return [];
 
-        await Task.Delay(SecondObjectGrace, ct);
+        await Task.Delay(SecondObjectGrace, _time, ct);
 
         var handles = new List<uint>();
         while (_objects.TryDequeue(out var handle))

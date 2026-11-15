@@ -32,8 +32,11 @@ namespace FC.SDK.Canon;
 /// </para>
 /// </remarks>
 internal sealed class EventPoller(
-    CanonPtpSession session, TimeSpan interval, Action<Exception>? lost = null, TimeSpan? stopGrace = null) : IAsyncDisposable
+    CanonPtpSession session, TimeSpan interval, Action<Exception>? lost = null, TimeSpan? stopGrace = null,
+    TimeProvider? time = null) : IAsyncDisposable
 {
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
+
     /// <summary>
     /// GetEvent round trips per tick. Deliberately small: during live view the camera re-announces
     /// properties continuously, and an unbounded drain here would starve the viewfinder stream.
@@ -82,7 +85,7 @@ internal sealed class EventPoller(
                 // Anything else is not a lost link (a busy or slow camera): keep polling.
             }
 
-            await Task.Delay(interval, _stop.Token)
+            await Task.Delay(interval, _time, _stop.Token)
                 .ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }
     }
@@ -93,7 +96,7 @@ internal sealed class EventPoller(
         if (_loopTask is not null)
         {
             using var grace = new CancellationTokenSource();
-            var finished = await Task.WhenAny(_loopTask, Task.Delay(stopGrace ?? DefaultStopGrace, grace.Token));
+            var finished = await Task.WhenAny(_loopTask, Task.Delay(stopGrace ?? DefaultStopGrace, _time, grace.Token));
             await grace.CancelAsync();
             if (finished != _loopTask) await _cts.CancelAsync();
 

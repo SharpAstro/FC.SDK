@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Time.Testing;
 using FC.SDK.Canon;
 using Shouldly;
 using Xunit;
@@ -18,9 +19,15 @@ public class ScriptTests
     {
         camera ??= new FakeCamera();
         host ??= new FakeHost();
-        var result = await new ScriptRunner(camera, host)
+
+        // A script's sleeps wait on the runner's clock, so a fake one makes them cost nothing.
+        var time = new FakeTimeProvider();
+        var run = new ScriptRunner(camera, host, time)
             .RunAsync(CameraScript.Parse(source), TestContext.Current.CancellationToken);
-        return (result, camera, host);
+        time.Pump(run, step: TimeSpan.FromMilliseconds(100), budget: TimeSpan.FromMinutes(10));
+
+        run.IsCompleted.ShouldBeTrue("the script was still running after ten minutes of its own clock");
+        return (await run, camera, host);
     }
 
     // --- Parsing ---
@@ -286,7 +293,7 @@ public class ScriptTests
         var host = new FakeHost { OnConfirm = () => camera.Announce(0x9191E521), Answers = { false, true } };
         var source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "scripts", "evf-output.camscript"));
 
-        // The script's sleeps are real; a few seconds here buys the whole file being exercised.
+        // The script's sleeps run on the fake clock, so the whole file is exercised in no time.
         var (result, _, _) = await RunAsync(source, camera, host);
 
         result.Succeeded.ShouldBeTrue(string.Join('\n', result.Steps));

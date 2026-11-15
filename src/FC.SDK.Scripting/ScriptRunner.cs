@@ -17,8 +17,21 @@ namespace FC.SDK.Scripting;
 /// left sending frames to a host that has gone can ignore its own buttons until power-cycled.
 /// </para>
 /// </remarks>
-public sealed class ScriptRunner(IScriptCamera camera, IScriptHost host)
+/// <param name="camera">The camera the script drives.</param>
+/// <param name="host">Where the script's prompts and log lines go.</param>
+/// <param name="timeProvider">
+/// The clock a <c>sleep</c> waits on; null is the system clock. Pass the camera's
+/// (<c>CanonCamera.TimeProvider</c>) so a test that moves a fake clock moves the script with it.
+/// </param>
+public sealed class ScriptRunner(IScriptCamera camera, IScriptHost host, TimeProvider? timeProvider)
 {
+    /// <summary>A runner whose <c>sleep</c> waits on the system clock.</summary>
+    public ScriptRunner(IScriptCamera camera, IScriptHost host) : this(camera, host, null)
+    {
+    }
+
+    private readonly TimeProvider _time = timeProvider ?? TimeProvider.System;
+
     private readonly Dictionary<string, object> _variables = new(StringComparer.Ordinal);
     private readonly List<ScriptStep> _steps = [];
     private CameraScript _script = null!;
@@ -174,7 +187,7 @@ public sealed class ScriptRunner(IScriptCamera camera, IScriptHost host)
                 break;
 
             case SleepStmt s:
-                await Task.Delay(s.Duration, ct);
+                await Task.Delay(s.Duration, _time, ct);
                 break;
 
             case ForStmt s:

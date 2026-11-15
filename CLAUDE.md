@@ -869,6 +869,21 @@ Two things to know about the AOT build:
 Automated tests cover `FC.SDK.Raw`, the command gate, and the ioctl wire format; everything else in
 the device layer needs a physical Canon body.
 
+**Every wait in the library and the script runner runs on a `TimeProvider`**, as in tianwen: retries,
+settle waits, the event pump's interval, the PTP/IP handshake bounds and silence limits, a script's
+`sleep`. `CanonCameraFactory(logger, timeProvider)` hands it to the camera and its transport,
+`CanonCamera.TimeProvider` exposes it so a host waits on the same clock, and
+`ScriptRunner(camera, host, timeProvider)` takes it for `sleep`. So a wait is
+`Task.Delay(delay, _time, ct)`, a deadline is `new CancellationTokenSource(delay, _time)` linked with
+the caller's token (`CancelAfter` is always the system clock), and elapsed time is
+`_time.GetTimestamp()` / `GetElapsedTime`. `NoWallClockTests` reads the sources of `FC.SDK` and
+`FC.SDK.Scripting` and fails on `DateTime.UtcNow`, `Stopwatch`, `CancelAfter`, `Thread.Sleep` and a
+`Task.Delay` that names no clock. A test passes a `FakeTimeProvider` and moves it with
+`FakeClock.Pump`, which stops at a budget of fake time rather than spinning; it is only for work whose
+awaits are all either complete or waits on that clock (a scripted transport, a fake camera). The
+script tests went from 12 s to about 0.1 s that way. **Not covered: the hosts** (viewer, diagnostics,
+sample), which run against a body in real time, and the socket and pump-stop tests, whose I/O is real.
+
 **`src/FC.SDK.Sample` is the fastest way to exercise a body** — no GUI, one command, and it writes a
 `CanonDeviceReport` every run:
 
