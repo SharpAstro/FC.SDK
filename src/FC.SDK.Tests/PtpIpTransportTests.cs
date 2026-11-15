@@ -206,6 +206,215 @@ public class PtpIpTransportTests
         }
     }
 
+    /// <summary>
+    /// Stopping the event pump cancels a GetEvent in flight. Its reply used to stay in the stream, and
+    /// the next command read it as its own: CloseSession threw "Expected PTP/IP Operation_Response, got
+    /// StartDataPacket" in 2 runs of 10 on an EOS 6D (issue #29). The reply is now read to its end
+    /// before the next command is written.
+    /// </summary>
+    [Fact]
+    public async Task ACancelledCommandsReplyIsReadBeforeTheNextCommandIsSent()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var asked = new TaskCompletionSource();
+        var cancelled = new TaskCompletionSource();
+        var camera = AnswerACancelledGetEventLateAsync(listener, asked, cancelled.Task, timeout.Token);
+
+        await using (var transport = new PtpIpTransport("127.0.0.1", port, "test"))
+        {
+            await transport.ConnectAsync(timeout.Token);
+            var session = new PtpSession(transport);
+
+            using var pump = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            var events = session.SendCommandReceiveDataAsync(PtpOperationCode.CanonGetEvent, pump.Token);
+            await asked.Task.WaitAsync(timeout.Token);
+            await pump.CancelAsync();
+            await Should.ThrowAsync<OperationCanceledException>(() => events);
+
+            // The camera answers the GetEvent only now, when nobody waits for it any more.
+            cancelled.SetResult();
+
+            var response = await session.SendCommandAsync(PtpOperationCode.CanonSetRemoteMode, timeout.Token, 0);
+            response.Code.ShouldBe(PtpResponseCode.OK);
+        }
+
+        (await camera).ShouldBeTrue("the next command was on the wire before the cancelled one's reply");
+        listener.Stop();
+    }
+
+    /// <summary>
+    /// Plays a camera whose GetEvent reply arrives after the caller gave up, then answers the command
+    /// that follows. Answers whether that command waited for the late reply.
+    /// </summary>
+    private static async Task<bool> AnswerACancelledGetEventLateAsync(
+        TcpListener listener, TaskCompletionSource asked, Task cancelled, CancellationToken ct)
+    {
+        var (command, events) = await AcceptHandshakeAsync(listener, ct);
+        using var _ = command;
+        using var __ = events;
+        var commandStream = command.GetStream();
+
+        var getEvent = await ReadPacketAsync(commandStream, ct);
+        BinaryPrimitives.ReadUInt16LittleEndian(getEvent.Body.AsSpan(4)).ShouldBe((ushort)PtpOperationCode.CanonGetEvent);
+        var txId = BinaryPrimitives.ReadUInt32LittleEndian(getEvent.Body.AsSpan(6));
+        asked.SetResult();
+        await cancelled.WaitAsync(ct);
+
+        // An empty event list, as a 6D sends it: 8 bytes, the {length 8, type 0} terminator.
+        var start = new byte[12];
+        BinaryPrimitives.WriteUInt32LittleEndian(start, txId);
+        BinaryPrimitives.WriteUInt64LittleEndian(start.AsSpan(4), 8);
+        await commandStream.WriteAsync(Packet(PtpIpPacketType.StartDataPacket, start), ct);
+        var end = new byte[4 + 8];
+        BinaryPrimitives.WriteUInt32LittleEndian(end, txId);
+        BinaryPrimitives.WriteUInt32LittleEndian(end.AsSpan(4), 8);
+        var nextWasEarly = commandStream.DataAvailable;
+        await commandStream.WriteAsync(Packet(PtpIpPacketType.EndDataPacket, end), ct);
+        await commandStream.WriteAsync(OkResponse(txId), ct);
+
+        var next = await ReadPacketAsync(commandStream, ct);
+        next.Type.ShouldBe(PtpIpPacketType.OperationRequest);
+        BinaryPrimitives.ReadUInt16LittleEndian(next.Body.AsSpan(4)).ShouldBe((ushort)PtpOperationCode.CanonSetRemoteMode);
+        await commandStream.WriteAsync(OkResponse(BinaryPrimitives.ReadUInt32LittleEndian(next.Body.AsSpan(6))), ct);
+        return !nextWasEarly;
+    }
+
+    /// <summary>
+    /// The other end of the same rule: a cancelled command whose reply never comes must not hold the
+    /// next command for the full reply timeout (60 s by default). It gets a short silence limit of its
+    /// own, after which the link is refused, so the caller can reconnect.
+    /// </summary>
+    [Fact]
+    public async Task ACancelledCommandsReplyThatNeverComesLosesTheLinkQuickly()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var silent = new TaskCompletionSource();
+        var camera = HandshakeThenStaySilentAsync(listener, silent.Task, timeout.Token);
+
+        await using (var transport = new PtpIpTransport("127.0.0.1", port, "test")
+        {
+            ReplyIdleTimeout = TimeSpan.FromSeconds(60),
+            AbandonedReplyIdleTimeout = TimeSpan.FromMilliseconds(300),
+        })
+        {
+            await transport.ConnectAsync(timeout.Token);
+            var session = new PtpSession(transport);
+
+            using var pump = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            var events = session.SendCommandReceiveDataAsync(PtpOperationCode.CanonGetEvent, pump.Token);
+            await pump.CancelAsync();
+            await Should.ThrowAsync<OperationCanceledException>(() => events);
+
+            // Bounded by the test's own 10 s token: on the 60 s reply timeout this would be cancelled, not refused.
+            var lost = await Should.ThrowAsync<IOException>(() => session.SendCommandAsync(PtpOperationCode.CanonSetRemoteMode, timeout.Token, 0));
+            lost.Message.ShouldContain("reconnect");
+            await Should.ThrowAsync<IOException>(() => session.SendCommandAsync(PtpOperationCode.CloseSession, timeout.Token));
+        }
+
+        silent.SetResult();
+        await camera;
+        listener.Stop();
+    }
+
+    /// <summary>
+    /// A host that accepts the connection and never answers kept OpenSession waiting for good: the
+    /// handshake's socket timeouts did not apply to its async reads (issue #29). It is the pairing
+    /// prompt's wait, so the error says what to press.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatNeverAnswersThePairingFailsTheConnect()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var release = new TaskCompletionSource();
+        var camera = AcceptAndStaySilentAsync(listener, answerTheCommandConnection: false, release.Task, timeout.Token);
+
+        await using (var transport = new PtpIpTransport("127.0.0.1", port, "test") { PairingTimeout = TimeSpan.FromMilliseconds(300) })
+        {
+            var failed = await Should.ThrowAsync<IOException>(() => transport.ConnectAsync(timeout.Token));
+            failed.Message.ShouldContain("pairing prompt");
+        }
+
+        release.SetResult();
+        await camera;
+        listener.Stop();
+    }
+
+    /// <summary>The event connection's acknowledgement has nobody in its way, so it gets the short limit.</summary>
+    [Fact]
+    public async Task AHostThatNeverAcknowledgesTheEventConnectionFailsTheConnect()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var release = new TaskCompletionSource();
+        var camera = AcceptAndStaySilentAsync(listener, answerTheCommandConnection: true, release.Task, timeout.Token);
+
+        await using (var transport = new PtpIpTransport("127.0.0.1", port, "test") { ConnectTimeout = TimeSpan.FromMilliseconds(300) })
+        {
+            var failed = await Should.ThrowAsync<IOException>(() => transport.ConnectAsync(timeout.Token));
+            failed.Message.ShouldContain("event connection");
+        }
+
+        release.SetResult();
+        await camera;
+        listener.Stop();
+    }
+
+    /// <summary>The caller's own token still ends a pairing wait, as a cancellation and not as a lost link.</summary>
+    [Fact]
+    public async Task TheCallersTokenStillCancelsAPairingWait()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var release = new TaskCompletionSource();
+        var camera = AcceptAndStaySilentAsync(listener, answerTheCommandConnection: false, release.Task, timeout.Token);
+
+        await using (var transport = new PtpIpTransport("127.0.0.1", port, "test"))
+        {
+            using var operatorGaveUp = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            operatorGaveUp.CancelAfter(TimeSpan.FromMilliseconds(300));
+            await Should.ThrowAsync<OperationCanceledException>(() => transport.ConnectAsync(operatorGaveUp.Token));
+        }
+
+        release.SetResult();
+        await camera;
+        listener.Stop();
+    }
+
+    /// <summary>
+    /// Plays a host that takes the command connection and then says nothing: either at once (a pairing
+    /// prompt nobody presses), or after acknowledging it, on the event connection.
+    /// </summary>
+    private static async Task AcceptAndStaySilentAsync(
+        TcpListener listener, bool answerTheCommandConnection, Task release, CancellationToken ct)
+    {
+        using var command = await listener.AcceptTcpClientAsync(ct);
+        var commandStream = command.GetStream();
+        (await ReadPacketAsync(commandStream, ct)).Type.ShouldBe(PtpIpPacketType.InitCommandRequest);
+        if (!answerTheCommandConnection)
+        {
+            await release;
+            return;
+        }
+
+        await commandStream.WriteAsync(Packet(PtpIpPacketType.InitCommandAck, new byte[4 + 16 + 2 + 4]), ct);
+        using var events = await listener.AcceptTcpClientAsync(ct);
+        (await ReadPacketAsync(events.GetStream(), ct)).Type.ShouldBe(PtpIpPacketType.InitEventRequest);
+        await release;
+    }
+
     /// <summary>The camera's side of the four-way handshake. The caller owns both connections.</summary>
     private static async Task<(TcpClient Command, TcpClient Events)> AcceptHandshakeAsync(TcpListener listener, CancellationToken ct)
     {

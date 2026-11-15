@@ -22,8 +22,17 @@ namespace FC.SDK.Canon;
 /// <c>COMException</c> into <c>GeneralError</c> instead of throwing, so over COM a pulled cable still
 /// goes unreported (SharpAstro/FC.SDK#20).
 /// </para>
+/// <para>
+/// <b>Stopping waits for the GetEvent in flight.</b> It used to cancel it, and over PTP/IP the reply
+/// then stayed in the stream for the next command to read as its own: CloseSession failed that way in
+/// 2 runs of 10 on an EOS 6D (issue #29). The transport now reads such a reply to its end by itself;
+/// not cancelling in the first place means there is nothing to clean up after. Only a round trip that
+/// outlasts <paramref name="stopGrace"/> is cancelled, so a camera that has stopped answering cannot
+/// hold a stop.
+/// </para>
 /// </remarks>
-internal sealed class EventPoller(CanonPtpSession session, TimeSpan interval, Action<Exception>? lost = null) : IAsyncDisposable
+internal sealed class EventPoller(
+    CanonPtpSession session, TimeSpan interval, Action<Exception>? lost = null, TimeSpan? stopGrace = null) : IAsyncDisposable
 {
     /// <summary>
     /// GetEvent round trips per tick. Deliberately small: during live view the camera re-announces
@@ -32,7 +41,15 @@ internal sealed class EventPoller(CanonPtpSession session, TimeSpan interval, Ac
     /// </summary>
     private const int RoundsPerTick = 8;
 
+    /// <summary>How long a stop waits for the round trip in flight before it cancels it.</summary>
+    private static readonly TimeSpan DefaultStopGrace = TimeSpan.FromSeconds(2);
+
     private Task? _loopTask;
+
+    // Ends the loop and the wait between ticks. A round trip in flight does not see it.
+    private readonly CancellationTokenSource _stop = new();
+
+    // Cuts a round trip short. Only for one that has outlasted the stop's grace.
     private readonly CancellationTokenSource _cts = new();
 
     public void Start()
@@ -42,7 +59,7 @@ internal sealed class EventPoller(CanonPtpSession session, TimeSpan interval, Ac
 
     private async Task RunAsync()
     {
-        while (!_cts.IsCancellationRequested)
+        while (!_stop.IsCancellationRequested)
         {
             try
             {
@@ -65,19 +82,25 @@ internal sealed class EventPoller(CanonPtpSession session, TimeSpan interval, Ac
                 // Anything else is not a lost link (a busy or slow camera): keep polling.
             }
 
-            await Task.Delay(interval, _cts.Token)
+            await Task.Delay(interval, _stop.Token)
                 .ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }
     }
 
     public async ValueTask DisposeAsync()
     {
-        await _cts.CancelAsync();
+        await _stop.CancelAsync();
         if (_loopTask is not null)
         {
+            using var grace = new CancellationTokenSource();
+            var finished = await Task.WhenAny(_loopTask, Task.Delay(stopGrace ?? DefaultStopGrace, grace.Token));
+            await grace.CancelAsync();
+            if (finished != _loopTask) await _cts.CancelAsync();
+
             try { await _loopTask; }
             catch (OperationCanceledException) { }
         }
+        _stop.Dispose();
         _cts.Dispose();
     }
 }
