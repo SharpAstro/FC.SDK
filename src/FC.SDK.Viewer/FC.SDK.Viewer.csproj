@@ -47,16 +47,17 @@
   <ItemGroup Condition="'$(UseLocalSiblings)' != 'true'">
     <!-- 7.84 is the first with HDR: VulkanContext.Create(hdr: true), VkTexture.CreateFromRgbaFloat,
          VkRenderer.DrawHdrImage. 7.85 is the floor because the 7.83 and 7.84 packages depended on
-         DIR.Lib.Debug instead of DIR.Lib, which would put two DIR.Lib assemblies in this build. -->
-    <PackageReference Include="SdlVulkan.Renderer" Version="7.85.*" />
-    <!-- Not below the DIR.Lib that SdlVulkan.Renderer 7.84 was built against (11.48). -->
-    <PackageReference Include="DIR.Lib" Version="11.48.*" />
+         DIR.Lib.Debug instead of DIR.Lib, which would put two DIR.Lib assemblies in this build.
+         The pin is 7.95, the latest published, so CI builds what a sibling build here does. -->
+    <PackageReference Include="SdlVulkan.Renderer" Version="7.95.*" />
+    <!-- Not below the DIR.Lib that SdlVulkan.Renderer 7.95 was built against (11.61). -->
+    <PackageReference Include="DIR.Lib" Version="11.63.*" />
     <!-- The single-instance gate, shared with the TianWen viewer and GUI. -->
     <!-- 1.2 is SdlVulkan.Renderer 7.84's floor; 1.1 fails restore with NU1605. -->
     <PackageReference Include="SharpAstro.AppShell" Version="1.2.*" />
     <!-- Heif: decodes a .HIF/.HEIC capture (Canon HDR PQ) to linear-light floats for the HDR preview.
          3.33 is the first release with it (3.33.1613). -->
-    <PackageReference Include="SharpAstro.Heif" Version="3.33.*" />
+    <PackageReference Include="SharpAstro.Heif" Version="3.34.*" />
   </ItemGroup>
 
   <ItemGroup>
