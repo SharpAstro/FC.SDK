@@ -384,20 +384,6 @@ public enum EdsHighIsoNR : uint
 }
 
 /// <summary>
-/// What the camera can currently do about focus: whether glass is mounted, and where that glass's
-/// AF/MF switch is.
-/// </summary>
-/// <remarks>
-/// The two are separate questions and both matter. A body with no lens and a body whose lens is
-/// switched to MF both refuse to autofocus, but only the first is a telescope; the second is a user
-/// who flicked a switch and will wonder why nothing focuses.
-/// </remarks>
-/// <param name="LensName">The mounted lens, or null when the mount is bare.</param>
-/// <param name="FocusMode">
-/// The body's focus mode, which follows the lens switch — <see cref="EdsAFMode.ManualFocus"/> means
-/// the switch is at MF.
-/// </param>
-/// <summary>
 /// Camera settings a helper changed and has not been able to put back yet. Null members are already
 /// restored or were never touched.
 /// </summary>
@@ -414,10 +400,43 @@ public readonly record struct CanonPendingRestore(EdsDriveMode? DriveMode, bool?
     };
 }
 
-public readonly record struct CanonFocusState(string? LensName, EdsAFMode FocusMode)
+/// <summary>
+/// What the camera can currently do about focus: whether glass is mounted, and where that glass's
+/// AF/MF switch is.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The two are separate questions and both matter. A body with no lens and a body whose lens is
+/// switched to MF both refuse to autofocus, but only the first is a telescope; the second is a user
+/// who flicked a switch and will wonder why nothing focuses.
+/// </para>
+/// <para>
+/// The focus mode alone does not separate them. A bare mount read <see cref="EdsAFMode.OneShot"/> on
+/// an EOS 6D on 2026-08-03 and <see cref="EdsAFMode.ManualFocus"/> on an EOS 6D and an EOS R6 on
+/// 2026-11-14 (issue #28); what differs between the two runs was not found. Lens presence therefore
+/// comes from <see cref="LensPresent"/>, and from the name only on a body that does not say.
+/// </para>
+/// </remarks>
+/// <param name="LensName">
+/// The mounted lens as the body names it, or null when it gives no name. A lens can be fitted and
+/// unnamed, so do not read null as a bare mount; ask <see cref="LensAttached"/>.
+/// </param>
+/// <param name="FocusMode">
+/// The body's focus mode, which follows the lens switch: <see cref="EdsAFMode.ManualFocus"/> with
+/// the switch at MF, and on a bare mount as well (2026-11-14).
+/// </param>
+/// <param name="LensPresent">
+/// What <c>LensStatus</c> (0xD1A8) says: true for 1, false for 0, null when the body does not report
+/// it or reports anything else. Measured on an EOS R6 and an EOS 6D with three lenses and a bare
+/// mount each (issue #28).
+/// </param>
+public readonly record struct CanonFocusState(string? LensName, EdsAFMode FocusMode, bool? LensPresent = null)
 {
-    /// <summary>True when a lens is mounted.</summary>
-    public bool LensAttached => LensName is not null;
+    /// <summary>
+    /// True when a lens is mounted: what <see cref="LensPresent"/> says, and whether the lens has a
+    /// name only when the body does not report its lens status.
+    /// </summary>
+    public bool LensAttached => LensPresent ?? LensName is not null;
 
     /// <summary>
     /// True when an autofocus request could actually drive something. False on a bare mount and
@@ -426,7 +445,17 @@ public readonly record struct CanonFocusState(string? LensName, EdsAFMode FocusM
     /// </summary>
     public bool AutoFocusAvailable => LensAttached && FocusMode is not EdsAFMode.ManualFocus;
 
+    /// <summary>
+    /// The two members this type had before <see cref="LensPresent"/>, so that code deconstructing
+    /// into two still compiles.
+    /// </summary>
+    public void Deconstruct(out string? LensName, out EdsAFMode FocusMode)
+    {
+        LensName = this.LensName;
+        FocusMode = this.FocusMode;
+    }
+
     public override string ToString() => LensAttached
-        ? $"{LensName} ({FocusMode}), autofocus {(AutoFocusAvailable ? "available" : "unavailable")}"
+        ? $"{LensName ?? "unnamed lens"} ({FocusMode}), autofocus {(AutoFocusAvailable ? "available" : "unavailable")}"
         : "no lens, autofocus unavailable";
 }

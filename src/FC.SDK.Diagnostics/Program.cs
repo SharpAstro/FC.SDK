@@ -1526,6 +1526,13 @@ try
 
         var (_, lens) = await camera.GetLensNameAsync();
         Log($"Lens name: \"{lens}\"   (tag this run: no lens / lens AF / lens MF)");
+
+        // The name's own bytes, whole: a leading 0 (an R6 with a Sigma 35mm Art, and any bare mount)
+        // shows here and nowhere else, since a string read stops at it (issue #28).
+        var (nameErr, nameBytes) = await camera.GetRawPropertyBytesAsync(0xD1D8);
+        Log(nameErr is EdsError.OK
+            ? $"  0xD1D8 LensName           [{nameBytes.Length,3} bytes: {string.Join(' ', nameBytes.Select(b => b.ToString("X2")))}]"
+            : $"  0xD1D8 LensName           = {nameErr}");
         Log("");
 
         foreach (var (code, name) in candidates)

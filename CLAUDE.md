@@ -87,9 +87,18 @@ Full write-up in **`docs/canon-live-view-zoom.md`**. Three things that are easy 
 (0xD108) follows the lens's own AF/MF switch and reads `ManualFocus` when it is at MF — a value
 absent from its own allowed-value list. Reading that list as "the values this property can hold" is
 what made the switch look undetectable. `GetFocusStateAsync` combines the focus mode with lens
-presence (from `LensName`, empty on a bare mount) to answer the question that actually matters:
+presence to answer the question that actually matters:
 **can this camera autofocus at all right now** — false on a telescope and false at MF, and in both
 cases an AF command answers `OK` and moves nothing.
+
+**Lens presence is `LensStatus` (0xD1A8): 1 with a lens, 0 bare**, on an R6 and a 6D (issue #28,
+2026-11-14), read raw and carried as `CanonFocusState.LensPresent`; the name decides only on a body
+that does not report it. The name alone fails: an R6 sends a Sigma 35mm F1.4 Art's name as
+`00 "35mm"` (a 6D sends `"35mm"`), and a leading 0 is also how both bodies mark the name of a lens
+that came off, with the old name still behind it. So `GetLensNameAsync` skips one leading 0 only
+when the status says a lens is fitted (`CanonLens`, `CanonLensTests`). The focus mode fails too: a
+bare mount read `OneShot` on a 6D on 2026-08-03 and `ManualFocus` on a 6D and an R6 on 2026-11-14,
+cause not found. Both readings follow a lens change only while events are drained.
 
 **Property reads are typed now.** `CanonPropertyMap` carries a `CanonPropertyType` instead of a dead
 `Size` field, and `GetPropertyAsync` refuses a non-scalar rather than answering `OK` with the first
