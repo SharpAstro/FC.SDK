@@ -16,6 +16,14 @@ public sealed class CanonCameraFactory(ILogger<CanonCamera> logger)
     public CanonCamera ConnectUsb(ushort vendorId, ushort productId) =>
         new(new UsbPtpTransport(vendorId, productId), logger);
 
+    /// <remarks>
+    /// Connecting (<see cref="OpenSessionAsync"/> or <see cref="ConnectTransportAsync"/>) is bounded.
+    /// The TCP connect and the event connection's acknowledgement get 5 s each. The body's answer to
+    /// the connection request gets 120 s, because on a first connection it shows a pairing prompt
+    /// and answers only once the operator presses OK (up to 20 s measured on an EOS 6D and an EOS R6);
+    /// the caller's token ends that wait sooner. Running out of any of them is an
+    /// <see cref="IOException"/> that says which step it was.
+    /// </remarks>
     /// <param name="clientGuid">
     /// The identity a Canon body pairs with. It refuses every other GUID afterwards, so persist one and
     /// pass it on every connection; null draws a fresh one and forces a re-pair.
@@ -147,6 +155,14 @@ public sealed class CanonCamera : IAsyncDisposable
     public static CanonCamera ConnectUsb(ushort vendorId, ushort productId) =>
         new(new UsbPtpTransport(vendorId, productId), NullLogger<CanonCamera>.Instance);
 
+    /// <remarks>
+    /// Connecting (<see cref="OpenSessionAsync"/> or <see cref="ConnectTransportAsync"/>) is bounded.
+    /// The TCP connect and the event connection's acknowledgement get 5 s each. The body's answer to
+    /// the connection request gets 120 s, because on a first connection it shows a pairing prompt
+    /// and answers only once the operator presses OK (up to 20 s measured on an EOS 6D and an EOS R6);
+    /// the caller's token ends that wait sooner. Running out of any of them is an
+    /// <see cref="IOException"/> that says which step it was.
+    /// </remarks>
     public static CanonCamera ConnectWifi(string host, string? clientName = null) =>
         new(new PtpIpTransport(host, clientName: clientName), NullLogger<CanonCamera>.Instance);
 
@@ -358,7 +374,16 @@ public sealed class CanonCamera : IAsyncDisposable
     {
         _logger.LogDebug("Closing PTP session");
         // Before the session goes, not after: a handle only means anything inside it.
-        await ReleasePendingTransfersAsync(ct);
+        try
+        {
+            await ReleasePendingTransfersAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Go on to the close: a session left open on the body is the worse outcome.
+            _logger.LogWarning(ex, "Releasing pending transfers failed; closing the session anyway");
+        }
+
         return await _canon.CloseAsync(ct);
     }
 

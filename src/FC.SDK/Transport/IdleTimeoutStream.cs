@@ -6,13 +6,23 @@ namespace FC.SDK.Transport;
 /// </summary>
 internal sealed class IdleTimeoutStream(Stream inner, TimeSpan idle) : Stream
 {
+    private long _lastRead = System.Diagnostics.Stopwatch.GetTimestamp();
+
+    /// <summary>
+    /// When the last byte arrived (a <see cref="System.Diagnostics.Stopwatch"/> timestamp), for a
+    /// caller that holds a read to a tighter silence than <paramref name="idle"/>.
+    /// </summary>
+    public long LastReadTimestamp => Volatile.Read(ref _lastRead);
+
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(idle);
         try
         {
-            return await inner.ReadAsync(buffer, deadline.Token);
+            var read = await inner.ReadAsync(buffer, deadline.Token);
+            if (read > 0) Volatile.Write(ref _lastRead, System.Diagnostics.Stopwatch.GetTimestamp());
+            return read;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

@@ -196,12 +196,27 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
 
     internal async Task<EdsError> CloseAsync(CancellationToken ct = default)
     {
-        // Disable remote mode
-        await ptp.SendCommandAsync(PtpOperationCode.CanonSetRemoteMode, ct, 0);
+        // Disable remote mode. A failure here must not keep CloseSession from being sent: that is the
+        // command that ends the session on the body, and a session left open is what the next
+        // connection has to wait out.
+        try
+        {
+            await ptp.SendCommandAsync(PtpOperationCode.CanonSetRemoteMode, ct, 0);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+        }
 
-        var resp = await ptp.SendCommandAsync(PtpOperationCode.CloseSession, ct);
-        Properties.Clear();
-        return resp.ToEdsError();
+        try
+        {
+            var resp = await ptp.SendCommandAsync(PtpOperationCode.CloseSession, ct);
+            return resp.ToEdsError();
+        }
+        finally
+        {
+            // Whatever the wire did, this side's picture of the session is over.
+            Properties.Clear();
+        }
     }
 
     /// <summary>
