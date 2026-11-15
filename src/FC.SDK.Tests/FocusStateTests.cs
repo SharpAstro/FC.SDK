@@ -118,7 +118,7 @@ public class FocusStateTests
         EdsAFMode mode, bool expected) =>
         new CanonFocusState("EF50mm f/1.8 STM", mode).AutoFocusAvailable.ShouldBe(expected);
 
-    /// <summary>Code written against the two members the type had before 3.4 still reads them.</summary>
+    /// <summary>Code written against the two members the type had before 4.0 still reads them.</summary>
     [Fact]
     public void It_still_deconstructs_into_name_and_mode()
     {
