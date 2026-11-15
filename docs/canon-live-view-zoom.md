@@ -258,7 +258,7 @@ Measured on an EOS R6 and an EOS 6D with three lenses and a bare mount each (iss
   6D sends `"35mm"`, and writes the same empty name into its own CR3s. Read as a string that is `""`,
   so the name-based answer was "no lens" for a lens the R6 autofocuses with. A leading 0 is also how
   both bodies mark the name of a lens that was taken off: a bare 6D holds the previous lens's name
-  with its first byte zeroed. So `GetLensNameAsync` skips one leading 0 when the lens status says a
+  with its first byte zeroed, a bare R6 a 0 and then 62 bytes that are not text. So `GetLensNameAsync` skips one leading 0 when the lens status says a
   lens is fitted, and only then.
 - **The focus mode is not enough either, and its bare-mount reading has changed.** On 2026-08-03 a
   bare 6D read `OneShot` (EF50mm f/1.8 STM taken off, firmware as shipped). On 2026-11-14 a bare 6D

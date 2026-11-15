@@ -39,16 +39,55 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
     private IOException? _lost;
 
     /// <summary>
-    /// How long a TCP connect and the Init_Event_Ack may take. Nobody is in the way of either: the
-    /// event ack came back within 17 ms on 29 connections to an EOS 6D and an EOS R6 (issue #29).
+    /// How long the event connection's TCP connect and its Init_Event_Ack may take. Nobody is in the
+    /// way of either: they follow the command connection within milliseconds, and the ack came back
+    /// within 17 ms on 29 connections to an EOS 6D and an EOS R6 (issue #29).
     /// </summary>
     internal TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
+    /// How long the command connection's TCP connect is retried for.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A Canon body is off the network for a while after every session, and now and then while
+    /// it waits for one.</b> Measured on a home network (issue #29, 2026-11-15, a ping every second):
+    /// an EOS 6D drops its Wi-Fi link 0.7 to 1.5 s after a session closes and is back about 10.5 s
+    /// later; an EOS R6 after 1.2 to 1.8 s, for about 19.5 s. While waiting, each then does it again
+    /// every 70.7 s (6D) and 80.0 s (R6), on its own clock: about 15 % and 24 % of idle time. The
+    /// body stays on; only its link is redone. None was seen during a session.
+    /// </para>
+    /// <para>
+    /// One connect bounded to 5 s, which is what 4.0 did, therefore failed every reconnect started
+    /// within a few seconds of a close: 0 of 9 on the two bodies. Retried inside this budget, 24 of
+    /// 24 connects started inside an outage went through, the slowest in 18.3 s. With nothing
+    /// listening at all a connect now fails after the budget and no longer after 2 to 5 s; the
+    /// caller's token still ends it sooner.
+    /// </para>
+    /// </remarks>
+    internal TimeSpan ConnectBudget { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long one attempt of that connect may take. Short, so that the first attempt after the
+    /// body is back is not still waiting on a SYN sent while it was away: with 2 s attempts an R6
+    /// was connected at most 0.8 s after it answered ping again, against 2.3 s with 5 s attempts.
+    /// </summary>
+    internal TimeSpan ConnectAttempt { get; init; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// The least time from one attempt's start to the next. A refusal can come back at once (it
+    /// takes about 2.1 s on Windows, which retries the SYN itself, but not everywhere), and a body
+    /// that refuses must not be asked in a loop.
+    /// </summary>
+    private static readonly TimeSpan ConnectSpacing = TimeSpan.FromSeconds(1);
+
+    /// <summary>
     /// How long the Init_Command_Ack may take. On a first connection the body shows a pairing prompt
-    /// and answers only once the operator presses OK, so this bounds a person: the slowest pairing
-    /// measured took 20.3 s, and an already paired 6D took 4.26 s on its first connection of a day
-    /// (issue #29). The caller's token still ends the wait sooner.
+    /// and answers only once the operator presses OK, so this bounds a person: the slowest pairings
+    /// measured took 64.2 s on a 6D and 63.8 s on an R6, with OK pressed a minute late on purpose,
+    /// and an already paired 6D took 4.26 s on its first connection of a day (issue #29). The
+    /// caller's token still ends the wait sooner. Neither body takes its prompt down when this runs
+    /// out: see the message.
     /// </summary>
     internal TimeSpan PairingTimeout { get; init; } = TimeSpan.FromSeconds(120);
 
@@ -116,6 +155,21 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         {
             await HandshakeAsync(ct);
         }
+        catch (SocketException ex)
+        {
+            // Every failure to connect is an IOException, as ConnectWifi says: a refused connect used
+            // to leave as the socket's own exception, which a caller catching IOException missed.
+            try
+            {
+                await CloseAsync();
+            }
+            catch
+            {
+                // As below: the handshake's own failure is the one to report.
+            }
+
+            throw new IOException($"PTP/IP {_host}:{_port}: {ex.Message}", ex);
+        }
         catch
         {
             // Close whatever the handshake opened before it failed, or the next attempt opens new
@@ -141,12 +195,8 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         // used to set, only apply to synchronous calls: with them a host that accepted the connection
         // and never answered kept OpenSession waiting for good (issue #29).
 
-        // Step 1: Command connection
-        _commandClient = new TcpClient();
-        await BoundedAsync(
-            token => _commandClient.ConnectAsync(_host, _port, token), ConnectTimeout,
-            $"PTP/IP {_host}:{_port} did not accept a connection within {Seconds(ConnectTimeout)}. " +
-            "Check the host, and that the camera's Wi-Fi is on and waiting for a connection.", ct);
+        // Step 1: Command connection, retried: the body may be off the network for some seconds.
+        _commandClient = await ConnectCommandAsync(ct);
         _commandStream = _commandClient.GetStream();
 
         // Step 2: Send Init_Command_Request, receive Init_Command_ACK
@@ -157,7 +207,8 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         int ackLen = await BoundedAsync(
             token => new ValueTask<int>(ReadPtpIpPacketAsync(_commandStream, ackBuf, token)), PairingTimeout,
             $"PTP/IP {_host} did not answer the connection request within {Seconds(PairingTimeout)}. " +
-            "Press OK on the camera's pairing prompt, or check the host.", ct);
+            "If the camera still shows its pairing prompt, press OK there, start the camera's connection " +
+            "again and connect again; otherwise check the host.", ct);
         var ackType = (PtpIpPacketType)BinaryPrimitives.ReadUInt32LittleEndian(ackBuf.AsSpan(4));
         if (ackType is PtpIpPacketType.InitFail)
             throw InitFailed(ackBuf, ackLen);
@@ -199,6 +250,66 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
     }
 
     private static string Seconds(TimeSpan span) => $"{span.TotalSeconds:0.#} s";
+
+    /// <summary>
+    /// Opens the command connection, trying again until <see cref="ConnectBudget"/> is spent: an
+    /// attempt that gets no answer within <see cref="ConnectAttempt"/>, and one the host refuses or
+    /// cannot be reached for. See <see cref="ConnectBudget"/> for why a body is often not there.
+    /// </summary>
+    private async Task<TcpClient> ConnectCommandAsync(CancellationToken ct)
+    {
+        var started = _time.GetTimestamp();
+        Exception? last = null;
+
+        for (int attempts = 1; ; attempts++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var attemptStarted = _time.GetTimestamp();
+            var left = ConnectBudget - _time.GetElapsedTime(started);
+            var client = new TcpClient();
+            try
+            {
+                using var expiry = new CancellationTokenSource(left < ConnectAttempt ? left : ConnectAttempt, _time);
+                using var bound = CancellationTokenSource.CreateLinkedTokenSource(ct, expiry.Token);
+                await client.ConnectAsync(_host, _port, bound.Token);
+                return client;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // No answer within the attempt: the body is away, or the host is not there at all.
+                client.Dispose();
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionRefused or SocketError.TimedOut
+                                                 or SocketError.HostUnreachable or SocketError.NetworkUnreachable)
+            {
+                // Refused: an R6 does that on its "target not found" screen. Unreachable: the link is down.
+                client.Dispose();
+                last = ex;
+            }
+            catch
+            {
+                client.Dispose();
+                throw;
+            }
+
+            left = ConnectBudget - _time.GetElapsedTime(started);
+            if (left <= TimeSpan.Zero)
+            {
+                throw new IOException(
+                    $"PTP/IP {_host}:{_port} did not accept a connection within {Seconds(ConnectBudget)} " +
+                    $"({attempts} attempts). The camera is off the network, or on it but not waiting for a " +
+                    "connection. A Canon body leaves the network for 10 to 20 s after a session closes, which " +
+                    "this waits out; if it now shows that its target was not found, press OK there, pick this " +
+                    "client again and connect again. Otherwise check the host, and that the camera's Wi-Fi is on.",
+                    last);
+            }
+
+            var pause = ConnectSpacing - _time.GetElapsedTime(attemptStarted);
+            if (pause > TimeSpan.Zero)
+                await Task.Delay(pause < left ? pause : left, _time, ct);
+        }
+    }
 
     /// <summary>
     /// Runs one handshake step under <paramref name="limit"/>. Running out of it is an

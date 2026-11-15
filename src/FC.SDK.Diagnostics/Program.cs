@@ -236,10 +236,10 @@ catch (COMException ex)
     await camera.DisposeAsync();
     return 1;
 }
-catch (Exception ex) when (ex is IOException or System.Net.Sockets.SocketException)
+catch (IOException ex)
 {
-    // PTP/IP: no route, nothing listening, a pairing nobody confirmed, or a GUID the body refuses.
-    // The transport's own message says which and what to do.
+    // PTP/IP: the body off the network or not waiting, a pairing nobody confirmed, or a GUID the
+    // body refuses. Every one is an IOException, and the transport's message says which and what to do.
     Log($"OpenSession: {ex.Message}");
     await camera.DisposeAsync();
     return 1;
@@ -1683,6 +1683,10 @@ try
         // magnifier) in a frame read after it returned. At 1x the settle used to wait on record 18,
         // which does not move there, so every 1x pan ran the 3 s timeout out (issue #21). A check
         // passes under 700 ms, the most any pan took over WPD on a 6D or an R6 (raw ioctl and COM).
+        // It is WPD's bound. Over PTP/IP a pan returns after a few frame fetches, and a fetch grows
+        // with the JPEG: on a 6D a lit scene (177 KB frames) took up to 787 ms where the same scene
+        // with the lens cap on (113 KB) stayed under 692 ms, and 999 ms was seen (issue #29). Record 13
+        // was exact in 180 of 180 of those pans, so over Wi-Fi a "slow" here is the scene, not a fault.
         // Each target differs from the position before it: a frame from before the move then cannot
         // pass for the landing.
         const long MaxMs = 700;

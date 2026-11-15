@@ -415,6 +415,80 @@ public class PtpIpTransportTests
         await release;
     }
 
+    /// <summary>
+    /// A Canon body leaves the network for 10 to 20 s after every session closes (issue #29), so a
+    /// reconnect started then finds nobody. One connect bounded to 5 s, as 4.0 made it, failed 9 of 9
+    /// on an EOS 6D and an EOS R6. The connect is retried until its budget is spent; here the port
+    /// refuses at first and starts listening a second later.
+    /// </summary>
+    [Fact]
+    public async Task AConnectIsRetriedUntilTheCameraIsBackOnTheNetwork()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var port = FreePort();
+
+        await using var transport = new PtpIpTransport("127.0.0.1", port, "test") { ConnectBudget = TimeSpan.FromSeconds(20) };
+        var connecting = transport.ConnectAsync(timeout.Token);
+
+        // The body comes back: real time, since the refusals before it are the socket's own.
+        await Task.Delay(TimeSpan.FromSeconds(1), timeout.Token);
+        connecting.IsCompleted.ShouldBeFalse("the connect gave up, or went through, with nothing listening");
+        var listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
+        var camera = AcceptHandshakeAsync(listener, timeout.Token);
+
+        await connecting;
+        transport.IsConnected.ShouldBeTrue();
+
+        var (command, events) = await camera;
+        command.Dispose();
+        events.Dispose();
+        listener.Stop();
+    }
+
+    /// <summary>
+    /// With nobody there for the whole budget the connect fails as an <see cref="IOException"/> that
+    /// says how often it tried and what to do, never as the socket's own exception: a refused connect
+    /// used to leave as a <see cref="SocketException"/>, which the ConnectWifi remarks did not name.
+    /// </summary>
+    [Fact]
+    public async Task AConnectNobodyAnswersFailsAtItsBudgetAsAnIOException()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var port = FreePort();
+
+        await using var transport = new PtpIpTransport("127.0.0.1", port, "test") { ConnectBudget = TimeSpan.FromSeconds(3) };
+        var failed = await Should.ThrowAsync<IOException>(() => transport.ConnectAsync(timeout.Token));
+
+        failed.Message.ShouldContain("attempts");
+        failed.Message.ShouldContain("off the network");
+        transport.IsConnected.ShouldBeFalse();
+    }
+
+    /// <summary>The caller's token ends the retrying at once, as a cancellation.</summary>
+    [Fact]
+    public async Task TheCallersTokenEndsTheConnectRetries()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var port = FreePort();
+
+        await using var transport = new PtpIpTransport("127.0.0.1", port, "test");
+        using var gaveUp = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+        gaveUp.CancelAfter(TimeSpan.FromMilliseconds(300));
+
+        await Should.ThrowAsync<OperationCanceledException>(() => transport.ConnectAsync(gaveUp.Token));
+    }
+
+    /// <summary>A loopback port nothing listens on: bound once to learn a free number, then let go.</summary>
+    private static int FreePort()
+    {
+        var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        return port;
+    }
+
     /// <summary>The camera's side of the four-way handshake. The caller owns both connections.</summary>
     private static async Task<(TcpClient Command, TcpClient Events)> AcceptHandshakeAsync(TcpListener listener, CancellationToken ct)
     {

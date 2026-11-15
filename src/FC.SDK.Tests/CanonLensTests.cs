@@ -36,6 +36,28 @@ public class CanonLensTests
         return bytes;
     }
 
+    /// <summary>
+    /// R6, bare mount: a 0 and then 62 bytes that are neither zero nor text (issue #28). Synthetic:
+    /// the real ones stay with the reporter, since they may identify a body or a lens.
+    /// </summary>
+    private static byte[] BareR6()
+    {
+        var bytes = new byte[63];
+        for (int i = 1; i < bytes.Length; i++) bytes[i] = (byte)(0x80 + i);
+        return bytes;
+    }
+
+    /// <summary>
+    /// What the gate on the lens status is for: behind a bare R6's leading 0 there is no name at all,
+    /// and without the gate those bytes would be read as one. The 6D fixture cannot show it, since
+    /// what follows its 0 is readable text.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(null)]
+    public void A_bare_R6_has_no_name_though_bytes_follow_the_zero(bool? present) =>
+        CanonLens.Name(BareR6(), present).ShouldBeNull();
+
     [Theory]
     [InlineData(1u, true)]
     [InlineData(0u, false)]

@@ -28,12 +28,22 @@ public sealed class CanonCameraFactory(ILogger<CanonCamera> logger, TimeProvider
         new(new UsbPtpTransport(vendorId, productId), logger, timeProvider);
 
     /// <remarks>
-    /// Connecting (<see cref="OpenSessionAsync"/> or <see cref="ConnectTransportAsync"/>) is bounded.
-    /// The TCP connect and the event connection's acknowledgement get 5 s each. The body's answer to
-    /// the connection request gets 120 s, because on a first connection it shows a pairing prompt
-    /// and answers only once the operator presses OK (up to 20 s measured on an EOS 6D and an EOS R6);
-    /// the caller's token ends that wait sooner. Running out of any of them is an
-    /// <see cref="IOException"/> that says which step it was.
+    /// <para>
+    /// Connecting (<see cref="OpenSessionAsync"/> or <see cref="ConnectTransportAsync"/>) is bounded,
+    /// and every way it fails is an <see cref="IOException"/> that says which step it was.
+    /// </para>
+    /// <para>
+    /// <b>The TCP connect is retried for 30 s.</b> A Canon body leaves the network for 10 s (EOS 6D)
+    /// to 20 s (EOS R6) about a second after every session closes, and again about once a minute while
+    /// it waits, so a connect made then finds nobody. The retry waits that out. The cost is that a
+    /// host with nothing listening fails after 30 s; the caller's token ends it sooner.
+    /// </para>
+    /// <para>
+    /// The body's answer to the connection request gets 120 s, because on a first connection it shows
+    /// a pairing prompt and answers only once the operator presses OK (64 s measured, with OK pressed
+    /// late on purpose). The prompt stays on the camera after that runs out: pressing OK then pairs
+    /// it, but its connection has to be started again before the next connect.
+    /// </para>
     /// </remarks>
     /// <param name="clientGuid">
     /// The identity a Canon body pairs with. It refuses every other GUID afterwards, so persist one and
@@ -177,12 +187,22 @@ public sealed class CanonCamera : IAsyncDisposable
         new(new UsbPtpTransport(vendorId, productId), NullLogger<CanonCamera>.Instance);
 
     /// <remarks>
-    /// Connecting (<see cref="OpenSessionAsync"/> or <see cref="ConnectTransportAsync"/>) is bounded.
-    /// The TCP connect and the event connection's acknowledgement get 5 s each. The body's answer to
-    /// the connection request gets 120 s, because on a first connection it shows a pairing prompt
-    /// and answers only once the operator presses OK (up to 20 s measured on an EOS 6D and an EOS R6);
-    /// the caller's token ends that wait sooner. Running out of any of them is an
-    /// <see cref="IOException"/> that says which step it was.
+    /// <para>
+    /// Connecting (<see cref="OpenSessionAsync"/> or <see cref="ConnectTransportAsync"/>) is bounded,
+    /// and every way it fails is an <see cref="IOException"/> that says which step it was.
+    /// </para>
+    /// <para>
+    /// <b>The TCP connect is retried for 30 s.</b> A Canon body leaves the network for 10 s (EOS 6D)
+    /// to 20 s (EOS R6) about a second after every session closes, and again about once a minute while
+    /// it waits, so a connect made then finds nobody. The retry waits that out. The cost is that a
+    /// host with nothing listening fails after 30 s; the caller's token ends it sooner.
+    /// </para>
+    /// <para>
+    /// The body's answer to the connection request gets 120 s, because on a first connection it shows
+    /// a pairing prompt and answers only once the operator presses OK (64 s measured, with OK pressed
+    /// late on purpose). The prompt stays on the camera after that runs out: pressing OK then pairs
+    /// it, but its connection has to be started again before the next connect.
+    /// </para>
     /// </remarks>
     public static CanonCamera ConnectWifi(string host, string? clientName = null) =>
         new(new PtpIpTransport(host, clientName: clientName), NullLogger<CanonCamera>.Instance);
@@ -1094,8 +1114,8 @@ public sealed class CanonCamera : IAsyncDisposable
     /// <remarks>
     /// An EOS R6 sends the name of a Sigma 35mm F1.4 DG HSM Art behind a 0 byte
     /// (<c>00 "35mm"</c>, where a 6D sends <c>"35mm"</c>). That byte is skipped when
-    /// <c>LensStatus</c> (0xD1A8) says a lens is fitted, and only then: on a bare mount the bytes
-    /// after it are the previous lens's name (issue #28). <see cref="GetPropertyStringAsync"/> on
+    /// <c>LensStatus</c> (0xD1A8) says a lens is fitted, and only then: on a bare 6D the bytes
+    /// after it are the previous lens's name, on a bare R6 62 other bytes (issue #28). <see cref="GetPropertyStringAsync"/> on
     /// <see cref="EdsPropertyId.LensName"/> still stops at the first 0.
     /// </remarks>
     public async Task<(EdsError Error, string? Value)> GetLensNameAsync(CancellationToken ct = default)

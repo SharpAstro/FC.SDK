@@ -27,10 +27,13 @@ internal static class WifiDiscovery
 
         var request = Encoding.ASCII.GetBytes(
             "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n");
-        // Three searches spread over the window, not back to back: sent together, one lost moment
-        // on the network loses all three, and a scan then misses a camera that is there (3 scans
-        // in 18 on an EOS R6 and an EOS 6D, issue #29). The first is awaited, so a machine with no
-        // network still fails here; the other two go out while replies are being read.
+        // Three searches spread over the window, not back to back, so that one lost moment on the
+        // network does not lose all three. It costs nothing, and it does not cure a missed camera:
+        // 123 scans in 150 found an EOS 6D this way against 118 back to back (issue #29, no
+        // difference). A scan misses a body that is off the network, which a Canon is for 10 to 20 s
+        // after every session and about once a minute while it waits; a 3 s window cannot outlast
+        // that, and the "(last connected)" row is what covers it. The first search is awaited, so a
+        // machine with no network still fails here; the other two go out while replies are read.
         await socket.SendAsync(request, SsdpGroup, ct);
         var repeats = RepeatSearchAsync(socket, request, listen / Searches, logger, time, deadline.Token);
 

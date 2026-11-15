@@ -15,7 +15,9 @@ namespace FC.SDK.Canon;
 /// <c>00 "35mm"</c> for a Sigma 35mm F1.4 DG HSM Art that a 6D names <c>"35mm"</c>, and writes the
 /// same empty name into its own files. A 0 first byte is also how both bodies mark the name of a
 /// lens that was taken off: a bare 6D holds <c>00 "4-70mm F2.8 ..."</c>, the previous lens's name
-/// with its first byte zeroed. So the bytes after a leading 0 are a name only when the lens status
+/// with its first byte zeroed, and a bare R6 holds a 0 and then 62 bytes that are not text
+/// (the same over repeat reads, different from one day to the next). So the bytes after a leading
+/// 0 are a name only when the lens status
 /// says a lens is there, and that is the one case in which they are read.
 /// </para>
 /// </remarks>
