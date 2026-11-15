@@ -26,6 +26,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using FC.SDK.Diagnostics;
+using FC.SDK.Hosts;
 using FC.SDK;
 using FC.SDK.Canon;
 using FC.SDK.Scripting;
@@ -175,7 +176,10 @@ uint SelfTimerDrive2 = parse.GetValue(drive2Opt);
 uint SelfTimerDrive3 = parse.GetValue(drive3Opt);
 string[]? only = parse.GetValue(onlyOpt) is { Length: > 0 } selectedRows ? selectedRows : null;
 
-var clock = Stopwatch.StartNew();
+// One clock for the whole run: the camera's waits, the script's sleeps and every pause and timing
+// below. The system clock, since an experiment is a measurement of a real body.
+var time = TimeProvider.System;
+var clock = ClockWatch.StartNew(time);
 var objects = new ConcurrentQueue<(TimeSpan At, uint Handle)>();
 
 // Paths written by the most recent CollectAsync. A mode that has to judge the pixels rather than the
@@ -187,11 +191,12 @@ var lastDownloads = new List<string>();
 EdsAv? entryAv = null;
 EdsTv? entryTv = null;
 EdsISOSpeed? entryIso = null;
-var outDir = Path.Combine(Environment.CurrentDirectory, $"mlu-matrix_{DateTime.Now:yyyyMMdd_HHmmss}");
+var outDir = Path.Combine(Environment.CurrentDirectory, $"mlu-matrix_{time.GetLocalNow():yyyyMMdd_HHmmss}");
 Directory.CreateDirectory(outDir);
 
 void Log(string line) => Console.WriteLine($"[{clock.Elapsed:mm\\:ss\\.f}] {line}");
 
+var cameras = new CanonCameraFactory(Microsoft.Extensions.Logging.Abstractions.NullLogger<CanonCamera>.Instance, time);
 CanonCamera? camera = null;
 if (parse.GetValue(transportOpt) is { } link && link.StartsWith("wifi:", StringComparison.Ordinal))
 {
@@ -199,14 +204,14 @@ if (parse.GetValue(transportOpt) is { } link && link.StartsWith("wifi:", StringC
     var (guid, guidPath, created) = PairedClientGuid();
     Log($"PTP/IP: {wifiHost}, client GUID from {guidPath}{(created ? " (new: the camera will ask to pair, press OK on it)" : "")}");
     // The viewer's name as well as its GUID: one pairing on the body then serves both programs.
-    camera = new CanonCameraFactory(Microsoft.Extensions.Logging.Abstractions.NullLogger<CanonCamera>.Instance).ConnectWifi(wifiHost, "FC.SDK Viewer", guid);
+    camera = cameras.ConnectWifi(wifiHost, "FC.SDK Viewer", guid);
 }
 else if (OperatingSystem.IsWindows())
 {
     foreach (var (deviceId, friendlyName) in CanonCamera.EnumerateWpdCameras())
     {
         Log($"Found: {friendlyName}");
-        camera = await CanonCamera.ConnectWpdAutoAsync(deviceId);
+        camera = await cameras.ConnectWpdAutoAsync(deviceId);
         break;
     }
 }
@@ -267,7 +272,7 @@ if (cameraScript is not null)
     try
     {
         using var scriptCamera = new CanonScriptCamera(camera);
-        result = await new ScriptRunner(scriptCamera, new ConsoleScriptHost(Log)).RunAsync(cameraScript);
+        result = await new ScriptRunner(scriptCamera, new ConsoleScriptHost(Log), time).RunAsync(cameraScript);
     }
     finally
     {
@@ -345,7 +350,7 @@ try
         // event record against its offset from the release makes the comparison objective: if the
         // body does something extra at T+0 with lockup armed, it shows up as a record the other
         // round does not have.
-        var sinceFire = Stopwatch.StartNew();
+        var sinceFire = ClockWatch.StartNew(time);
         var round = "setup";
         var timeline = new ConcurrentQueue<string>();
         void Note(string what)
@@ -362,7 +367,7 @@ try
             Console.WriteLine();
             Log($"########## MIRROR LOCKUP {mlu.ToString().ToUpperInvariant()} ##########");
             Log($"  set = {await camera.SetMirrorLockupAsync(mlu)}");
-            await Task.Delay(1500);
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
             await camera.DrainEventsAsync();
             var (_, setting) = await camera.GetRawPropertyAsync(0xD13A);
             Log($"  0xD13A reads {setting} — {(setting == (uint)mlu ? "confirmed" : "MISMATCH, result is void")}");
@@ -378,18 +383,18 @@ try
             {
                 if (i <= 5 || i % 5 == 0) Log($"  ... firing in {i}s");
                 if (i is 4 or 3 or 2 && OperatingSystem.IsWindows()) Console.Beep(1200, 120);
-                await Task.Delay(i is 4 or 3 or 2 ? 880 : 1000);
+                await Task.Delay(TimeSpan.FromMilliseconds(i is 4 or 3 or 2 ? 880 : 1000), time);
             }
 
             objects.Clear();
             round = mlu.ToString();
             sinceFire.Restart();
-            var sw = Stopwatch.StartNew();
+            var sw = ClockWatch.StartNew(time);
             var e = await camera.TakePictureAsync();
             Log($"  >>>>> FIRED NOW <<<<<  ({e}) — one second after the last beep");
             for (int i = 1; i <= 12; i++)
             {
-                await Task.Delay(1000);
+                await Task.Delay(TimeSpan.FromMilliseconds(1000), time);
                 var got = !objects.IsEmpty;
                 Log($"  T+{i,2}s{(got ? "   <<< image arrived — the exposure was HERE" : "")}");
                 if (got) break;
@@ -425,7 +430,7 @@ try
 
         var drive = SelfTimerDrive;
         Log($"MLU -> On = {await camera.SetMirrorLockupAsync(EdsMirrorUpSetting.On)}");
-        await Task.Delay(1500);
+        await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
         await camera.DrainEventsAsync();
         var (_, mluSetting) = await camera.GetRawPropertyAsync(MirrorUpSetting);
         Log($"0xD13A reads {mluSetting} — MLU is {(mluSetting == 1 ? "CONFIRMED ON" : "NOT ON, stop here")}");
@@ -451,11 +456,11 @@ try
             for (int i = lead; i > 0; i--)
             {
                 if (i <= 5 || i % 5 == 0) Log($"  ... firing in {i}s — LISTEN");
-                await Task.Delay(1000);
+                await Task.Delay(TimeSpan.FromMilliseconds(1000), time);
             }
         }
 
-        var sw = Stopwatch.StartNew();
+        var sw = ClockWatch.StartNew(time);
         Log($"release = {await camera.TakePictureAsync()}  ({sw.ElapsedMilliseconds} ms)");
         uint last = uint.MaxValue;
         while (sw.Elapsed < TimeSpan.FromSeconds(20))
@@ -467,7 +472,7 @@ try
                 last = v;
             }
             if (!objects.IsEmpty) break;
-            await Task.Delay(150);
+            await Task.Delay(TimeSpan.FromMilliseconds(150), time);
         }
         Log($"image after {sw.Elapsed.TotalSeconds:F1}s: {await CollectAsync("SELF", TimeSpan.FromSeconds(20))}");
         return 0;
@@ -486,7 +491,7 @@ try
         {
             var (beforeErr, before) = await camera.GetRawPropertyAsync(MirrorUpSetting);
             var setErr = await camera.SetMirrorLockupAsync(want);
-            await Task.Delay(2500);
+            await Task.Delay(TimeSpan.FromMilliseconds(2500), time);
             await camera.DrainEventsAsync();
             var (afterErr, after) = await camera.GetRawPropertyAsync(MirrorUpSetting);
             var (stateErr, state) = await camera.GetRawPropertyAsync(MirrorLockUpState);
@@ -522,13 +527,13 @@ try
         Log($"\nStartLiveView = {lvErr}");
         if (lvErr is EdsError.OK)
         {
-            await Task.Delay(1800);
+            await Task.Delay(TimeSpan.FromMilliseconds(1800), time);
             for (var i = 0; i < 12; i++)
             {
                 var (recErr, records) = await camera.GetLiveViewRecordsAsync();
                 if (recErr is EdsError.OK)
                     foreach (var r in records) recordTypes.Add(r.Type);
-                await Task.Delay(150);
+                await Task.Delay(TimeSpan.FromMilliseconds(150), time);
             }
             var hist = await camera.GetEvfHistogramAsync();
             Log($"  record types seen: {string.Join(", ", recordTypes.Select(t => $"0x{t:X}"))}");
@@ -536,7 +541,7 @@ try
             Log($"  image record 1/11 (still) present: {recordTypes.Contains(1) || recordTypes.Contains(11)}");
             Log($"  histogram: {hist?.ToString() ?? "none"}");
             await camera.StopLiveViewAsync();
-            await Task.Delay(800);
+            await Task.Delay(TimeSpan.FromMilliseconds(800), time);
         }
 
         // The dump goes next to the working directory rather than into the timestamped artefact folder,
@@ -560,7 +565,7 @@ try
         {
             objects.Clear();
             await camera.DrainEventsAsync();
-            var sw = Stopwatch.StartNew();
+            var sw = ClockWatch.StartNew(time);
             var shotErr = await camera.TakePictureAsync();
             var shotMs = sw.Elapsed.TotalMilliseconds;
             var (delivered, shotBytes) = await CollectAsync($"MOVIE-{tag}", TimeSpan.FromSeconds(20));
@@ -597,7 +602,7 @@ try
         Log($"On entry: drive {entryDriveMode} ({entryDriveErr}), lockup {entryLockup?.ToString() ?? "unknown"}");
 
         var olc = new ConcurrentQueue<(double At, uint P1, uint P2)>();
-        var watchClock = Stopwatch.StartNew();
+        var watchClock = ClockWatch.StartNew(time);
         void OnState(object? _, CanonStateChangedEventArgs e)
         {
             if (e.EventType is CanonEventType.OLCInfoChanged)
@@ -711,7 +716,7 @@ try
             await setup();
             await camera!.DrainEventsAsync();
             var setErr = await camera.SetAutoPowerOffAsync(target);
-            await Task.Delay(2000);
+            await Task.Delay(TimeSpan.FromMilliseconds(2000), time);
             await camera.DrainEventsAsync();
             var (_, got) = await camera.GetRawPropertyAsync(AutoPowerOff);
             await teardown();
@@ -723,7 +728,7 @@ try
             if (landed)
             {
                 await camera.SetAutoPowerOffAsync(current);
-                await Task.Delay(1500);
+                await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
                 await camera.DrainEventsAsync();
             }
             return (setErr, got, landed);
@@ -741,8 +746,8 @@ try
         // The condition actually asked about. Live view is the body's busiest state, so if anything
         // makes this worse it is this — and if it makes it BETTER that is worth knowing too.
         var inLiveView = await TryWriteAsync("in live view",
-            async () => { await camera.StartLiveViewAsync(); await Task.Delay(1500); },
-            async () => { await camera.StopLiveViewAsync(); await Task.Delay(1000); });
+            async () => { await camera.StartLiveViewAsync(); await Task.Delay(TimeSpan.FromMilliseconds(1500), time); },
+            async () => { await camera.StopLiveViewAsync(); await Task.Delay(TimeSpan.FromMilliseconds(1000), time); });
 
         Log("");
         if (plain.Landed || locked.Landed || inLiveView.Landed)
@@ -771,7 +776,7 @@ try
         Log($"Tv={parse.GetValue(tvOpt)}: {await camera.SetShutterSpeedAsync(parse.GetValue(tvOpt))}");
 
         await camera.StartLiveViewAsync();
-        await Task.Delay(1500);
+        await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
         await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
 
         var hist = await camera.GetEvfHistogramAsync();
@@ -816,7 +821,7 @@ try
         foreach (var iso in new[] { EdsISOSpeed.ISO_100, EdsISOSpeed.ISO_400, EdsISOSpeed.ISO_1600, EdsISOSpeed.ISO_6400 })
         {
             var setErr = await camera.SetISOAsync(iso);
-            await Task.Delay(1200);
+            await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
             var s = await camera.GetEvfHistogramAsync();
             if (s is not { } sh) { Log($"  {iso}: {setErr}, no frame"); continue; }
             sweep.Add((iso, sh.MeanLevel));
@@ -887,7 +892,7 @@ try
         // ...so the ISO is metered rather than guessed. The body is in Manual, so nothing else will
         // do it, and a run whose exposure was wrong is a run wasted — as the first one was.
         await camera.StartLiveViewAsync();
-        await Task.Delay(1500);
+        await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
         await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
 
         const double TargetLevel = 0.20;
@@ -899,14 +904,14 @@ try
         })
         {
             await camera.SetISOAsync(candidate);
-            await Task.Delay(900);
+            await Task.Delay(TimeSpan.FromMilliseconds(900), time);
             if (await camera.GetEvfHistogramAsync() is not { } m) continue;
             Log($"  meter {candidate,-12} mean {m.MeanLevel,7:P2}  clipped high {m.ClippedHighlights,6:P1}");
             if (best is null || Math.Abs(m.MeanLevel - TargetLevel) < Math.Abs(best.Value.Mean - TargetLevel))
                 best = (candidate, m.MeanLevel);
         }
         await camera.StopLiveViewAsync();
-        await Task.Delay(1000);
+        await Task.Delay(TimeSpan.FromMilliseconds(1000), time);
 
         if (best is not { } pick)
         {
@@ -941,7 +946,7 @@ try
             {
                 var (err, jpeg) = await camera!.GetLiveViewFrameAsync();
                 if (err is EdsError.OK && jpeg.Length > 0) { total += jpeg.Length; got++; }
-                await Task.Delay(120);
+                await Task.Delay(TimeSpan.FromMilliseconds(120), time);
             }
             return got is 0 ? 0 : total / got;
         }
@@ -956,13 +961,13 @@ try
         async Task<(bool Ok, int Focused, int Defocused, string Note)> SetUpRowAsync(int defocusSteps)
         {
             await camera!.StartLiveViewAsync();
-            await Task.Delay(1200);
+            await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
             await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
 
             var afErr = await camera.AutoFocusLiveViewAsync();
-            await Task.Delay(4000);
+            await Task.Delay(TimeSpan.FromMilliseconds(4000), time);
             await camera.CancelAutoFocusAsync();
-            await Task.Delay(500);
+            await Task.Delay(TimeSpan.FromMilliseconds(500), time);
             var focused = await FrameSizeAsync();
 
             // The defocus is defined by its measured optical effect, not by a step count. A fixed
@@ -976,7 +981,7 @@ try
             {
                 if (await camera.DriveLensAsync(EdsDriveLensStep.NearLarge) is not EdsError.OK) break;
                 driven++;
-                await Task.Delay(300);
+                await Task.Delay(TimeSpan.FromMilliseconds(300), time);
                 defocused = await FrameSizeAsync();
             }
 
@@ -993,7 +998,7 @@ try
         // Two things to put right once, before any row runs.
         Log("\nResetting the lens and the AF frame");
         await camera.StartLiveViewAsync();
-        await Task.Delay(1200);
+        await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
         await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
 
         // In Live (FlexiZone-Single) the magnification frame IS the AF frame, so a zoom pan from any
@@ -1005,7 +1010,7 @@ try
         // 1x is accepted too, measured on a 6D and an R6 in issue #21; this comment used to say it
         // was discarded, which was arithmetic rather than a measurement.)
         await camera.SetEvfZoomAsync((uint)CanonEvfZoom.X5, verify: false);
-        await Task.Delay(1200);
+        await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
         if (await camera.GetEvfZoomRectAsync() is { SensorWidth: > 0, Width: > 0 } r)
         {
             var (cx, cy) = ((r.SensorWidth - r.Width) / 2, (r.SensorHeight - r.Height) / 2);
@@ -1014,13 +1019,13 @@ try
         }
         else Log("  *** no zoom rect, so the AF frame position could not be reset");
         await camera.SetEvfZoomAsync((uint)CanonEvfZoom.Fit, verify: false);
-        await Task.Delay(1200);
+        await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
 
         // The lens may be sitting on its near stop from a previous run, and the first row's AF would
         // then have to recover from the worst possible starting point.
-        for (var i = 0; i < 8; i++) { await camera.DriveLensAsync(EdsDriveLensStep.FarLarge); await Task.Delay(200); }
+        for (var i = 0; i < 8; i++) { await camera.DriveLensAsync(EdsDriveLensStep.FarLarge); await Task.Delay(TimeSpan.FromMilliseconds(200), time); }
         await camera.StopLiveViewAsync();
-        await Task.Delay(1000);
+        await Task.Delay(TimeSpan.FromMilliseconds(1000), time);
 
         var scores = new List<(int Round, string Tag, double Score)>();
         int busyRows = 0;
@@ -1034,7 +1039,7 @@ try
                 Log("  *** setup failed: the frame did not shrink, so the lens is not verifiably off");
                 Log("  *** focus. Nothing this row produced could distinguish a focus command — void.");
                 await camera.StopLiveViewAsync();
-                await Task.Delay(1000);
+                await Task.Delay(TimeSpan.FromMilliseconds(1000), time);
                 continue;
             }
 
@@ -1051,9 +1056,9 @@ try
             if (tag is "doaf")
             {
                 var afErr = await camera.AutoFocusLiveViewAsync();
-                await Task.Delay(4000);
+                await Task.Delay(TimeSpan.FromMilliseconds(4000), time);
                 var cancelErr = await camera.CancelAutoFocusAsync();
-                await Task.Delay(500);
+                await Task.Delay(TimeSpan.FromMilliseconds(500), time);
                 // The control has to prove it recovered the focus it was meant to recover, not just
                 // that the command was accepted. Back near the focused size means it worked.
                 var recovered = await FrameSizeAsync();
@@ -1062,7 +1067,7 @@ try
                     + $"({(recovered > setup.Defocused * 1.1 ? "RECOVERED" : "did NOT recover")})";
             }
             await camera.StopLiveViewAsync();
-            await Task.Delay(1500);
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
             await camera.DrainEventsAsync();
 
             var pressMs = 0d;
@@ -1072,19 +1077,19 @@ try
                 for (int i = 0; i < 3; i++)
                 {
                     if (OperatingSystem.IsWindows()) Console.Beep(1200, 120);
-                    await Task.Delay(700);
+                    await Task.Delay(TimeSpan.FromMilliseconds(700), time);
                 }
             }
 
             objects.Clear();
             await camera.DrainEventsAsync();
-            var sw = Stopwatch.StartNew();
+            var sw = ClockWatch.StartNew(time);
             EdsError e1;
             if (p2 is { } s2)
             {
                 e1 = await camera.SendRawCommandAsync(RemoteReleaseOn, 3, s2);
                 pressMs = sw.Elapsed.TotalMilliseconds;
-                await Task.Delay(2500);
+                await Task.Delay(TimeSpan.FromMilliseconds(2500), time);
                 await camera.SendRawCommandAsync(RemoteReleaseOff, 2);
                 await camera.SendRawCommandAsync(RemoteReleaseOff, 1);
             }
@@ -1123,7 +1128,7 @@ try
                 Log("  *** DeviceBusy — attempting recovery (AfCancel + drain)");
                 await camera.CancelAutoFocusAsync();
                 await camera.DrainEventsAsync();
-                await Task.Delay(2000);
+                await Task.Delay(TimeSpan.FromMilliseconds(2000), time);
                 if (++busyRows >= 2)
                 {
                     Log("*** Two busy releases: the body is wedged and every later row would be void.");
@@ -1211,7 +1216,7 @@ try
         async Task Defocus()
         {
             await camera!.StartLiveViewAsync();
-            await Task.Delay(1200);
+            await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
             await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
 
             // Reported, not assumed. A defocus that quietly failed would leave autofocus with
@@ -1221,14 +1226,14 @@ try
             for (int i = 0; i < 6; i++)
             {
                 results.Add(await camera.DriveLensAsync(EdsDriveLensStep.NearLarge));
-                await Task.Delay(250);
+                await Task.Delay(TimeSpan.FromMilliseconds(250), time);
             }
             var ok = results.Count(r => r is EdsError.OK);
             Log($"  defocus: DriveLens NearLarge x6 -> {ok}/6 OK"
                 + (ok == 0 ? "   *** the lens did not move; the AF row below is void" : ""));
 
             await camera.StopLiveViewAsync();
-            await Task.Delay(1200);
+            await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
         }
 
         async Task<(bool Delivered, long Bytes, double PressMs, double TotalMs)> Press(string id, uint p1, uint p2)
@@ -1247,11 +1252,11 @@ try
             camera.PropertyChanged += OnProp;
             camera.StateChanged += OnState;
 
-            var sw = Stopwatch.StartNew();
+            var sw = ClockWatch.StartNew(time);
             var onErr = await camera.SendRawCommandAsync(RemoteReleaseOn, p1, p2);
             var pressMs = sw.Elapsed.TotalMilliseconds;
 
-            await Task.Delay(1500);
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
 
             // Mirror the press: full then half, so a half-press left over cannot hold the body.
             if (p1 is 2 or 3) await camera.SendRawCommandAsync(RemoteReleaseOff, 2);
@@ -1299,7 +1304,7 @@ try
             foreach (var af in new[] { EdsAFMode.OneShot, EdsAFMode.AIServo })
             {
                 var setErr = await camera.SetPropertyAsync(EdsPropertyId.AFMode, (uint)af);
-                await Task.Delay(700);
+                await Task.Delay(TimeSpan.FromMilliseconds(700), time);
                 var (_, nowRaw) = await camera.GetPropertyAsync(EdsPropertyId.AFMode);
                 var now = (EdsAFMode)nowRaw;
                 Log($"\n  AFMode -> {af} ({setErr}), reads {now}"
@@ -1348,7 +1353,7 @@ try
         async Task<(int Frames, int Bytes)> CountFrames(TimeSpan window)
         {
             var (frames, last) = (0, 0);
-            var sw = Stopwatch.StartNew();
+            var sw = ClockWatch.StartNew(time);
             while (sw.Elapsed < window)
             {
                 var (e, jpeg) = await camera!.GetLiveViewFrameAsync();
@@ -1357,7 +1362,7 @@ try
                     frames++;
                     last = jpeg.Length;
                 }
-                else await Task.Delay(30);
+                else await Task.Delay(TimeSpan.FromMilliseconds(30), time);
             }
             return (frames, last);
         }
@@ -1381,12 +1386,12 @@ try
             for (int i = 0; i < 3; i++)
             {
                 if (OperatingSystem.IsWindows()) Console.Beep(1200, 120);
-                await Task.Delay(880);
+                await Task.Delay(TimeSpan.FromMilliseconds(880), time);
             }
             Log("    >>> PRESS NOW <<<");
             // Frames keep being read while waiting: the issue's remote failed with frames flowing, and
             // a press against a stalled stream would be a different experiment.
-            var sw = Stopwatch.StartNew();
+            var sw = ClockWatch.StartNew(time);
             while (sw.Elapsed < TimeSpan.FromSeconds(10) && objects.IsEmpty)
                 await CountFrames(TimeSpan.FromMilliseconds(300));
             var (delivered, size) = await CollectAsync(id, TimeSpan.FromSeconds(1));
@@ -1435,7 +1440,7 @@ try
         {
             Log($"\n--- start: {name} ---");
             Log($"  StartLiveView = {await start()}");
-            await Task.Delay(1500);
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
             var during = await ReadOutput();
             var (frames, bytes) = await CountFrames(TimeSpan.FromSeconds(3));
             Log($"  during: {Show(during)}   {frames} real frames in 3 s (last {bytes:N0} bytes)");
@@ -1449,7 +1454,7 @@ try
             Log($"  body press: {press}");
 
             Log($"  StopLiveView = {await camera.StopLiveViewAsync()}");
-            await Task.Delay(1500);
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
             var after = await ReadOutput();
             var restored = after == atRest;
             Log($"  after stop: {Show(after)}   {(restored ? "back to its value at rest" : "NOT RESTORED")}");
@@ -1470,18 +1475,18 @@ try
             {
                 Log($"\n--- PTP release during live view at {output}, then stop ---");
                 Log($"  StartLiveView = {await camera.StartLiveViewAsync(output)}");
-                await Task.Delay(1500);
+                await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
                 var (frames, _) = await CountFrames(TimeSpan.FromSeconds(1));
                 Log($"  during: {Show(await ReadOutput())}   {frames} real frames in 1 s");
 
                 objects.Clear();
-                var release = Stopwatch.StartNew();
+                var release = ClockWatch.StartNew(time);
                 Log($"  TakePicture = {await camera.TakePictureAsync()} after {release.ElapsedMilliseconds} ms");
                 var (delivered, size) = await CollectAsync($"evfout-ptp-{(uint)output}", TimeSpan.FromSeconds(10));
                 Log($"  {(delivered ? $"EXPOSED ({size:N0} bytes)" : "NOTHING: this row is void")}");
                 if (!delivered) failures++;
 
-                var sinceStop = Stopwatch.StartNew();
+                var sinceStop = ClockWatch.StartNew(time);
                 Log($"  StopLiveView = {await camera.StopLiveViewAsync()} after {sinceStop.ElapsedMilliseconds} ms");
                 var held = false;
                 for (int i = 0; i < 30 && !held; i++)
@@ -1493,7 +1498,7 @@ try
                     if (held) break;
                     Log($"    +{sinceStop.Elapsed.TotalSeconds,4:F1}s write {Show(atRest)}: "
                         + $"{await camera.SetRawPropertyAsync(0xD1B0, atRest.Value & 0x7FFF_FFFF)}");
-                    await Task.Delay(500);
+                    await Task.Delay(TimeSpan.FromMilliseconds(500), time);
                 }
                 summary.Add($"{$"PTP release at {output}",-24} stop restored "
                     + (held ? $"by +{sinceStop.Elapsed.TotalSeconds:F1}s" : "NEVER in 15 s"));
@@ -1505,11 +1510,11 @@ try
         // not take that for the body's value at rest.
         Log("\n--- two starts, one stop ---");
         Log($"  StartLiveView = {await camera.StartLiveViewAsync()}");
-        await Task.Delay(1000);
+        await Task.Delay(TimeSpan.FromMilliseconds(1000), time);
         Log($"  StartLiveView = {await camera.StartLiveViewAsync()}");
-        await Task.Delay(1000);
+        await Task.Delay(TimeSpan.FromMilliseconds(1000), time);
         Log($"  StopLiveView = {await camera.StopLiveViewAsync()}");
-        await Task.Delay(1500);
+        await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
         var afterDouble = await ReadOutput();
         Log($"  after: {Show(afterDouble)}   {(afterDouble == atRest ? "back to its value at rest" : "NOT RESTORED")}");
         if (afterDouble != atRest) failures++;
@@ -1520,19 +1525,19 @@ try
         // writes TFT; this row only records what that leaves, then puts the real value back.
         Log("\n--- found already on PC alone (an earlier session's leftover) ---");
         Log($"  raw write 0xD1B0 = 2: {await camera.SetRawPropertyAsync(0xD1B0, 2)}");
-        await Task.Delay(1500);
+        await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
         Log($"  found: {Show(await ReadOutput())}");
         Log($"  StartLiveView = {await camera.StartLiveViewAsync()}");
-        await Task.Delay(1500);
+        await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
         Log($"  StopLiveView = {await camera.StopLiveViewAsync()}");
-        await Task.Delay(1500);
+        await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
         var afterLeftover = await ReadOutput();
         Log($"  after: {Show(afterLeftover)}   (TFT is the documented fallback; value at rest was {Show(atRest)})");
         summary.Add($"{"leftover PC alone",-24} after stop {Show(afterLeftover)}");
         if (afterLeftover != atRest)
         {
             Log($"  putting the value at rest back: {await camera.SetRawPropertyAsync(0xD1B0, atRest.Value & 0x7FFF_FFFF)}");
-            await Task.Delay(1500);
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
             Log($"  now: {Show(await ReadOutput())}");
         }
 
@@ -1613,9 +1618,9 @@ try
         Log($"ISO = {iso}: {await camera.SetISOAsync(iso)}");
 
         Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
-        await Task.Delay(2000);
+        await Task.Delay(TimeSpan.FromMilliseconds(2000), time);
         Log($"SetEvfAfSystem(Live) = {await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live)}");
-        await Task.Delay(900);
+        await Task.Delay(TimeSpan.FromMilliseconds(900), time);
 
         async Task Shot(string tag)
         {
@@ -1628,7 +1633,7 @@ try
                     Log($"  {tag,-16} {jpeg.Length,7:N0} bytes   rect {await camera.GetEvfZoomRectAsync()}");
                     return;
                 }
-                await Task.Delay(100);
+                await Task.Delay(TimeSpan.FromMilliseconds(100), time);
             }
             Log($"  {tag}: NO FRAME");
         }
@@ -1636,9 +1641,9 @@ try
         // Centre the crop first, so 1x / 5x / 10x differ only in magnification.
         await camera.SetEvfZoomAsync(CanonEvfZoom.X5);
         await camera.SetEvfZoomPositionAsync(2184, 1456);
-        await Task.Delay(1000);
+        await Task.Delay(TimeSpan.FromMilliseconds(1000), time);
         await camera.SetEvfZoomAsync(CanonEvfZoom.Fit);
-        await Task.Delay(1200);
+        await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
 
         Log("\n--- magnification, same centre ---");
         await Shot("mag_1x");
@@ -1651,7 +1656,7 @@ try
         // regions of the sensor, the five images show five different parts of the scene.
         Log("\n--- panning at 5x ---");
         await camera.SetEvfZoomAsync(CanonEvfZoom.X5);
-        await Task.Delay(1200);
+        await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
         // Corners in SENSOR coordinates. An earlier pass used 9999 as "far enough" and the axis
         // simply kept its previous value: a coordinate beyond the sensor is rejected outright, not
         // clamped, so the frames all looked like the pan had failed. 4368 (inside 5472) does clamp.
@@ -1662,7 +1667,7 @@ try
                  })
         {
             await camera.SetEvfZoomPositionAsync(x, y);
-            await Task.Delay(1000);
+            await Task.Delay(TimeSpan.FromMilliseconds(1000), time);
             await Shot(tag);
         }
 
@@ -1689,11 +1694,11 @@ try
         // About half the polls answer ObjectNotReady with no image, so a read waits for a real frame.
         async Task<CanonEvfFrameInfo?> Info()
         {
-            for (var t = Stopwatch.StartNew(); t.ElapsedMilliseconds < 3000;)
+            for (var t = ClockWatch.StartNew(time); t.ElapsedMilliseconds < 3000;)
             {
                 var (e, jpeg, info) = await camera!.GetLiveViewFrameAndInfoAsync();
                 if (e is EdsError.OK && !jpeg.IsEmpty) return info;
-                await Task.Delay(30);
+                await Task.Delay(TimeSpan.FromMilliseconds(30), time);
             }
             return null;
         }
@@ -1701,7 +1706,7 @@ try
         // Frames keep coming from before a move for a while, so each pan starts from a settled body.
         async Task Settle()
         {
-            for (var t = Stopwatch.StartNew(); t.ElapsedMilliseconds < 1500;) await Info();
+            for (var t = ClockWatch.StartNew(time); t.ElapsedMilliseconds < 1500;) await Info();
         }
 
         if (await Info() is not { Magnifier: { } m0, Sensor: { } sensor })
@@ -1723,7 +1728,7 @@ try
         var rows = new List<(string Check, string Expect, long Ms, bool Ok)>();
         async Task Pan(string check, string expect, uint x, uint y, Func<CanonEvfRect, bool> landedRight)
         {
-            var sw = Stopwatch.StartNew();
+            var sw = ClockWatch.StartNew(time);
             var (e, _) = await camera!.SetEvfZoomPositionAsync(x, y);
             var ms = sw.ElapsedMilliseconds;
             var now = (await Info())?.Magnifier;
@@ -1791,7 +1796,7 @@ try
                             var s = r.Payload.Span;
                             return (U32(s, 0), U32(s, 4), U32(s, 8), U32(s, 12));
                         }
-                await Task.Delay(100);
+                await Task.Delay(TimeSpan.FromMilliseconds(100), time);
             }
             return null;
         }
@@ -1800,7 +1805,7 @@ try
             r is { } v ? $"({v.X},{v.Y}) {v.W}x{v.H}" : "no frame";
 
         Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
-        await Task.Delay(2000);
+        await Task.Delay(TimeSpan.FromMilliseconds(2000), time);
 
         var baseline = await Rect();
         Log($"baseline rect: {Show(baseline)}");
@@ -1820,14 +1825,14 @@ try
         foreach (uint z in new uint[] { 1, 2, 3, 5, 10 })
         {
             var err2 = await camera.SetEvfZoomAsync(z);
-            await Task.Delay(1200);
+            await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
             await camera.DrainEventsAsync();
             var r = await Rect();
             Log($"  zoom {z,-3} = {err2,-10} rect {Show(r)}"
                 + $"{(r is { } v && baseline is { } b && (v.W != b.W || v.H != b.H) ? "   <<< MOVED" : "")}");
         }
         await camera.SetEvfZoomAsync(1);
-        await Task.Delay(800);
+        await Task.Delay(TimeSpan.FromMilliseconds(800), time);
 
         // 2: a 6D disables magnification in Face+Tracking AF. If that is the gate, changing the LV
         // AF system and re-trying is what shows it.
@@ -1835,27 +1840,27 @@ try
         foreach (uint af in new uint[] { 0, 1, 2 })
         {
             var setAf = await camera.SetRawPropertyAsync(LvAfSystem, af);
-            await Task.Delay(900);
+            await Task.Delay(TimeSpan.FromMilliseconds(900), time);
             await camera.DrainEventsAsync();
             var (_, nowAf) = await camera.GetRawPropertyAsync(LvAfSystem);
             var err3 = await camera.SetEvfZoomAsync(5);
-            await Task.Delay(1200);
+            await Task.Delay(TimeSpan.FromMilliseconds(1200), time);
             var r = await Rect();
             Log($"  LvAfSystem->{af} ({setAf}, reads 0x{nowAf:X})  zoom5={err3}  rect {Show(r)}"
                 + $"{(r is { } v && baseline is { } b && (v.W != b.W || v.H != b.H) ? "   <<< MOVED" : "")}");
             await camera.SetEvfZoomAsync(1);
-            await Task.Delay(600);
+            await Task.Delay(TimeSpan.FromMilliseconds(600), time);
         }
 
         // 3: with the gate open, which factors are real? The first sweep ran in the blocking AF mode
         // and so proved nothing about the factors themselves.
         Log("\n--- zoom factors, LvAfSystem=1 (gate open) ---");
         await camera.SetRawPropertyAsync(LvAfSystem, 1);
-        await Task.Delay(900);
+        await Task.Delay(TimeSpan.FromMilliseconds(900), time);
         foreach (uint z in new uint[] { 1, 2, 3, 4, 5, 6, 8, 10, 15 })
         {
             var err4 = await camera.SetEvfZoomAsync(z);
-            await Task.Delay(1100);
+            await Task.Delay(TimeSpan.FromMilliseconds(1100), time);
             var r = await Rect();
             var factor = r is { } v && v.W > 0 ? $"{5472.0 / v.W:F2}x" : "?";
             Log($"  zoom {z,-3} = {err4,-10} rect {Show(r),-24} => {factor}");
@@ -1865,11 +1870,11 @@ try
         // whether a coordinate landed where it was asked to.
         Log("\n--- pan at zoom 5 (rect origin is the instrument) ---");
         await camera.SetEvfZoomAsync(5);
-        await Task.Delay(1100);
+        await Task.Delay(TimeSpan.FromMilliseconds(1100), time);
         foreach (var (x, y) in new (uint, uint)[] { (0, 0), (1000, 500), (2184, 1456), (4368, 2912), (9999, 9999) })
         {
             var errp = await camera.SetEvfZoomPositionAsync(x, y);
-            await Task.Delay(900);
+            await Task.Delay(TimeSpan.FromMilliseconds(900), time);
             var r = await Rect();
             var landed = r is { } v && v.X == x && v.Y == y ? "exact"
                 : r is { } v2 ? $"clamped to ({v2.X},{v2.Y})" : "no frame";
@@ -1910,7 +1915,7 @@ try
 
         Log("\n--- live view ---");
         Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
-        await Task.Delay(1500);
+        await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
 
         // A frame is only evidence if it has real bytes in it — a body that has stopped streaming
         // answers OK forever with a zero-length payload.
@@ -1927,7 +1932,7 @@ try
                     if (got is 0) Log($"  {tag}: {jpeg.Length:N0} bytes -> {Path.GetFileName(path)}");
                     got++;
                 }
-                else await Task.Delay(120);
+                else await Task.Delay(TimeSpan.FromMilliseconds(120), time);
             }
             if (got is 0) Log($"  {tag}: NO FRAME — nothing below this line means anything");
             return got;
@@ -1966,7 +1971,7 @@ try
         foreach (var af in new[] { CanonEvfAfSystem.LiveFace, CanonEvfAfSystem.Live })
         {
             Log($"\n  SetEvfAfSystem({af}) = {await camera.SetEvfAfSystemAsync(af)}");
-            await Task.Delay(900);
+            await Task.Delay(TimeSpan.FromMilliseconds(900), time);
             await camera.DrainEventsAsync();
             var (_, afNow) = await camera.GetEvfAfSystemAsync();
             Log($"    reads back: {afNow}{(afNow == af ? "" : "  <<< DID NOT TAKE")}");
@@ -1993,25 +1998,25 @@ try
 
             await Frames($"af_{af}_zoom5", want: 1);
             await camera.SetEvfZoomAsync(CanonEvfZoom.Fit, verify: false);
-            await Task.Delay(700);
+            await Task.Delay(TimeSpan.FromMilliseconds(700), time);
         }
 
         // Pan, with the gate open. The rect origin says where the crop actually landed; the camera
         // clamps silently to keep the crop on the sensor.
         Log("\n--- pan at 5x ---");
         await camera.SetEvfAfSystemAsync(CanonEvfAfSystem.Live);
-        await Task.Delay(700);
+        await Task.Delay(TimeSpan.FromMilliseconds(700), time);
         Log($"  zoom X5 = {await camera.SetEvfZoomAsync(CanonEvfZoom.X5)}");
         foreach (var (x, y) in new (uint, uint)[] { (0, 0), (2184, 1456), (4368, 2912) })
         {
             Log($"  SetEvfZoomPosition({x},{y}) = {await camera.SetEvfZoomPositionAsync(x, y)}");
-            await Task.Delay(900);
+            await Task.Delay(TimeSpan.FromMilliseconds(900), time);
             Log($"    landed: {await camera.GetEvfZoomRectAsync()}");
             await Frames($"pan_{x}x{y}", want: 1);
         }
 
         Log($"\n  back to 1x = {await camera.SetEvfZoomAsync(CanonEvfZoom.Fit)}");
-        await Task.Delay(1000);
+        await Task.Delay(TimeSpan.FromMilliseconds(1000), time);
         await Frames("zoom1_again", want: 1);
 
         Log("\n--- live-view autofocus (0x9154) ---");
@@ -2021,7 +2026,7 @@ try
         Log($"  AutoFocusLiveView = {await camera.AutoFocusLiveViewAsync()}  (+{(clock.Elapsed - afStart).TotalMilliseconds:F0} ms)");
         // AF returns on acceptance, not on focus — the outcome is on the event stream, and the frames
         // are the visual record of whether the image actually snapped into focus.
-        for (int i = 0; i < 6; i++) { await Task.Delay(500); await camera.DrainEventsAsync(); }
+        for (int i = 0; i < 6; i++) { await Task.Delay(TimeSpan.FromMilliseconds(500), time); await camera.DrainEventsAsync(); }
         await Frames("after_af", want: 2);
         Log($"  AfCancel = {await camera.CancelAutoFocusAsync()}");
 
@@ -2068,7 +2073,7 @@ try
         {
             var (fe, jpeg) = await camera.GetLiveViewFrameAsync();
             if (fe is EdsError.OK && jpeg is [0xFF, 0xD8, ..]) real++;
-            await Task.Delay(25);
+            await Task.Delay(TimeSpan.FromMilliseconds(25), time);
         }
         Log($"  live-view frames with real JPEG data: {real}");
         Log($"  StopLiveView = {await camera.StopLiveViewAsync()}");
@@ -2265,7 +2270,7 @@ Task<EdsError> BulbEnd() => Step("0x9126 BulbEnd", () => camera!.BulbEndAsync())
 
 async Task<EdsError> Step(string label, Func<Task<EdsError>> op)
 {
-    var sw = Stopwatch.StartNew();
+    var sw = ClockWatch.StartNew(time);
     var e = await op();
     sw.Stop();
     // The timing is the tell: a discarded release comes back in ~20 ms, a real release sequence
@@ -2277,21 +2282,21 @@ async Task<EdsError> Step(string label, Func<Task<EdsError>> op)
 async Task Wait(double seconds, string? label = null)
 {
     if (label is not null) Log($"  ... {label}, {seconds:0.#}s");
-    await Task.Delay(TimeSpan.FromSeconds(seconds));
+    await Task.Delay(TimeSpan.FromSeconds(seconds), time);
 }
 
 // Waits out the window, then downloads whatever arrived. Returns the largest file, because a
 // sequence that fires twice is exactly the thing worth noticing.
 async Task<(bool Delivered, long Bytes)> CollectAsync(string id, TimeSpan window)
 {
-    var deadline = Stopwatch.StartNew();
+    var deadline = ClockWatch.StartNew(time);
     while (deadline.Elapsed < window)
     {
         if (!objects.IsEmpty) break;
-        await Task.Delay(100);
+        await Task.Delay(TimeSpan.FromMilliseconds(100), time);
     }
     // Something arrived — give a second frame a chance to show up before moving on.
-    await Task.Delay(1500);
+    await Task.Delay(TimeSpan.FromMilliseconds(1500), time);
 
     (TimeSpan At, uint Handle)[] found;
     found = [.. objects];

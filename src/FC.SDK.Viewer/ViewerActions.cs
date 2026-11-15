@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using FC.SDK.Canon;
 using FC.SDK.Raw;
 using Microsoft.Extensions.Logging;
@@ -11,8 +10,13 @@ namespace FC.SDK.Viewer;
 /// half-duplex protocol is never asked to do two things at once, and every step is logged — the log
 /// file is the deliverable when a body misbehaves.
 /// </summary>
-public sealed partial class ViewerActions(ViewerState state, ILoggerFactory loggerFactory) : IAsyncDisposable
+public sealed partial class ViewerActions(
+    ViewerState state, ILoggerFactory loggerFactory, TimeProvider? timeProvider = null) : IAsyncDisposable
 {
+    // One clock for the viewer: handed to every camera it connects, and used for its own waits,
+    // deadlines, timings and file names. The system clock unless a test passes another.
+    private readonly TimeProvider _time = timeProvider ?? TimeProvider.System;
+
     private static readonly TimeSpan LiveViewFrameInterval = TimeSpan.FromMilliseconds(100);
 
     /// <summary>
@@ -175,7 +179,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
         var wifiHosts = new List<(string Host, string Label)>();
         try
         {
-            foreach (var (host, description) in await WifiDiscovery.FindCanonAsync(TimeSpan.FromSeconds(3), _logger, ct))
+            foreach (var (host, description) in await WifiDiscovery.FindCanonAsync(TimeSpan.FromSeconds(3), _logger, _time, ct))
                 wifiHosts.Add((host, $"{host} ({description})"));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -210,7 +214,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
         await DisconnectCoreAsync();
 
         var device = state.Devices[state.SelectedDeviceIndex];
-        var factory = new CanonCameraFactory(loggerFactory.CreateLogger<CanonCamera>());
+        var factory = new CanonCameraFactory(loggerFactory.CreateLogger<CanonCamera>(), _time);
 
         var camera = device switch
         {
@@ -306,7 +310,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
             // answering.
             if (wasLive && state.SessionOpen)
             {
-                using var bounded = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                using var bounded = new CancellationTokenSource(TimeSpan.FromSeconds(5), _time);
                 var err = await camera.StopLiveViewAsync(bounded.Token);
                 _logger.LogInformation("StopLiveView at teardown = {Error}", err);
             }
@@ -460,8 +464,8 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
     private async Task ReadAllCoreAsync(CanonCamera camera, CancellationToken ct)
     {
         // Bounded as a whole, not just per property: see PropertySweepBudget.
-        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        budget.CancelAfter(PropertySweepBudget);
+        using var sweep = new CancellationTokenSource(PropertySweepBudget, _time);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct, sweep.Token);
         ct = budget.Token;
 
         // One drain up front means the per-property reads mostly hit the cache instead of each
@@ -644,11 +648,11 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
         var snapshot = await camera.DumpPropertiesAsync(ct);
         state.RawProperties = snapshot;
 
-        var path = Path.Combine(state.OutputDirectory, $"properties-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+        var path = Path.Combine(state.OutputDirectory, $"properties-{_time.GetLocalNow():yyyyMMdd-HHmmss}.txt");
         Directory.CreateDirectory(state.OutputDirectory);
 
         await using var writer = new StreamWriter(path);
-        await writer.WriteLineAsync($"# FC.SDK property dump — {DateTime.Now:O}");
+        await writer.WriteLineAsync($"# FC.SDK property dump — {_time.GetLocalNow():O}");
         await writer.WriteLineAsync($"# Model: {camera.Model}  Serial: {camera.SerialNumber}  Battery: {camera.BatteryLevelPercent}%");
         await writer.WriteLineAsync($"# Supported PTP operations ({camera.SupportedOperations.Count}): " +
             string.Join(" ", camera.SupportedOperations.Order().Select(o => $"0x{o:X4}")));
@@ -749,7 +753,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
     /// </remarks>
     private void BeginExposure(string label, TimeSpan? deadline)
     {
-        state.Exposure = new ExposureProgress(label, DateTime.UtcNow, deadline);
+        state.Exposure = new ExposureProgress(label, _time, _time.GetTimestamp(), deadline);
         state.Invalidate();
 
         var watch = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
@@ -773,7 +777,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
                     }
 
                     state.Invalidate();
-                    await Task.Delay(ExposureTick, watch.Token);
+                    await Task.Delay(ExposureTick, _time, watch.Token);
                 }
             }
             catch (OperationCanceledException) { /* superseded, or shutting down */ }
@@ -891,7 +895,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
         if (state.Camera is not { } camera) return;
 
         Directory.CreateDirectory(state.OutputDirectory);
-        var path = Path.Combine(state.OutputDirectory, $"device-report-{DateTime.Now:yyyyMMdd-HHmmss}.md");
+        var path = Path.Combine(state.OutputDirectory, $"device-report-{_time.GetLocalNow():yyyyMMdd-HHmmss}.md");
         await File.WriteAllTextAsync(path, await camera.CreateDeviceReportAsync(ct), ct);
 
         _logger.LogInformation("Device report written to {Path}", path);
@@ -975,7 +979,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
 
         Directory.CreateDirectory(state.OutputDirectory);
         var extension = Path.GetExtension(fileName) is { Length: > 0 } ext ? ext : ".cr2";
-        var path = Path.Combine(state.OutputDirectory, $"capture-{DateTime.Now:yyyyMMdd-HHmmss}{extension}");
+        var path = Path.Combine(state.OutputDirectory, $"capture-{_time.GetLocalNow():yyyyMMdd-HHmmss}{extension}");
 
         EdsError downloadErr;
         await using (var fs = File.Create(path))
@@ -1189,7 +1193,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
                 break;
             }
 
-            await Task.Delay(LiveViewFrameInterval, ct).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            await Task.Delay(LiveViewFrameInterval, _time, ct).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }
     }
 
@@ -1205,7 +1209,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
         }
 
         Directory.CreateDirectory(state.OutputDirectory);
-        var path = Path.Combine(state.OutputDirectory, $"liveview-{DateTime.Now:yyyyMMdd-HHmmss}.jpg");
+        var path = Path.Combine(state.OutputDirectory, $"liveview-{_time.GetLocalNow():yyyyMMdd-HHmmss}.jpg");
         await File.WriteAllBytesAsync(path, jpeg, ct);
         _logger.LogInformation("Live view frame saved: {Path} ({Bytes:N0} bytes)", path, jpeg.Length);
         state.StatusMessage = $"Saved {Path.GetFileName(path)}";
@@ -1244,7 +1248,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
     {
         _ = Task.Run(() =>
         {
-            var started = Stopwatch.GetTimestamp();
+            var started = _time.GetTimestamp();
             try
             {
                 // One stage per format today; the loop allows a format to yield a quick preview and then a
@@ -1267,7 +1271,7 @@ public sealed partial class ViewerActions(ViewerState state, ILoggerFactory logg
 
                     _logger.LogInformation("Decoded {Source} for preview: {W}×{H} in {Ms:F0} ms",
                         source, raster.Width, raster.Height,
-                        Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                        _time.GetElapsedTime(started).TotalMilliseconds);
                 }
             }
             catch (Exception ex)

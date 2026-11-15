@@ -881,8 +881,12 @@ the caller's token (`CancelAfter` is always the system clock), and elapsed time 
 `Task.Delay` that names no clock. A test passes a `FakeTimeProvider` and moves it with
 `FakeClock.Pump`, which stops at a budget of fake time rather than spinning; it is only for work whose
 awaits are all either complete or waits on that clock (a scripted transport, a fake camera). The
-script tests went from 12 s to about 0.1 s that way. **Not covered: the hosts** (viewer, diagnostics,
-sample), which run against a body in real time, and the socket and pump-stop tests, whose I/O is real.
+script tests went from 12 s to about 0.1 s that way. **The hosts are on it too** (viewer, diagnostics,
+sample): each takes one clock, hands it to `CanonCameraFactory` (the sample reads it back off
+`camera.TimeProvider`), and uses it for its own pauses, deadlines, timings and file-name dates, with
+`ClockWatch` (`src/Shared`, compiled into all three) standing in for `Stopwatch`. They still run on the
+system clock, against a real body; the point is one clock per run, and `NoWallClockTests` covers them.
+Not on a fake clock: the socket and pump-stop tests, whose I/O is real.
 
 **`src/FC.SDK.Sample` is the fastest way to exercise a body** — no GUI, one command, and it writes a
 `CanonDeviceReport` every run:
