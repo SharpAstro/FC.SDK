@@ -74,12 +74,30 @@ var tvOpt = new Option<EdsTv>("--tv") { Description = "Shutter speed.", DefaultV
 var roundsOpt = new Option<int>("--rounds") { Description = "How many times to run each pan.", DefaultValueFactory = _ => 3 };
 var isoOpt = new Option<EdsISOSpeed>("--iso") { Description = "ISO.", DefaultValueFactory = _ => EdsISOSpeed.ISO_400 , HelpName = "iso" };
 
-var root = new RootCommand("Canon hardware diagnostics — judged on delivered bytes, not response codes.");
-foreach (var o in new Option[] { hostOpt, releaseOpt }) root.Options.Add(o);
+// Which link to the body. WPD is the default and what every experiment was first measured over;
+// `wifi:<host>` runs the same experiment over PTP/IP, so a finding made on one link can be re-asked
+// on the other without a scratch probe (issue #29).
+var transportOpt = new Option<string>("--transport")
+{
+    Description = "wpd (the default: the first camera on USB), or wifi:<host> for PTP/IP, e.g. wifi:192.168.1.171.",
+    DefaultValueFactory = _ => "wpd",
+    HelpName = "wpd|wifi:<host>",
+};
+transportOpt.Validators.Add(result =>
+{
+    // A value this does not know is an error, never a quiet fall back to WPD: a run meant for one
+    // body must not fire on another that happens to be plugged in.
+    var value = result.GetValueOrDefault<string>();
+    if (value is not "wpd" && !(value.StartsWith("wifi:", StringComparison.Ordinal) && value.Length > "wifi:".Length))
+        result.AddError($"--transport takes wpd or wifi:<host>, not '{value}'.");
+});
 
-// Subcommands inherit the two common options via Recursive, so `--host` works wherever it makes
+var root = new RootCommand("Canon hardware diagnostics — judged on delivered bytes, not response codes.");
+foreach (var o in new Option[] { hostOpt, releaseOpt, transportOpt }) root.Options.Add(o);
+
+// Subcommands inherit the common options via Recursive, so `--host` works wherever it makes
 // sense without being declared five times.
-hostOpt.Recursive = releaseOpt.Recursive = true;
+hostOpt.Recursive = releaseOpt.Recursive = transportOpt.Recursive = true;
 
 (string Name, string Description, Option[] Options)[] modes =
 [
@@ -175,7 +193,15 @@ Directory.CreateDirectory(outDir);
 void Log(string line) => Console.WriteLine($"[{clock.Elapsed:mm\\:ss\\.f}] {line}");
 
 CanonCamera? camera = null;
-if (OperatingSystem.IsWindows())
+if (parse.GetValue(transportOpt) is { } link && link.StartsWith("wifi:", StringComparison.Ordinal))
+{
+    var wifiHost = link["wifi:".Length..];
+    var (guid, guidPath, created) = PairedClientGuid();
+    Log($"PTP/IP: {wifiHost}, client GUID from {guidPath}{(created ? " (new: the camera will ask to pair, press OK on it)" : "")}");
+    // The viewer's name as well as its GUID: one pairing on the body then serves both programs.
+    camera = new CanonCameraFactory(Microsoft.Extensions.Logging.Abstractions.NullLogger<CanonCamera>.Instance).ConnectWifi(wifiHost, "FC.SDK Viewer", guid);
+}
+else if (OperatingSystem.IsWindows())
 {
     foreach (var (deviceId, friendlyName) in CanonCamera.EnumerateWpdCameras())
     {
@@ -202,6 +228,14 @@ catch (COMException ex)
     Log(ex.HResult == unchecked((int)0x800700AA)
         ? "OpenSession: the camera is held by another application (ERROR_BUSY). Disconnect it there first."
         : $"OpenSession threw {ex.GetType().Name}: {ex.Message}");
+    await camera.DisposeAsync();
+    return 1;
+}
+catch (Exception ex) when (ex is IOException or System.Net.Sockets.SocketException)
+{
+    // PTP/IP: no route, nothing listening, a pairing nobody confirmed, or a GUID the body refuses.
+    // The transport's own message says which and what to do.
+    Log($"OpenSession: {ex.Message}");
     await camera.DisposeAsync();
     return 1;
 }
@@ -2282,4 +2316,18 @@ async Task<(bool Delivered, long Bytes)> CollectAsync(string id, TimeSpan window
     return (true, largest);
 }
 
+// The PTP/IP identity the viewer pairs under, shared with it: a Canon body refuses any client GUID
+// other than the one it was paired with, so a GUID of this tool's own would mean pairing the body
+// again every time one program followed the other.
+static (Guid Guid, string Path, bool Created) PairedClientGuid()
+{
+    var path = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FC.SDK", "viewer-ptpip-client.guid");
+    if (File.Exists(path) && Guid.TryParse(File.ReadAllText(path).Trim(), out var stored))
+        return (stored, path, false);
 
+    var guid = Guid.NewGuid();
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    File.WriteAllText(path, guid.ToString());
+    return (guid, path, true);
+}

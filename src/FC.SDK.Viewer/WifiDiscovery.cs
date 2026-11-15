@@ -26,8 +26,12 @@ internal static class WifiDiscovery
 
         var request = Encoding.ASCII.GetBytes(
             "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n");
-        for (int i = 0; i < 3; i++)
-            await socket.SendAsync(request, SsdpGroup, ct);
+        // Three searches spread over the window, not back to back: sent together, one lost moment
+        // on the network loses all three, and a scan then misses a camera that is there (3 scans
+        // in 18 on an EOS R6 and an EOS 6D, issue #29). The first is awaited, so a machine with no
+        // network still fails here; the other two go out while replies are being read.
+        await socket.SendAsync(request, SsdpGroup, ct);
+        var repeats = RepeatSearchAsync(socket, request, listen / Searches, logger, deadline.Token);
 
         try
         {
@@ -44,7 +48,31 @@ internal static class WifiDiscovery
         }
         catch (OperationCanceledException) { }
 
+        await repeats;
         return found.Select(kv => (kv.Key, kv.Value)).ToList();
+    }
+
+    /// <summary>How many M-SEARCH one scan sends, the first at once and the rest evenly through the window.</summary>
+    private const int Searches = 3;
+
+    /// <summary>Sends the searches after the first, <paramref name="spacing"/> apart, until the window closes.</summary>
+    private static async Task RepeatSearchAsync(
+        UdpClient socket, byte[] request, TimeSpan spacing, ILogger logger, CancellationToken window)
+    {
+        try
+        {
+            for (int i = 1; i < Searches; i++)
+            {
+                await Task.Delay(spacing, window);
+                await socket.SendAsync(request, SsdpGroup, window);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (SocketException ex)
+        {
+            // The first search went out, so the scan still stands; only a repeat was lost.
+            logger.LogDebug("SSDP: a repeated search was not sent: {Message}", ex.Message);
+        }
     }
 
     private static string? Header(string message, string name)
