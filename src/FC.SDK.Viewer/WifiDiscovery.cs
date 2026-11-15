@@ -14,11 +14,12 @@ internal static class WifiDiscovery
 {
     private static readonly IPEndPoint SsdpGroup = new(IPAddress.Parse("239.255.255.250"), 1900);
 
-    public static async Task<IReadOnlyList<(string Host, string Description)>> FindCanonAsync(TimeSpan listen, ILogger logger, CancellationToken ct)
+    public static async Task<IReadOnlyList<(string Host, string Description)>> FindCanonAsync(
+        TimeSpan listen, ILogger logger, TimeProvider time, CancellationToken ct)
     {
         var found = new Dictionary<string, string>();
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(listen);
+        using var window = new CancellationTokenSource(listen, time);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, window.Token);
 
         // Replies to the M-SEARCH come back unicast to this socket's ephemeral port.
         using var socket = new UdpClient(AddressFamily.InterNetwork);
@@ -31,7 +32,7 @@ internal static class WifiDiscovery
         // in 18 on an EOS R6 and an EOS 6D, issue #29). The first is awaited, so a machine with no
         // network still fails here; the other two go out while replies are being read.
         await socket.SendAsync(request, SsdpGroup, ct);
-        var repeats = RepeatSearchAsync(socket, request, listen / Searches, logger, deadline.Token);
+        var repeats = RepeatSearchAsync(socket, request, listen / Searches, logger, time, deadline.Token);
 
         try
         {
@@ -57,13 +58,13 @@ internal static class WifiDiscovery
 
     /// <summary>Sends the searches after the first, <paramref name="spacing"/> apart, until the window closes.</summary>
     private static async Task RepeatSearchAsync(
-        UdpClient socket, byte[] request, TimeSpan spacing, ILogger logger, CancellationToken window)
+        UdpClient socket, byte[] request, TimeSpan spacing, ILogger logger, TimeProvider time, CancellationToken window)
     {
         try
         {
             for (int i = 1; i < Searches; i++)
             {
-                await Task.Delay(spacing, window);
+                await Task.Delay(spacing, time, window);
                 await socket.SendAsync(request, SsdpGroup, window);
             }
         }

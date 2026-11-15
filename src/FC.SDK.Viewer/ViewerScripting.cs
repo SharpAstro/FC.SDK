@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using FC.SDK.Canon;
 using FC.SDK.Scripting;
 using Microsoft.Extensions.Logging;
@@ -102,7 +101,7 @@ public sealed partial class ViewerActions
             try
             {
                 var host = new ViewerScriptHost(this, session);
-                result = await new ScriptRunner(new ViewerScriptCamera(this, camera), host).RunAsync(script, cancel.Token);
+                result = await new ScriptRunner(new ViewerScriptCamera(this, camera), host, _time).RunAsync(script, cancel.Token);
             }
             catch (Exception ex)
             {
@@ -164,7 +163,7 @@ public sealed partial class ViewerActions
         {
             Directory.CreateDirectory(state.OutputDirectory);
             var path = Path.Combine(state.OutputDirectory,
-                $"script-{Path.GetFileNameWithoutExtension(name)}-{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+                $"script-{Path.GetFileNameWithoutExtension(name)}-{_time.GetLocalNow():yyyyMMdd_HHmmss}.txt");
             var lines = new List<string>
             {
                 $"{name} on {state.Model ?? "an unnamed camera"} ({state.ConnectedTo?.ToString() ?? "no transport"})",
@@ -264,7 +263,7 @@ public sealed partial class ViewerActions
         {
             // The viewer's loop only counts a frame it decoded, so these are real frames.
             var before = State.LiveViewFrameCount;
-            await Task.Delay(window, ct);
+            await Task.Delay(window, actions._time, ct);
             var frames = Math.Max(0, State.LiveViewFrameCount - before);
             return new ScriptFrameCount(frames, frames > 0 ? State.LiveViewFrameBytes : 0);
         }
@@ -282,13 +281,14 @@ public sealed partial class ViewerActions
         {
             if (actions._scriptObjects is not { } objects) return [];
 
-            var clock = Stopwatch.StartNew();
-            while (objects.IsEmpty && clock.Elapsed < window)
-                await Task.Delay(100, ct);
+            var time = actions._time;
+            var started = time.GetTimestamp();
+            while (objects.IsEmpty && time.GetElapsedTime(started) < window)
+                await Task.Delay(TimeSpan.FromMilliseconds(100), time, ct);
             if (objects.IsEmpty) return [];
 
             // A RAW+JPEG shot announces two objects, the second a moment after the first.
-            await Task.Delay(1500, ct);
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), time, ct);
 
             var handles = new List<uint>();
             while (objects.TryDequeue(out var handle)) handles.Add(handle);
@@ -297,10 +297,10 @@ public sealed partial class ViewerActions
             {
                 // The viewer's own download fetches and releases each frame. Let it finish, so the
                 // script's next step meets a body that is not holding one.
-                var settle = Stopwatch.StartNew();
+                var settling = time.GetTimestamp();
                 while ((State.IsBusy || Volatile.Read(ref State.QueuedOperations) > 0)
-                       && settle.Elapsed < TimeSpan.FromSeconds(60))
-                    await Task.Delay(100, ct);
+                       && time.GetElapsedTime(settling) < TimeSpan.FromSeconds(60))
+                    await Task.Delay(TimeSpan.FromMilliseconds(100), time, ct);
             }
             else
             {

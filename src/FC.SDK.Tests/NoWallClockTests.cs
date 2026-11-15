@@ -11,7 +11,8 @@ namespace FC.SDK.Tests;
 /// out or is not written: a pan's settle wait was once pinned by a test that timed three real
 /// seconds. This reads the sources and fails on the calls that reach the wall clock directly, so
 /// the next one is caught when it is written. The hosts (the viewer, the diagnostics, the sample)
-/// are not covered: they run against a body, in real time.
+/// are covered too: they run against a body in real time, but on the camera's clock, so that one
+/// clock times a run from end to end.
 /// </remarks>
 public class NoWallClockTests
 {
@@ -30,6 +31,10 @@ public class NoWallClockTests
     [Theory]
     [InlineData("FC.SDK")]
     [InlineData("FC.SDK.Scripting")]
+    [InlineData("FC.SDK.Viewer")]
+    [InlineData("FC.SDK.Diagnostics")]
+    [InlineData("FC.SDK.Sample")]
+    [InlineData("Shared")]
     public void Nothing_reads_or_waits_on_the_system_clock(string project)
     {
         var offences = new List<string>();
@@ -64,7 +69,8 @@ public class NoWallClockTests
 
     /// <summary>The two names a time provider goes by in these sources: a field and a parameter.</summary>
     private static bool NamesAClock(string line) =>
-        line.Contains("_time", StringComparison.Ordinal) || line.Contains(", time", StringComparison.Ordinal);
+        line.Contains("_time", StringComparison.Ordinal) || line.Contains(", time", StringComparison.Ordinal)
+        || line.Contains("(time", StringComparison.Ordinal);
 
     private static IEnumerable<string> SourcesOf(string project)
     {

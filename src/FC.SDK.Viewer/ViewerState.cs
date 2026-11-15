@@ -150,7 +150,8 @@ public sealed class ViewerState
 /// an image is still coming.
 /// </summary>
 /// <param name="Label">Shown on the capture button while this is outstanding, e.g. "Exposing".</param>
-/// <param name="StartedUtc">When the body accepted the release.</param>
+/// <param name="Clock">The clock the exposure is timed on: the viewer's, which is the camera's.</param>
+/// <param name="StartedAt">When the body accepted the release, as a timestamp of <paramref name="Clock"/>.</param>
 /// <param name="Deadline">
 /// How long to wait for <c>ObjectAdded</c> before giving up, or null to wait indefinitely. Null is
 /// for bulb, where the operator decides the length and no deadline we could pick would be right.
@@ -158,9 +159,9 @@ public sealed class ViewerState
 /// release it never performs, and without a deadline the button would sit there forever claiming an
 /// exposure that ended before it started.
 /// </param>
-public sealed record ExposureProgress(string Label, DateTime StartedUtc, TimeSpan? Deadline)
+public sealed record ExposureProgress(string Label, TimeProvider Clock, long StartedAt, TimeSpan? Deadline)
 {
-    public TimeSpan Elapsed => DateTime.UtcNow - StartedUtc;
+    public TimeSpan Elapsed => Clock.GetElapsedTime(StartedAt);
 
     public bool IsOverdue => Deadline is { } deadline && Elapsed > deadline;
 }

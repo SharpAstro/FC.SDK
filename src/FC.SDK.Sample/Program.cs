@@ -13,6 +13,7 @@
 using System.Diagnostics;
 using FC.SDK;
 using FC.SDK.Canon;
+using FC.SDK.Hosts;
 
 bool useIoctl = args.Contains("--ioctl");
 bool useAuto = args.Contains("--auto");
@@ -35,6 +36,11 @@ if (OperatingSystem.IsWindows())
     }
 }
 if (camera is null) { Console.WriteLine("No camera."); return 1; }
+
+// Every pause, deadline and timing below runs on the camera's own clock (the system clock here),
+// which is the one its waits run on. A host that takes its time from the camera needs no clock of
+// its own, and a test that hands the factory a fake one moves the host with it.
+var time = camera.TimeProvider;
 
 // Printed for every run, not just --auto: which transport carried a result is part of the result.
 Console.WriteLine($"Transport: {camera.TransportName}");
@@ -86,7 +92,7 @@ try
 
     // Written unconditionally: it is the one artefact worth attaching to a bug report, and asking a
     // reporter to remember a flag is asking for a second round trip.
-    var reportPath = Path.Combine(Environment.CurrentDirectory, $"device-report_{DateTime.Now:yyyyMMdd_HHmmss}.md");
+    var reportPath = Path.Combine(Environment.CurrentDirectory, $"device-report_{time.GetLocalNow():yyyyMMdd_HHmmss}.md");
     await File.WriteAllTextAsync(reportPath, await camera.CreateDeviceReportAsync());
     Console.WriteLine($"Device report written to {reportPath}");
 
@@ -114,6 +120,7 @@ return exitCode;
 /// </remarks>
 static async Task<bool> RunLiveViewAsync(CanonCamera camera, int frameCount)
 {
+    var time = camera.TimeProvider;
     Console.WriteLine($"\nStarting live view ({frameCount} frames)...");
     var err = await camera.StartLiveViewAsync();
     Console.WriteLine($"StartLiveView: {err}");
@@ -125,7 +132,7 @@ static async Task<bool> RunLiveViewAsync(CanonCamera camera, int frameCount)
     // Counts frames that carried image data, not poll cycles, and paces only enough to stay off a
     // busy loop. Sleeping a fixed interval per frame would measure the sleep: at 50 ms it puts both
     // transports at the same ~9 fps no matter how fast either one actually is.
-    var deadline = Stopwatch.StartNew();
+    var deadline = ClockWatch.StartNew(time);
     var timeout = TimeSpan.FromSeconds(30);
 
     try
@@ -152,7 +159,7 @@ static async Task<bool> RunLiveViewAsync(CanonCamera camera, int frameCount)
                 failed++;
             }
 
-            await Task.Delay(5);
+            await Task.Delay(TimeSpan.FromMilliseconds(5), time);
         }
     }
     finally
@@ -170,7 +177,7 @@ static async Task<bool> RunLiveViewAsync(CanonCamera camera, int frameCount)
         return false;
     }
 
-    var path = Path.Combine(Environment.CurrentDirectory, $"liveview_{DateTime.Now:yyyyMMdd_HHmmss}.jpg");
+    var path = Path.Combine(Environment.CurrentDirectory, $"liveview_{time.GetLocalNow():yyyyMMdd_HHmmss}.jpg");
     await File.WriteAllBytesAsync(path, lastFrame);
     Console.WriteLine($"Last frame written to {path}");
     return true;
@@ -178,6 +185,7 @@ static async Task<bool> RunLiveViewAsync(CanonCamera camera, int frameCount)
 
 static async Task<bool> CaptureAsync(CanonCamera camera)
 {
+    var time = camera.TimeProvider;
     var err = await camera.SetSaveToAsync(EdsSaveTo.Host);
     Console.WriteLine($"\nSaveTo=Host: {err}");
 
@@ -195,7 +203,7 @@ static async Task<bool> CaptureAsync(CanonCamera camera)
     if (err is not EdsError.OK) return false;
 
     Console.WriteLine("Waiting for image...");
-    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10), time);
     try
     {
         var handle = await objectTcs.Task.WaitAsync(cts.Token);
@@ -211,7 +219,7 @@ static async Task<bool> CaptureAsync(CanonCamera camera)
             Console.WriteLine($"  Thumbnail: {thumbData.Length:N0} bytes JPEG");
 
         // Download the full image
-        var outPath = Path.Combine(Environment.CurrentDirectory, $"capture_{DateTime.Now:yyyyMMdd_HHmmss}{extension}");
+        var outPath = Path.Combine(Environment.CurrentDirectory, $"capture_{time.GetLocalNow():yyyyMMdd_HHmmss}{extension}");
         Console.WriteLine($"Downloading to {outPath}...");
         await using var fs = File.Create(outPath);
         err = await camera.DownloadAsync(handle, fs);

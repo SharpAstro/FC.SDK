@@ -42,14 +42,19 @@ public sealed class ViewerLog : IDisposable
     /// <summary>Raised after each line is appended, so the UI can request a redraw.</summary>
     public event Action? LineAppended;
 
-    public ViewerLog(string directory)
+    // Stamps the lines and names the file. The viewer's clock, so a log reads on the same time as
+    // everything else the viewer writes.
+    private readonly TimeProvider _time;
+
+    public ViewerLog(string directory, TimeProvider? timeProvider = null)
     {
+        _time = timeProvider ?? TimeProvider.System;
         try
         {
             Directory.CreateDirectory(directory);
-            FilePath = Path.Combine(directory, $"fc-viewer-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+            FilePath = Path.Combine(directory, $"fc-viewer-{_time.GetLocalNow():yyyyMMdd-HHmmss}.log");
             _file = new StreamWriter(FilePath, append: false, Encoding.UTF8) { AutoFlush = true };
-            _file.WriteLine($"# FC.SDK viewer log — {DateTime.Now:O}");
+            _file.WriteLine($"# FC.SDK viewer log — {_time.GetLocalNow():O}");
             _file.WriteLine($"# OS {Environment.OSVersion} {(Environment.Is64BitProcess ? "x64/arm64" : "x86")}, .NET {Environment.Version}");
         }
         catch (Exception ex)
@@ -62,7 +67,7 @@ public sealed class ViewerLog : IDisposable
 
     public void Append(ViewerLogLevel level, string category, string message)
     {
-        var line = new ViewerLogLine(DateTime.Now, level, category, message);
+        var line = new ViewerLogLine(_time.GetLocalNow().DateTime, level, category, message);
 
         _lines.Enqueue(line);
         if (Interlocked.Increment(ref _count) > MaxLines && _lines.TryDequeue(out _))

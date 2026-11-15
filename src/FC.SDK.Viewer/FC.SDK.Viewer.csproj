@@ -72,4 +72,9 @@
     <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.5" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- ClockWatch: a stopwatch on a TimeProvider, shared by the three hosts. -->
+    <Compile Include="..\Shared\ClockWatch.cs" Link="Shared\ClockWatch.cs" />
+  </ItemGroup>
+
 </Project>

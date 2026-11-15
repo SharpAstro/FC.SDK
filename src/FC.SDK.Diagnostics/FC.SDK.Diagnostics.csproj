@@ -24,4 +24,9 @@
     <PackageReference Include="System.CommandLine" Version="2.0.10" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- ClockWatch: a stopwatch on a TimeProvider, shared by the three hosts. -->
+    <Compile Include="..\Shared\ClockWatch.cs" Link="Shared\ClockWatch.cs" />
+  </ItemGroup>
+
 </Project>
