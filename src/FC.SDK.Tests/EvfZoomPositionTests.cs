@@ -1,7 +1,7 @@
-using System.Diagnostics;
 using FC.SDK.Canon;
 using FC.SDK.Transport;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Xunit;
 
@@ -14,6 +14,10 @@ namespace FC.SDK.Tests;
 /// <see cref="EvfFrameInfoTests"/> pins the settle rule; this pins that the call uses it. Wired back to
 /// the zoom rect (record 18), a 1× pan waits out the whole 3 s settle timeout, which is what an R6 and a
 /// 6D did over WPD raw ioctl before the fix (3021–3144 ms, twelve tries).
+/// <para>
+/// On a fake clock: the camera's settle wait runs on its <see cref="TimeProvider"/>, so the test
+/// measures how much of that clock the call used, and waits for nothing.
+/// </para>
 /// </remarks>
 public class EvfZoomPositionTests
 {
@@ -56,14 +60,16 @@ public class EvfZoomPositionTests
     public async Task A_one_times_pan_returns_once_the_magnifier_moves()
     {
         var transport = new LiveViewResponder(EvfFrameInfoTests.R61x(), EvfFrameInfoTests.R61xPannedTo1000());
-        await using var camera = new CanonCamera(transport, NullLogger<CanonCamera>.Instance);
+        var time = new FakeTimeProvider();
+        await using var camera = new CanonCamera(transport, NullLogger<CanonCamera>.Instance, time);
 
-        var clock = Stopwatch.StartNew();
-        var (error, landed) = await camera.SetEvfZoomPositionAsync(1000, 1000, ct: TestContext.Current.CancellationToken);
-        clock.Stop();
+        var pan = camera.SetEvfZoomPositionAsync(1000, 1000, ct: TestContext.Current.CancellationToken);
+        var waited = time.Pump(pan, step: TimeSpan.FromMilliseconds(50), budget: TimeSpan.FromSeconds(10));
 
+        pan.IsCompleted.ShouldBeTrue("the pan was still waiting after 10 s of its own clock");
+        var (error, landed) = await pan;
         error.ShouldBe(EdsError.OK);
-        clock.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(1));   // the settle timeout is 3 s
+        waited.ShouldBeLessThan(TimeSpan.FromSeconds(1));   // the settle timeout is 3 s
         landed.ShouldNotBeNull();
         (landed.Value.X, landed.Value.Y, landed.Value.Width).ShouldBe((0u, 0u, 5472u));   // still record 18: the whole sensor at 1×
     }

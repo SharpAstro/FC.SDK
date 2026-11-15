@@ -3,8 +3,11 @@ using FC.SDK.Protocol;
 
 namespace FC.SDK.Canon;
 
-internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
+internal sealed class CanonPtpSession(PtpSession ptp, TimeProvider? time = null) : IAsyncDisposable
 {
+    // The camera's clock, so a retry's pause can be moved by a test rather than waited out.
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
+
     private const uint SessionId = 1;
     private const uint RemoteModeStandard = 1;
     private const uint EventModeStandard = 1;
@@ -257,7 +260,7 @@ internal sealed class CanonPtpSession(PtpSession ptp) : IAsyncDisposable
                 // Draining pending events is what actually clears the busy state — the camera
                 // blocks property writes while its event queue has unread records.
                 await DrainEventsAsync(ct);
-                await Task.Delay(SetPropertyBusyDelay, ct);
+                await Task.Delay(SetPropertyBusyDelay, _time, ct);
             }
 
             var resp = await ptp.SendCommandWithDataAsync(PtpOperationCode.CanonSetPropValue, data, ct);

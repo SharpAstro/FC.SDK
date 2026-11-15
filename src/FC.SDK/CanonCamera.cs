@@ -8,13 +8,24 @@ using System.Runtime.Versioning;
 
 namespace FC.SDK;
 
-public sealed class CanonCameraFactory(ILogger<CanonCamera> logger)
+/// <param name="logger">Where the cameras this factory makes log.</param>
+/// <param name="timeProvider">
+/// The clock every wait and deadline of those cameras runs on: retries, settle waits, the event
+/// pump's interval, transport timeouts. Null is the system clock. A test passes a fake one and moves
+/// it, so nothing waits on the wall clock.
+/// </param>
+public sealed class CanonCameraFactory(ILogger<CanonCamera> logger, TimeProvider? timeProvider)
 {
+    /// <summary>A factory whose cameras run on the system clock.</summary>
+    public CanonCameraFactory(ILogger<CanonCamera> logger) : this(logger, null)
+    {
+    }
+
     public CanonCamera ConnectUsb(UsbDeviceInfo device) =>
-        new(new UsbPtpTransport(device), logger);
+        new(new UsbPtpTransport(device), logger, timeProvider);
 
     public CanonCamera ConnectUsb(ushort vendorId, ushort productId) =>
-        new(new UsbPtpTransport(vendorId, productId), logger);
+        new(new UsbPtpTransport(vendorId, productId), logger, timeProvider);
 
     /// <remarks>
     /// Connecting (<see cref="OpenSessionAsync"/> or <see cref="ConnectTransportAsync"/>) is bounded.
@@ -29,21 +40,21 @@ public sealed class CanonCameraFactory(ILogger<CanonCamera> logger)
     /// pass it on every connection; null draws a fresh one and forces a re-pair.
     /// </param>
     public CanonCamera ConnectWifi(string host, string? clientName = null, Guid? clientGuid = null) =>
-        new(new PtpIpTransport(host, clientName: clientName, clientGuid: clientGuid), logger);
+        new(new PtpIpTransport(host, clientName: clientName, clientGuid: clientGuid, timeProvider: timeProvider), logger, timeProvider);
 
     [SupportedOSPlatform("windows")]
     public CanonCamera ConnectWpd(string wpdDeviceId) =>
-        new(new WpdPtpTransport(wpdDeviceId), logger);
+        new(new WpdPtpTransport(wpdDeviceId, timeProvider), logger, timeProvider);
 
     /// <inheritdoc cref="CanonCamera.ConnectWpdIoctl(string)"/>
     [SupportedOSPlatform("windows")]
     public CanonCamera ConnectWpdIoctl(string wpdDeviceId) =>
-        new(new WpdIoctlPtpTransport(wpdDeviceId), logger);
+        new(new WpdIoctlPtpTransport(wpdDeviceId, timeProvider), logger, timeProvider);
 
     /// <inheritdoc cref="CanonCamera.ConnectWpdAutoAsync(string, CancellationToken)"/>
     [SupportedOSPlatform("windows")]
     public Task<CanonCamera> ConnectWpdAutoAsync(string wpdDeviceId, CancellationToken ct = default) =>
-        CanonCamera.ConnectWpdAutoCoreAsync(wpdDeviceId, logger, ct);
+        CanonCamera.ConnectWpdAutoCoreAsync(wpdDeviceId, logger, timeProvider, ct);
 }
 
 public sealed class CanonCamera : IAsyncDisposable
@@ -54,6 +65,7 @@ public sealed class CanonCamera : IAsyncDisposable
     private readonly PtpSession _ptp;
     private readonly CanonPtpSession _canon;
     private readonly ILogger<CanonCamera> _logger;
+    private readonly TimeProvider _time;
     private EventPoller? _poller;
     private int _disposed;
 
@@ -136,11 +148,20 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </summary>
     public IReadOnlySet<ushort> SupportedOperations => _canon.SupportedOperations;
 
-    internal CanonCamera(IPtpTransport transport, ILogger<CanonCamera> logger)
+    /// <summary>
+    /// The clock this camera's waits and deadlines run on: the system clock unless its
+    /// <see cref="CanonCameraFactory"/> was given another. Code that waits on this camera (a script
+    /// runner, a host's own settle loop) should wait on the same clock, so a test that moves a fake
+    /// one moves all of it.
+    /// </summary>
+    public TimeProvider TimeProvider => _time;
+
+    internal CanonCamera(IPtpTransport transport, ILogger<CanonCamera> logger, TimeProvider? timeProvider = null)
     {
         _transport = transport;
+        _time = timeProvider ?? TimeProvider.System;
         _ptp = new PtpSession(transport);
-        _canon = new CanonPtpSession(_ptp);
+        _canon = new CanonPtpSession(_ptp, _time);
         _logger = logger;
 
         // Subscribed for the whole lifetime, not just while the poller runs: the initial session
@@ -229,24 +250,24 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </remarks>
     [SupportedOSPlatform("windows")]
     public static Task<CanonCamera> ConnectWpdAutoAsync(string wpdDeviceId, CancellationToken ct = default) =>
-        ConnectWpdAutoCoreAsync(wpdDeviceId, NullLogger<CanonCamera>.Instance, ct);
+        ConnectWpdAutoCoreAsync(wpdDeviceId, NullLogger<CanonCamera>.Instance, null, ct);
 
     [SupportedOSPlatform("windows")]
     internal static async Task<CanonCamera> ConnectWpdAutoCoreAsync(
-        string wpdDeviceId, ILogger<CanonCamera> logger, CancellationToken ct)
+        string wpdDeviceId, ILogger<CanonCamera> logger, TimeProvider? timeProvider, CancellationToken ct)
     {
-        var (ioctl, failure) = await WpdIoctlPtpTransport.TryConnectAsync(wpdDeviceId, ct: ct);
+        var (ioctl, failure) = await WpdIoctlPtpTransport.TryConnectAsync(wpdDeviceId, timeProvider, ct);
         if (ioctl is not null)
         {
             logger.LogDebug("WPD raw ioctl accepted for {DeviceId}", wpdDeviceId);
-            return new CanonCamera(ioctl, logger);
+            return new CanonCamera(ioctl, logger, timeProvider);
         }
 
         logger.LogWarning(
             "WPD raw ioctl rejected for {DeviceId} ({Failure}); falling back to the COM transport, "
             + "which costs roughly twice the working set during live view.", wpdDeviceId, failure);
 
-        return new CanonCamera(new WpdPtpTransport(wpdDeviceId), logger) { TransportFallbackReason = failure };
+        return new CanonCamera(new WpdPtpTransport(wpdDeviceId, timeProvider), logger, timeProvider) { TransportFallbackReason = failure };
     }
 
     /// <summary>
@@ -877,7 +898,7 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </summary>
     private async Task<EdsError> VerifyCustomFunctionWriteAsync(uint cfnId, uint expected, CancellationToken ct)
     {
-        await Task.Delay(CfnRevertWindow, ct);
+        await Task.Delay(CfnRevertWindow, _time, ct);
 
         var (verifyErr, block) = await _canon.GetCustomFunctionBlockAsync(refresh: true, ct);
         if (verifyErr is not EdsError.OK || block?.GetValue(cfnId) is not { } applied)
@@ -1685,7 +1706,7 @@ public sealed class CanonCamera : IAsyncDisposable
     {
         // Same reason WaitForZoomRectAsync polls: roughly half of all live-view reads answer
         // "no frame yet" on the bodies measured, so one read is not a reading.
-        var deadline = DateTime.UtcNow + ZoomReadTimeout;
+        var started = _time.GetTimestamp();
         while (true)
         {
             var (err, records) = await GetLiveViewRecordsAsync(ct);
@@ -1693,8 +1714,8 @@ public sealed class CanonCamera : IAsyncDisposable
                 && CanonViewfinderFrame.TryGetHistogram([.. records]) is { } histogram)
                 return histogram;
 
-            if (DateTime.UtcNow >= deadline) return null;
-            await Task.Delay(50, ct);
+            if (_time.GetElapsedTime(started) >= ZoomReadTimeout) return null;
+            await Task.Delay(TimeSpan.FromMilliseconds(50), _time, ct);
         }
     }
 
@@ -1712,7 +1733,7 @@ public sealed class CanonCamera : IAsyncDisposable
     private async Task<CanonEvfZoomRect?> WaitForZoomRectAsync(
         Func<CanonEvfZoomRect, bool> settled, TimeSpan timeout, CancellationToken ct)
     {
-        var deadline = DateTime.UtcNow + timeout;
+        var started = _time.GetTimestamp();
         CanonEvfZoomRect? last = null;
 
         while (true)
@@ -1725,8 +1746,8 @@ public sealed class CanonCamera : IAsyncDisposable
                 if (settled(rect)) return rect;
             }
 
-            if (DateTime.UtcNow >= deadline) return last;
-            await Task.Delay(100, ct);
+            if (_time.GetElapsedTime(started) >= timeout) return last;
+            await Task.Delay(TimeSpan.FromMilliseconds(100), _time, ct);
         }
     }
 
@@ -1837,7 +1858,7 @@ public sealed class CanonCamera : IAsyncDisposable
     private async Task<CanonEvfFrameInfo?> WaitForFrameInfoAsync(
         Func<CanonEvfFrameInfo, bool> settled, TimeSpan timeout, CancellationToken ct)
     {
-        var deadline = DateTime.UtcNow + timeout;
+        var started = _time.GetTimestamp();
         CanonEvfFrameInfo? last = null;
 
         while (true)
@@ -1849,8 +1870,8 @@ public sealed class CanonCamera : IAsyncDisposable
                 if (settled(info)) return info;
             }
 
-            if (DateTime.UtcNow >= deadline) return last;
-            await Task.Delay(100, ct);
+            if (_time.GetElapsedTime(started) >= timeout) return last;
+            await Task.Delay(TimeSpan.FromMilliseconds(100), _time, ct);
         }
     }
 
@@ -1928,7 +1949,7 @@ public sealed class CanonCamera : IAsyncDisposable
     {
         if (_poller is not null) return;
 
-        _poller = new EventPoller(_canon, interval ?? DefaultPollInterval, OnPollerLost);
+        _poller = new EventPoller(_canon, interval ?? DefaultPollInterval, OnPollerLost, time: _time);
         _poller.Start();
     }
 

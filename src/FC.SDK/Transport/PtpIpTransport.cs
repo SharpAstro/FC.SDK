@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -16,6 +15,10 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
     private readonly int _port;
     private readonly Guid _clientGuid;
     private readonly string _clientName;
+
+    // Every deadline here runs on this clock: the handshake's bounds, the reply's silence limit, the
+    // wait for a reply nobody waits for. The socket I/O itself is real either way.
+    private readonly TimeProvider _time;
 
     private TcpClient? _commandClient;
     private TcpClient? _eventClient;
@@ -92,8 +95,10 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
     /// The identity a Canon body pairs with. It answers InitFail to any other GUID afterwards, so a
     /// caller that reconnects must pass the same one every time; null draws a fresh one.
     /// </param>
-    internal PtpIpTransport(string host, int port = PtpIpPort, string? clientName = null, Guid? clientGuid = null)
+    internal PtpIpTransport(
+        string host, int port = PtpIpPort, string? clientName = null, Guid? clientGuid = null, TimeProvider? timeProvider = null)
     {
+        _time = timeProvider ?? TimeProvider.System;
         _host = host;
         _port = port;
         _clientGuid = clientGuid ?? Guid.NewGuid();
@@ -199,11 +204,11 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
     /// Runs one handshake step under <paramref name="limit"/>. Running out of it is an
     /// <see cref="IOException"/> saying what to do; the caller's own cancellation stays a cancellation.
     /// </summary>
-    private static async Task<T> BoundedAsync<T>(
+    private async Task<T> BoundedAsync<T>(
         Func<CancellationToken, ValueTask<T>> step, TimeSpan limit, string timedOut, CancellationToken ct)
     {
-        using var bound = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        bound.CancelAfter(limit);
+        using var expiry = new CancellationTokenSource(limit, _time);
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(ct, expiry.Token);
         try
         {
             return await step(bound.Token);
@@ -214,7 +219,7 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         }
     }
 
-    private static async Task BoundedAsync(
+    private async Task BoundedAsync(
         Func<CancellationToken, ValueTask> step, TimeSpan limit, string timedOut, CancellationToken ct) =>
         await BoundedAsync(async token => { await step(token); return true; }, limit, timedOut, ct);
 
@@ -291,7 +296,7 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         return (data, length);
     }
 
-    private IdleTimeoutStream Replies => _replies ??= new IdleTimeoutStream(_commandStream!, ReplyIdleTimeout);
+    private IdleTimeoutStream Replies => _replies ??= new IdleTimeoutStream(_commandStream!, ReplyIdleTimeout, _time);
 
     private byte[] ResponseBuffer(int size) => _response.Length >= size ? _response : _response = new byte[size];
 
@@ -325,7 +330,7 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             _abandoned = reading;
-            _abandonedAt = Stopwatch.GetTimestamp();
+            _abandonedAt = _time.GetTimestamp();
             // Observed here in case nothing ever settles it (the transport is disposed next).
             _ = reading.ContinueWith(static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
             throw;
@@ -353,14 +358,14 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
 
             // A request went out and nothing started reading its reply. Read it as either shape.
             _abandoned = PtpIpFraming.ReadDataAndResponseAsync(Replies, ResponseBuffer(_response.Length), CancellationToken.None);
-            _abandonedAt = Stopwatch.GetTimestamp();
+            _abandonedAt = _time.GetTimestamp();
         }
 
         var reading = _abandoned;
         while (!reading.IsCompleted)
         {
             var since = Math.Max(_abandonedAt, Replies.LastReadTimestamp);
-            var left = AbandonedReplyIdleTimeout - Stopwatch.GetElapsedTime(since);
+            var left = AbandonedReplyIdleTimeout - _time.GetElapsedTime(since);
             if (left <= TimeSpan.Zero)
             {
                 throw Lose(new TimeoutException(
@@ -368,7 +373,7 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
             }
 
             using var wake = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            await Task.WhenAny(reading, Task.Delay(left, wake.Token));
+            await Task.WhenAny(reading, Task.Delay(left, _time, wake.Token));
             await wake.CancelAsync();
             ct.ThrowIfCancellationRequested();
         }
@@ -406,7 +411,7 @@ internal sealed class PtpIpTransport : IPtpTransport, IPtpDataInTransport
         _replyOwed = true;
         try
         {
-            await _commandStream!.WriteAsync(packets, CancellationToken.None).AsTask().WaitAsync(ReplyIdleTimeout);
+            await _commandStream!.WriteAsync(packets, CancellationToken.None).AsTask().WaitAsync(ReplyIdleTimeout, _time);
         }
         catch (TimeoutException ex)
         {
