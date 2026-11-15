@@ -111,6 +111,7 @@ hostOpt.Recursive = releaseOpt.Recursive = transportOpt.Recursive = true;
     ("evfout",   "Evf_OutputDevice across live-view start and stop: restored? Body controls alive? (#21)", [shootOpt, ptpReleaseOpt]),
     ("zoom",     "Why a zoom is ignored: sweep factors and LV AF systems against the zoom rect.", []),
     ("pan",      "SetEvfZoomPositionAsync at 1x and 5x: timed, judged on record 13, numbered checks (#21).", [roundsOpt]),
+    ("rec10",    "Record 10 across every frame, at rest and across raw 0x9159 pans with their send times (#30).", [roundsOpt]),
     ("zoompix",  "Visual proof of magnification and panning — writes JPEGs to compare.", [avOpt, tvOpt, isoOpt]),
     ("lens",     "Dump the lens / focus properties. Run with no lens, lens at AF, lens at MF and diff.", []),
     ("press",    "0x9128's two parameters: press stage x AF/MF, judged on delivered files.", [avOpt, tvOpt, isoOpt, cappedOpt]),
@@ -1771,6 +1772,202 @@ try
         }
         Log($"pan: {failures} check(s) failed, exit code {failures}");
         return failures;
+    }
+
+    if (mode is "rec10")
+    {
+        // Issue #30: does record 10 say when a frame was made, so that a pan's settle can ignore every
+        // frame made before the 0x9159 was sent? Every poll is logged with its host time, record 10's
+        // two words, record 13 (the magnifier) and a hash of the JPEG; every 0x9159 with the host time
+        // it was sent and answered. The pans go out raw (verify: false), so nothing between two polls
+        // but the command itself. The fixtures read record 10 as [Unix seconds][a word under 1000];
+        // whether that word is milliseconds or a frame counter is the first thing the summary answers.
+        int rounds = parse.GetValue(roundsOpt);
+        // The CSV is read by tools, not people: a French locale wrote "1275,7" and split every time in two.
+        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+        var rows = new List<(double T0, double T1, string Phase, string Kind, string Detail,
+            uint? S, uint? W1, (uint X, uint Y)? Mag, uint? Zoom, int Len, uint Hash)>();
+        var pans = new List<(string Name, double Sent, double Answered, uint X, uint Y, EdsError Err)>();
+
+        static uint U32(ReadOnlySpan<byte> s, int at) => BitConverter.ToUInt32(s[at..(at + 4)]);
+        static uint Fnv(ReadOnlySpan<byte> s)
+        {
+            uint h = 2166136261;
+            foreach (var b in s) h = (h ^ b) * 16777619;
+            return h;
+        }
+        double Now() => clock.Elapsed.TotalMilliseconds;
+
+        (uint Width, uint Height)? sensor = null;
+        (uint W, uint H)? magSize = null;
+
+        async Task Poll(string phase, int ms)
+        {
+            var until = Now() + ms;
+            while (Now() < until)
+            {
+                var t0 = Now();
+                var (e, records) = await camera!.GetLiveViewRecordsAsync();
+                var t1 = Now();
+                if (e is not EdsError.OK || records.Count is 0)
+                {
+                    rows.Add((t0, t1, phase, "empty", e.ToString(), null, null, null, null, 0, 0));
+                    await Task.Delay(TimeSpan.FromMilliseconds(15), time);
+                    continue;
+                }
+                uint? s = null, w1 = null, zoom = null;
+                (uint, uint)? mag = null;
+                int len = 0; uint hash = 0;
+                foreach (var r in records)
+                {
+                    var p = r.Payload.Span;
+                    if (r.IsImage) { len = p.Length; hash = Fnv(p); }
+                    else if (r.Type == 10 && p.Length >= 8) (s, w1) = (U32(p, 0), U32(p, 4));
+                    else if (r.Type == 13 && p.Length >= 16) { mag = (U32(p, 0), U32(p, 4)); magSize = (U32(p, 8), U32(p, 12)); }
+                    else if (r.Type == 14 && p.Length >= 8) sensor = (U32(p, 0), U32(p, 4));
+                    else if (r.Type == 4 && p.Length >= 4) zoom = U32(p, 0);
+                }
+                rows.Add((t0, t1, phase, len > 0 ? "frame" : "noimage", "", s, w1, mag, zoom, len, hash));
+                if (len is 0) await Task.Delay(TimeSpan.FromMilliseconds(15), time);
+            }
+        }
+
+        async Task Pan(string name, uint x, uint y, int watchMs)
+        {
+            var sent = Now();
+            var (e, _) = await camera!.SetEvfZoomPositionAsync(x, y, verify: false);
+            var answered = Now();
+            pans.Add((name, sent, answered, x, y, e));
+            rows.Add((sent, answered, name, "0x9159", $"({x},{y}) = {e}", null, null, null, null, 0, 0));
+            Log($"  {name}: 0x9159({x},{y}) = {e}, sent at {sent:F0} ms, answered in {answered - sent:F0} ms");
+            await Poll(name, watchMs);
+        }
+
+        Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
+        var (afErr, afSystem) = await camera.GetEvfAfSystemAsync();
+        Log($"Evf_AFMode = {afSystem} ({afErr}). With a lens attached, the 5x pans need Live or Quick.");
+        await Poll("warmup", 1500);
+        await Poll("rest-1x", 6000);
+        if (sensor is not { } sz || magSize is not { } ms0 || rows.All(r => r.S is null))
+        {
+            Log("No frame with records 10, 13 and 14: nothing below this line means anything.");
+            Log($"StopLiveView = {await camera.StopLiveViewAsync()}");
+            return 1;
+        }
+        var (cx, cy) = ((sz.Width - ms0.W) / 2, (sz.Height - ms0.H) / 2);
+        Log($"sensor {sz.Width}x{sz.Height}, magnifier {ms0.W}x{ms0.H}, centre ({cx},{cy})");
+
+        for (int round = 1; round <= rounds; round++)
+        {
+            Log($"--- round {round}");
+            Log($"  zoom 1 = {await camera.SetEvfZoomAsync(1, verify: false)}");
+            await Pan($"r{round} 1x centre", cx, cy, 2500);
+            await Pan($"r{round} 1x (1000,1000)", 1000, 1000, 2500);
+            // The stale-target shape of #27: the next target is where the magnifier stood a moment ago.
+            Log($"  zoom 5 = {await camera.SetEvfZoomAsync(5, verify: false)}");
+            await Poll($"r{round} zoom5", 2500);
+            await Pan($"r{round} 5x (1000,1000) again", 1000, 1000, 2500);
+            await Pan($"r{round} 5x (3000,2000)", 3000, 2000, 2500);
+            await Pan($"r{round} 5x centre", cx, cy, 2500);
+            await Pan($"r{round} 5x (0,0) clamped", 0, 0, 2500);
+            // Two pans 300 ms apart, the second back to where the first started: the body is still
+            // sending frames from before the first when the second goes out.
+            await Pan($"r{round} 5x quick (3000,2000)", 3000, 2000, 300);
+            await Pan($"r{round} 5x quick back (0,0)", 0, 0, 2500);
+        }
+        Log($"  zoom 1 = {await camera.SetEvfZoomAsync(1, verify: false)}");
+        await camera.SetEvfZoomPositionAsync(cx, cy, verify: false);
+        Log($"StopLiveView = {await camera.StopLiveViewAsync()}");
+
+        var csv = Path.Combine(outDir, "rec10-polls.csv");
+        await File.WriteAllLinesAsync(csv,
+            ["t0_ms,t1_ms,phase,kind,detail,rec10_w0,rec10_w1,rec13_x,rec13_y,rec4_zoom,jpeg_len,jpeg_fnv"
+            , .. rows.Select(r => string.Join(',',
+                $"{r.T0:F1}", $"{r.T1:F1}", $"\"{r.Phase}\"", r.Kind, $"\"{r.Detail}\"",
+                r.S is { } s ? $"0x{s:X8}" : "", r.W1?.ToString() ?? "",
+                r.Mag?.X.ToString() ?? "", r.Mag?.Y.ToString() ?? "", r.Zoom?.ToString() ?? "",
+                r.Len.ToString(), r.Len > 0 ? $"{r.Hash:X8}" : ""))]);
+
+        // ---- What record 10 is
+        var frames = rows.Where(r => r.Kind is "frame" && r.S is not null).ToList();
+        var polls = rows.Count(r => r.Kind is not "0x9159");
+        Console.WriteLine();
+        Log("================ RECORD 10 ================");
+        Log($"{polls} polls, {frames.Count} with an image and record 10, {rows.Count(r => r.Kind is "empty")} empty, "
+            + $"{rows.Count(r => r.Kind is "noimage")} with records but no image");
+        var maxW1 = frames.Max(r => r.W1!.Value);
+        Log($"word 1 ranges {frames.Min(r => r.W1!.Value)}-{maxW1} ({(maxW1 < 1000 ? "always under 1000" : "reaches 1000 or more: not milliseconds")})");
+        Log($"word 0 as Unix seconds: {DateTimeOffset.FromUnixTimeSeconds(frames[0].S!.Value):u} .. "
+            + $"{DateTimeOffset.FromUnixTimeSeconds(frames[^1].S!.Value):u}  (host now {time.GetUtcNow():u})");
+
+        double Cam(uint s, uint w1) => (s - (double)frames[0].S!.Value) * 1000 + w1;   // ms, if word 1 is ms
+        int sameStamp = 0, sameStampSameJpeg = 0, newStampSameJpeg = 0, backwards = 0, plusOne = 0;
+        var deltas = new List<double>();
+        for (int i = 1; i < frames.Count; i++)
+        {
+            var (a, b) = (frames[i - 1], frames[i]);
+            var d = Cam(b.S!.Value, b.W1!.Value) - Cam(a.S!.Value, a.W1!.Value);
+            if (b.S == a.S && b.W1 == a.W1) { sameStamp++; if (b.Hash == a.Hash) sameStampSameJpeg++; continue; }
+            if (b.Hash == a.Hash) newStampSameJpeg++;
+            if (d < 0) backwards++;
+            if (b.S == a.S && b.W1 == a.W1 + 1) plusOne++;
+            deltas.Add(d);
+        }
+        deltas.Sort();
+        string Pct(double p) => deltas.Count is 0 ? "-" : $"{deltas[(int)Math.Min(deltas.Count - 1, p * deltas.Count)]:F0}";
+        Log($"consecutive frames: {sameStamp} repeat record 10 ({sameStampSameJpeg} of them with the same JPEG), "
+            + $"{newStampSameJpeg} new record 10 with the same JPEG, {backwards} go backwards, {plusOne} step word 1 by exactly 1");
+        Log($"step between distinct stamps, as ms: min {Pct(0)}, median {Pct(0.5)}, p90 {Pct(0.9)}, max {Pct(1)}");
+        var rest = frames.Where(r => r.Phase is "rest-1x").ToList();
+        if (rest.Count > 1)
+        {
+            var camSpan = Cam(rest[^1].S!.Value, rest[^1].W1!.Value) - Cam(rest[0].S!.Value, rest[0].W1!.Value);
+            Log($"rest-1x: {rest.Count} frames over {rest[^1].T1 - rest[0].T1:F0} ms of host time and {camSpan:F0} ms of record 10 time");
+        }
+
+        // Host-to-camera offset: a frame is received after it is made, so the smallest
+        // (receipt - stamp) over the run puts every stamp on the host clock no later than its receipt.
+        var offset = frames.Min(r => r.T1 - Cam(r.S!.Value, r.W1!.Value));
+        double Made(uint? s, uint? w1) => Cam(s!.Value, w1!.Value) + offset;
+        var lat = frames.Select(r => r.T1 - (Cam(r.S!.Value, r.W1!.Value) + offset)).OrderBy(v => v).ToList();
+        Log($"receipt - made (host clock, made = stamp + min offset): median {lat[lat.Count / 2]:F0} ms, "
+            + $"p90 {lat[(int)(lat.Count * 0.9)]:F0} ms, max {lat[^1]:F0} ms");
+
+        // ---- Each pan: does "made before the send" pick out exactly the frames that still show the old position?
+        Console.WriteLine();
+        Log("================ PANS ================");
+        Log("old = record 13 still where it was before the send; new = anywhere else. made-send in ms on the host clock.");
+        int oldBefore = 0, oldAfter = 0, newBefore = 0, newAfter = 0;
+        foreach (var p in pans)
+        {
+            var before = frames.LastOrDefault(r => r.T1 <= p.Sent && r.Mag is not null);
+            var after = frames.Where(r => r.T0 >= p.Answered && r.Phase == p.Name && r.Mag is not null).ToList();
+            if (before.Mag is not { } from || after.Count is 0) { Log($"{p.Name}: no frame either side"); continue; }
+            var line = new System.Text.StringBuilder($"{p.Name}: from ({from.X},{from.Y}) to ({p.X},{p.Y}), {after.Count} frames:");
+            if (after.All(r => r.Mag == from)) { Log($"{line} record 13 never moved, not counted"); continue; }
+            bool moved = false;
+            foreach (var r in after)
+            {
+                var m = Made(r.S, r.W1) - p.Sent;
+                var isOld = r.Mag == from;
+                if (isOld && m < 0) oldBefore++;
+                else if (isOld) oldAfter++;
+                else if (m < 0) newBefore++;
+                else newAfter++;
+                if (!moved || isOld)
+                    line.Append($" [{r.T1 - p.Sent:F0} ms recv, made {m:+0;-0}, {(isOld ? "old" : $"({r.Mag!.Value.X},{r.Mag!.Value.Y})")}]");
+                if (!isOld && !moved) { moved = true; line.Append(" ->"); }
+            }
+            Log(line.ToString());
+        }
+        Console.WriteLine();
+        Log($"frames after a send: old & made before {oldBefore}, old & made after {oldAfter}, "
+            + $"new & made before {newBefore}, new & made after {newAfter}");
+        Log("A frame made before its send that shows the new position means the offset is off (or record 10 is "
+            + "not when a frame was made). Old frames made after the send are the body's own latency, which "
+            + "a settle that ignores frames made before the send still has to wait out.");
+        Log($"Polls: {csv}");
+        return 0;
     }
 
     if (mode is "zoom")
