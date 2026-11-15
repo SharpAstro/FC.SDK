@@ -1,0 +1,16 @@
+# Lens presence through a removal and a refit, in one session (issue #28).
+# Start with a lens fitted, its switch at AF.
+#
+# LensStatus (0xD1A8) reads 1 with a lens and 0 on a bare mount, and the body announces it again
+# when the lens comes off or goes back on. FocusMode (0xD108) read ManualFocus on a bare R6 and a
+# bare 6D on 2026-11-14; a bare 6D read OneShot on 2026-08-03, so a failure of that row on a 6D with
+# an EF50mm f/1.8 STM would point at the lens.
+expect read 0xD1A8 == 1
+confirm "Take the lens off the body, then click Done"
+sleep 3s
+expect read 0xD1A8 == 0
+expect read 0xD108 == AFMode.ManualFocus
+confirm "Refit the same lens, switch at AF, then click Done"
+sleep 3s
+expect read 0xD1A8 == 1
+expect read 0xD108 != AFMode.ManualFocus

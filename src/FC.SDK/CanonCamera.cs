@@ -969,19 +969,42 @@ public sealed class CanonCamera : IAsyncDisposable
     /// when it is at MF. Note that value is <i>not</i> in the property's allowed-value list, which
     /// offers only One-Shot / AI Servo / AI Focus — allowed values are what a client may write, not
     /// the values the property can report, and reading the list as the latter is what made this look
-    /// undetectable at first. With no lens at all the same property reads One-Shot, so lens presence
-    /// has to come from the name.
+    /// undetectable at first.
+    /// </para>
+    /// <para>
+    /// <b>Lens presence comes from <c>LensStatus</c> (0xD1A8)</b>, 1 with a lens and 0 without on an
+    /// EOS R6 and an EOS 6D (issue #28, 2026-11-14), and from the name only on a body that does not
+    /// report it. The name alone is not enough: an R6 gives a Sigma 35mm F1.4 DG HSM Art an empty
+    /// name while it autofocuses with it. Nor is the focus mode: a bare mount read One-Shot on a 6D
+    /// on 2026-08-03 and <see cref="EdsAFMode.ManualFocus"/> on a 6D and an R6 on 2026-11-14.
+    /// </para>
+    /// <para>
+    /// Both readings come from the property cache, which follows a lens change only while events are
+    /// drained (the event pump, or any other call that reads them).
     /// </para>
     /// </remarks>
     public async Task<(EdsError Error, CanonFocusState State)> GetFocusStateAsync(CancellationToken ct = default)
     {
-        var (nameErr, lensName) = await GetLensNameAsync(ct);
+        var present = await GetLensPresentAsync(ct);
+        var (nameErr, nameBytes) = await GetPropertyBytesAsync(EdsPropertyId.LensName, ct: ct);
         var (modeErr, mode) = await GetPropertyAsync(EdsPropertyId.AFMode, ct);
 
         var err = nameErr is not EdsError.OK ? nameErr : modeErr;
         return (err, new CanonFocusState(
-            LensName: string.IsNullOrWhiteSpace(lensName) ? null : lensName,
-            FocusMode: (EdsAFMode)mode));
+            LensName: nameErr is EdsError.OK ? CanonLens.Name(nameBytes, present) : null,
+            FocusMode: (EdsAFMode)mode,
+            LensPresent: present));
+    }
+
+    /// <summary>
+    /// Whether a lens is fitted, from <c>LensStatus</c> (0xD1A8): null when the body does not report
+    /// it, or reports something other than 0 or 1. A failed read is null too, never an error: the
+    /// callers fall back to the lens name.
+    /// </summary>
+    private async Task<bool?> GetLensPresentAsync(CancellationToken ct)
+    {
+        var (err, status) = await _canon.GetPropertyUInt32Async(CanonLens.LensStatusCode, ct);
+        return CanonLens.Present(err is EdsError.OK ? status : null);
     }
 
     /// <summary>
@@ -1019,9 +1042,24 @@ public sealed class CanonCamera : IAsyncDisposable
             : (EdsError.DevicePropNotSupported, null);
     }
 
-    /// <summary>The attached lens, as the body names it. Read-only.</summary>
-    public Task<(EdsError Error, string? Value)> GetLensNameAsync(CancellationToken ct = default) =>
-        GetPropertyStringAsync(EdsPropertyId.LensName, ct: ct);
+    /// <summary>
+    /// The attached lens, as the body names it: empty when it gives no name. Read-only.
+    /// </summary>
+    /// <remarks>
+    /// An EOS R6 sends the name of a Sigma 35mm F1.4 DG HSM Art behind a 0 byte
+    /// (<c>00 "35mm"</c>, where a 6D sends <c>"35mm"</c>). That byte is skipped when
+    /// <c>LensStatus</c> (0xD1A8) says a lens is fitted, and only then: on a bare mount the bytes
+    /// after it are the previous lens's name (issue #28). <see cref="GetPropertyStringAsync"/> on
+    /// <see cref="EdsPropertyId.LensName"/> still stops at the first 0.
+    /// </remarks>
+    public async Task<(EdsError Error, string? Value)> GetLensNameAsync(CancellationToken ct = default)
+    {
+        var (err, bytes) = await GetPropertyBytesAsync(EdsPropertyId.LensName, ct: ct);
+        if (err is not EdsError.OK) return (err, null);
+
+        var present = await GetLensPresentAsync(ct);
+        return (EdsError.OK, CanonLens.Name(bytes, present) ?? "");
+    }
 
     /// <summary>
     /// The body serial from property 0xD1AF. <see cref="SerialNumber"/> reports the same thing from

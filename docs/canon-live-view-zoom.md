@@ -232,11 +232,11 @@ Nothing in the protocol reports "I cannot focus" — a bare mount and a lens swi
 answer an AF command with `OK` and move nothing. Both are distinguishable, though, and
 `GetFocusStateAsync` combines them:
 
-| Configuration | `LensName` (0xD1D8) | `AFMode` (0xD108) | `AutoFocusAvailable` |
-|---|---|---|---|
-| No lens | `""` | `OneShot` | false |
-| Lens, switch at AF | `EF50mm f/1.8 STM` | `OneShot` | true |
-| Lens, switch at MF | `EF50mm f/1.8 STM` | **`ManualFocus`** | false |
+| Configuration | `LensStatus` (0xD1A8) | `LensName` (0xD1D8) | `AFMode` (0xD108) | `AutoFocusAvailable` |
+|---|---|---|---|---|
+| No lens | **0** | `""` | `ManualFocus` (see below) | false |
+| Lens, switch at AF | **1** | `EF50mm f/1.8 STM` | `OneShot` | true |
+| Lens, switch at MF | **1** | `EF50mm f/1.8 STM` | **`ManualFocus`** | false |
 
 **`0xD108` follows the lens's own AF/MF switch**, established by flipping it with the lens mounted
 and diffing. `FocusInfoEx` (0xD1D3) tracks it too — the uint16 at offset 6 goes `2 → 0` — but the
@@ -248,8 +248,28 @@ undetectable through this property. That inference was wrong: **allowed values a
 write, not the values a property can report.** A property the body sets for itself can report
 outside its own writable set.
 
-Note the focus mode alone cannot tell a bare mount from a lens at AF; both read `OneShot`. Lens
-presence has to come from the name.
+**Lens presence comes from `LensStatus` (0xD1A8), not from the name and not from the focus mode.**
+Measured on an EOS R6 and an EOS 6D with three lenses and a bare mount each (issue #28, 2026-11-14):
+1 with every lens, 0 on a bare mount, and `LensID` (0xD1DD) non-zero with a lens and 0 without.
+`CanonFocusState.LensPresent` carries it, and the name decides only on a body that does not report
+0xD1A8.
+
+- **The name is not enough.** An R6 sends a Sigma 35mm F1.4 DG HSM Art's name as `00 "35mm"`, where a
+  6D sends `"35mm"`, and writes the same empty name into its own CR3s. Read as a string that is `""`,
+  so the name-based answer was "no lens" for a lens the R6 autofocuses with. A leading 0 is also how
+  both bodies mark the name of a lens that was taken off: a bare 6D holds the previous lens's name
+  with its first byte zeroed. So `GetLensNameAsync` skips one leading 0 when the lens status says a
+  lens is fitted, and only then.
+- **The focus mode is not enough either, and its bare-mount reading has changed.** On 2026-08-03 a
+  bare 6D read `OneShot` (EF50mm f/1.8 STM taken off, firmware as shipped). On 2026-11-14 a bare 6D
+  (firmware 1.1.6, a Sigma 24-70 taken off) and a bare R6 both read `ManualFocus`, with `0x3` alone
+  in the allowed list. What differs between the two runs was not found.
+- **Both bodies announce `LensStatus`, `LensID`, `FocusMode` and `LensName` when a lens comes off or
+  goes back on mid-session**, so the cache follows the mount while something drains events. A
+  `0x9127` request brings nothing new for these codes. On removal a 6D sends one record of
+  `LensStatus` 1 with `LensID` 0 and corrects it 225 ms later.
+
+`scripts/lens-presence.camscript` reruns the removal and the refit on any body.
 
 ## Live-view autofocus works
 

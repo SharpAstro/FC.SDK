@@ -51,9 +51,9 @@ LV zoom and pan are likely controlled through the live view data stream or a dif
 - [ ] MovSize — 0xD1BB
 
 ### Lens / focus
-- [ ] LensName — mapped (0xD1D8) but returns packed data, not a string via uint32 read. Needs a string-capable read method.
+- [x] LensName — 0xD1D8, read with `GetLensNameAsync` (a string; one leading 0 is skipped when `LensStatus` says a lens is fitted, issue #28)
 - [ ] FocalLength — may be in event data or DeviceInfoEx
-- [ ] LensStatus — 0xD1A8
+- [x] LensStatus — 0xD1A8, read raw (not mapped): 1 with a lens, 0 bare; behind `CanonFocusState.LensPresent`
 - [ ] LensBarrelStatus — 0xD128
 - [ ] FocusInfo / FocusInfoEx — 0xD1D3, complex AF point structure
 - [ ] LensID — 0xD1DD
