@@ -1367,6 +1367,14 @@ public sealed class CanonCamera : IAsyncDisposable
         await _canon.GetCustomFunctionBlockAsync(refresh: false, ct);
 
     /// <summary>
+    /// Reads the Custom Function block, with <paramref name="refresh"/> asking the camera to emit it
+    /// afresh (0x9127, then a drain) instead of answering from the event cache. Needed to see a change
+    /// made in the camera's own menu on a body that does not announce one by itself.
+    /// </summary>
+    public async Task<(EdsError Error, CanonCustomFunctionBlock? Block)> GetCustomFunctionBlockAsync(bool refresh, CancellationToken ct = default) =>
+        await _canon.GetCustomFunctionBlockAsync(refresh, ct);
+
+    /// <summary>
     /// Writes a modified Custom Function data block back to the camera.
     /// Read the block first with <see cref="GetCustomFunctionBlockAsync"/>, modify via
     /// <see cref="CanonCustomFunctionBlock.SetValue"/>, then write back.

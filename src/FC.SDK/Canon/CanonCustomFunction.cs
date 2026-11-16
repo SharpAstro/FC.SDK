@@ -84,6 +84,25 @@ public sealed class CanonCustomFunctionBlock
         return true;
     }
 
+    /// <summary>
+    /// Sets one value of a multi-value entry, <paramref name="index"/> counting from 0. A 6D keeps
+    /// Multi function lock's checkbox mask in the second value of <c>0x070F</c>.
+    /// </summary>
+    /// <returns>True if the function was found and has a value at that index.</returns>
+    public bool SetValue(uint functionId, int index, uint value)
+    {
+        if (index == 0) return SetValue(functionId, value);
+        var entry = _entries.FindIndex(e => e.FunctionId == functionId);
+        if (entry < 0 || index < 0 || index >= _entries[entry].Values.Count || !_valueOffset.TryGetValue(functionId, out var offset))
+            return false;
+
+        BinaryPrimitives.WriteUInt32LittleEndian(RawData.AsSpan(offset + 4 * index), value);
+        var values = _entries[entry].Values.ToArray();
+        values[index] = value;
+        _entries[entry] = _entries[entry] with { Values = values };
+        return true;
+    }
+
     /// <summary>Parses a C.Fn data block received from the camera. See the type remarks for the layout.</summary>
     internal static CanonCustomFunctionBlock Parse(byte[] data)
     {
@@ -118,10 +137,13 @@ public sealed class CanonCustomFunctionBlock
                 uint valueCount = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 4));
 
                 uint value = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 8));
+                var values = new uint[Math.Max(1u, valueCount)];
+                for (int v = 0; v < values.Length && entry + 8 + 4 * v + 4 <= limit; v++)
+                    values[v] = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 8 + 4 * v));
                 block._functions[funcId] = value;
                 block._groupOfFunction[funcId] = groupId;
                 block._valueOffset[funcId] = entry + 8;
-                block._entries.Add(new CanonCustomFunctionEntry(groupId, funcId, value, block._entries.Count + 1));
+                block._entries.Add(new CanonCustomFunctionEntry(groupId, funcId, value, block._entries.Count + 1) { Values = values });
 
                 // Honour value_count even though every entry observed so far carries exactly one.
                 entry += 8 + (int)Math.Max(1u, valueCount) * 4;
@@ -148,7 +170,15 @@ public sealed class CanonCustomFunctionBlock
 /// their body without knowing anything about the protocol.
 /// </param>
 public readonly record struct CanonCustomFunctionEntry(
-    uint GroupId, uint FunctionId, uint Value, int MenuNumber);
+    uint GroupId, uint FunctionId, uint Value, int MenuNumber)
+{
+    /// <summary>
+    /// Every value the entry carries; <see cref="Value"/> is the first. Most entries carry one, but a
+    /// 6D sends <c>0x070F</c> with two and <c>0x070C</c> with nineteen (2026-11-16), and a dump that
+    /// showed only the first hid every change to the rest.
+    /// </summary>
+    public IReadOnlyList<uint> Values { get; init; } = [Value];
+}
 
 /// <summary>
 /// Well-known Canon Custom Function IDs. These are camera-specific — the same setting
@@ -247,6 +277,6 @@ public static class CanonCustomFunctionId
         _ => null,
     };
 
-    private static bool Is450DFamily(string model) =>
+    internal static bool Is450DFamily(string model) =>
         model.Contains("450D") || model.Contains("XSi") || model.Contains("Kiss X2");
 }
