@@ -73,6 +73,11 @@ var ptpReleaseOpt = new Option<bool>("--ptp-release")
 var avOpt = new Option<EdsAv>("--av") { Description = "Aperture.", DefaultValueFactory = _ => EdsAv.Av_5_6 , HelpName = "aperture" };
 var tvOpt = new Option<EdsTv>("--tv") { Description = "Shutter speed.", DefaultValueFactory = _ => EdsTv.Tv_1_125 , HelpName = "shutter" };
 var roundsOpt = new Option<int>("--rounds") { Description = "How many times to run each pan.", DefaultValueFactory = _ => 3 };
+var secondsOpt = new Option<int>("--seconds")
+{
+    Description = "Stop after this many seconds. 0, the default, runs until Enter (or Ctrl+C).",
+    DefaultValueFactory = _ => 0,
+};
 var isoOpt = new Option<EdsISOSpeed>("--iso") { Description = "ISO.", DefaultValueFactory = _ => EdsISOSpeed.ISO_400 , HelpName = "iso" };
 
 // Which link to the body. WPD is the default and what every experiment was first measured over;
@@ -121,6 +126,8 @@ hostOpt.Recursive = releaseOpt.Recursive = transportOpt.Recursive = true;
     ("power",    "Is AutoPowerOff (0xD114) writable, or was its DeviceBusy just a no-op write?", []),
     ("mlushot",  "TakePictureWithMirrorLockupAsync: does it deliver, and does it restore what it changed?", []),
     ("movie",    "Is the still/movie lever readable? Dump every property + LV record types; run per position.", [tagOpt, shootOpt]),
+    ("watch",    "Hold a session open and print every change the body announces, C.Fn entries diffed. Changes nothing.", [secondsOpt]),
+    ("cfnmenu",  "6D C.Fn: write a value, draw the menu screen it should give, ask the operator; then restore.", []),
 ];
 
 string? mode = null;
@@ -290,6 +297,89 @@ if (cameraScript is not null)
     Log($"======== {file.Name}: {result.Summary} ========");
     Log($"Transcript: {transcript}");
     return result.Succeeded ? 0 : 1;
+}
+
+if (mode is "cfnmenu")
+{
+    // Writes C.Fn values and restores them; sets nothing else up (no capture destination, no drive).
+    Log($"Model: {camera.Model}  Serial: {camera.SerialNumber}  Battery: {camera.BatteryLevelPercent}%");
+    try
+    {
+        return await CfnMenu.RunAsync(camera, Log, time, Path.Combine(outDir, "cfnmenu.txt"));
+    }
+    finally
+    {
+        await camera.StopEventPollingAsync();
+        Log($"CloseSession = {await camera.CloseSessionAsync()}");
+        await camera.DisposeAsync();
+    }
+}
+
+if (mode is "watch")
+{
+    // The "change it on the body, see what moves" method (the lens AF/MF switch, the movie lever)
+    // without unplugging: inside our session remote mode is on, so the body's own buttons and menus
+    // work, where with only Windows' driver attached a 6D answers every button with "busy". Nothing is
+    // set up and nothing is written; the session is the whole point.
+    Log($"Model: {camera.Model}  Serial: {camera.SerialNumber}  Battery: {camera.BatteryLevelPercent}%");
+    var watchSeconds = parse.GetValue(secondsOpt);
+    Log(watchSeconds > 0
+        ? $"Watching for {watchSeconds} s. Change things on the body now."
+        : "Watching. Change things on the body now; press Enter here to stop.");
+
+    camera.PropertyChanged += (_, e) =>
+    {
+        var name = e.IsMapped ? e.PropertyId.ToString() : "(unmapped)";
+        Log($"  prop 0x{e.PtpCode:X4} {name,-24} = 0x{e.Value:X8} ({e.Value})");
+    };
+    camera.StateChanged += (_, e) => Log($"  state {e.EventType} param=0x{e.Param:X}");
+
+    static string Key(CanonCustomFunctionEntry e) => $"C.Fn {e.GroupId} #{e.MenuNumber} 0x{e.FunctionId:X4}";
+    Dictionary<string, string>? lastCfn = null;
+    async Task DiffCfnAsync(string why)
+    {
+        var (cfnErr, block) = await camera.GetCustomFunctionBlockAsync(refresh: true);
+        if (cfnErr is not EdsError.OK || block is null) { Log($"  C.Fn block: {cfnErr}"); return; }
+        var now = block.Entries.ToDictionary(Key, e => string.Join(",", e.Values));
+        if (lastCfn is null)
+        {
+            Log($"  C.Fn block, {block.RawData.Length} bytes ({why}):");
+            foreach (var (k, v) in now) Log($"    {k} = {v}");
+        }
+        else
+        {
+            foreach (var (k, v) in now)
+                if (!lastCfn.TryGetValue(k, out var was)) Log($"  C.Fn NEW  {k} = {v}");
+                else if (was != v) Log($"  C.Fn CHANGED {k}: {was}  ->  {v}");
+            foreach (var k in lastCfn.Keys.Except(now.Keys)) Log($"  C.Fn GONE {k} (was {lastCfn[k]})");
+        }
+        lastCfn = now;
+    }
+
+    using var stop = watchSeconds > 0 ? new CancellationTokenSource(TimeSpan.FromSeconds(watchSeconds), time) : new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
+    if (watchSeconds == 0 && !Console.IsInputRedirected)
+        _ = Task.Run(() => { Console.ReadLine(); stop.Cancel(); });
+
+    try
+    {
+        await DiffCfnAsync("at start");
+        // A menu change may or may not be announced on the event stream; re-asking every two seconds
+        // finds it either way, and the property lines above show which it was.
+        while (!stop.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(2), time, stop.Token); }
+            catch (OperationCanceledException) { break; }
+            await DiffCfnAsync("refresh");
+        }
+    }
+    finally
+    {
+        await camera.StopEventPollingAsync();
+        Log($"CloseSession = {await camera.CloseSessionAsync()}");
+        await camera.DisposeAsync();
+    }
+    return 0;
 }
 
 int failures = 0;
