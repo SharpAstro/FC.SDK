@@ -1898,8 +1898,11 @@ try
             + $"{rows.Count(r => r.Kind is "noimage")} with records but no image");
         var maxW1 = frames.Max(r => r.W1!.Value);
         Log($"word 1 ranges {frames.Min(r => r.W1!.Value)}-{maxW1} ({(maxW1 < 1000 ? "always under 1000" : "reaches 1000 or more: not milliseconds")})");
-        Log($"word 0 as Unix seconds: {DateTimeOffset.FromUnixTimeSeconds(frames[0].S!.Value):u} .. "
-            + $"{DateTimeOffset.FromUnixTimeSeconds(frames[^1].S!.Value):u}  (host now {time.GetUtcNow():u})");
+        // The body's own clock, which is local time: read as Unix seconds it lands hours off UTC (+10 h on
+        // the 6D run of 2026-11-16, +1 h on the R6 runs in #30), so it is printed without a zone, beside
+        // the host's local time.
+        Log($"word 0 as Unix seconds, the body's local clock: {DateTimeOffset.FromUnixTimeSeconds(frames[0].S!.Value):yyyy-MM-dd HH:mm:ss} .. "
+            + $"{DateTimeOffset.FromUnixTimeSeconds(frames[^1].S!.Value):yyyy-MM-dd HH:mm:ss}  (host local now {time.GetLocalNow():yyyy-MM-dd HH:mm:ss})");
 
         double Cam(uint s, uint w1) => (s - (double)frames[0].S!.Value) * 1000 + w1;   // ms, if word 1 is ms
         int sameStamp = 0, sameStampSameJpeg = 0, newStampSameJpeg = 0, backwards = 0, plusOne = 0;
@@ -1937,7 +1940,11 @@ try
         // ---- Each pan: does "made before the send" pick out exactly the frames that still show the old position?
         Console.WriteLine();
         Log("================ PANS ================");
-        Log("old = record 13 still where it was before the send; new = anywhere else. made-send in ms on the host clock.");
+        // "New" is where the pan ended up (record 13 on the last frame watched), not "anything but the start":
+        // a target that clamps to where the magnifier already stood (5x (0,0) after a clamped (0,0)) lands
+        // on its own start, and the frames in between are the previous pan arriving late. Judged against the
+        // start, every landed frame of such a pan read "old" and was counted as the body's latency.
+        Log("new = record 13 where the pan ended up (its last frame); old = anywhere else. made-send in ms on the host clock.");
         int oldBefore = 0, oldAfter = 0, newBefore = 0, newAfter = 0;
         foreach (var p in pans)
         {
@@ -1946,11 +1953,18 @@ try
             if (before.Mag is not { } from || after.Count is 0) { Log($"{p.Name}: no frame either side"); continue; }
             var line = new System.Text.StringBuilder($"{p.Name}: from ({from.X},{from.Y}) to ({p.X},{p.Y}), {after.Count} frames:");
             if (after.All(r => r.Mag == from)) { Log($"{line} record 13 never moved, not counted"); continue; }
+            var landing = after[^1].Mag!.Value;
+            if (landing == from)
+            {
+                Log($"{line} ends where it started ({from.X},{from.Y}), so its landing cannot be told from no move; "
+                    + "the other positions seen were an earlier pan arriving late. Not counted");
+                continue;
+            }
             bool moved = false;
             foreach (var r in after)
             {
                 var m = Made(r.S, r.W1) - p.Sent;
-                var isOld = r.Mag == from;
+                var isOld = r.Mag != landing;
                 if (isOld && m < 0) oldBefore++;
                 else if (isOld) oldAfter++;
                 else if (m < 0) newBefore++;
