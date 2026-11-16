@@ -1833,6 +1833,16 @@ public sealed class CanonCamera : IAsyncDisposable
     /// corner of the room, and centring it moved the live-view JPEG from 112K to 138K. If focus
     /// matters and the position is not known, set it rather than inherit it.
     /// </para>
+    /// <para>
+    /// <b>An EOS R6 drops a pan sent just after zooming out to 1×.</b> Sent 13–17 ms after
+    /// <c>SetEvfZoomAsync(1, verify: false)</c> from 5×, it answers <c>OK</c> and the magnifier never
+    /// moves (0 times in 4, WPD raw ioctl); sent 111 ms after, it lands. A 6D lands it 4 times in 4
+    /// at 3–4 ms (issue #30, <c>FC.SDK.Diagnostics zoompan</c>). A verified pan that the body dropped
+    /// waits out its 3 s timeout and answers <c>OK</c> with the whole-sensor rect, as every 1× pan
+    /// does; only <see cref="CanonEvfFrameInfo.Magnifier"/> read afterwards shows that the magnifier
+    /// did not move (from the code: a dropped verified pan was not timed). Zoom with the default
+    /// <c>verify</c>, which waits for the 1× frame, before panning.
+    /// </para>
     /// </remarks>
     /// <param name="verify">
     /// Wait for the move to appear in the magnifier rect (record 13), or in the zoom rect when the
