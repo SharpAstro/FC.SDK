@@ -70,6 +70,9 @@ internal sealed class ConsoleScriptHost(Action<string> log) : IScriptHost
         if (OperatingSystem.IsWindows()) Console.Beep(1200, 150);
         Console.WriteLine();
         Console.WriteLine($"  >>> {text}");
-        Console.Write($"      {keys}: ");
+        // A whole line, not a Write left waiting for the answer: PowerShell passes a program's output
+        // down a pipe (`| Tee-Object`) one complete line at a time, so a partial line stayed hidden
+        // until the operator had already pressed Enter. Flushing does not help; the bytes had left.
+        Console.WriteLine($"      {keys}");
     }
 }
