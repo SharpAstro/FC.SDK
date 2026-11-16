@@ -500,7 +500,8 @@ public readonly record struct CanonEvfFrameInfo(
     /// <para>
     /// The seconds are the body's own wall clock in local time, counted like a Unix time, so they
     /// are not host time: an R6 read an hour off UTC and 2 s behind the PC, a 6D 50 minutes behind.
-    /// Use it to order frames and measure intervals, or put it on the host clock with an offset.
+    /// Use it to order frames and measure intervals, or put it on the host clock with an offset, as
+    /// <see cref="CanonCamera.SetEvfZoomPositionAsync"/> does.
     /// </para>
     /// </remarks>
     public TimeSpan? MadeAt { get; init; }

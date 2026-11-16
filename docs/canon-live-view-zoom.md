@@ -123,8 +123,27 @@ Same sitting, builds alternated, WPD raw ioctl, 2026-11-13. Record 13 read the p
 after every call. Re-run over WPD COM and PTP/IP on 2026-11-14, the 1× pan went from 3039–3554 ms
 to 174–657 ms on a 6D, and from 3099–3146 ms to 391–425 ms on an R6 over COM. An R6 over PTP/IP
 sometimes stalls a fetch for 1.6–1.8 s, and there a 1× pan took 609–4595 ms and a 5× one up to
-5640 ms. On that transport a pan can also return a position from before the move, as the settle on
-record 18 could too; the rule that would rule it out is still open.
+5640 ms. On that transport a pan could also return a position from before the move: the body hands
+out frames up to 2.7 s after it made them (9.6 s on a congested link), so an earlier pan's landing
+arrived after the command and passed for this one's (5 false settles in 40 pans replayed from an
+R6's captures, issue #30). The settle now reads when each frame was made (record 10) and judges only
+frames made after the command; one made before it only says where the pan started. Replayed on the
+same captures, 1 false settle was left, inside the uncertainty on when its frame was made.
+
+**It does not cover an earlier pan whose landing the body makes after the command.** A pan sent
+within the body's own delay after an unverified one can still settle there: in a 6D's capture in
+issue #30, a pan sent 306 ms after an unverified one met that pan's landing made 26 ms after its own
+command. Verify each pan, or wait that delay out, before the next. The delay itself is waited out
+inside the 3 s timeout: 60–120 ms on an R6 over WPD raw ioctl and 150–270 ms over PTP/IP, 140–350 ms
+on a 6D over WPD raw ioctl (about 300 ms at 5×).
+
+Run live on 2026-11-16 with `FC.SDK.Diagnostics pan`, whose P5 sends a verified pan 0.3 s after an
+unverified one to a target no other pan visits, so that only the landing can show it; builds
+alternated. On an R6 over PTP/IP P5 was right 20 times in 20, against 18 in 20 before, whose 2
+misses returned the first pan's position (329 and 2021 ms). On a 6D over WPD raw ioctl and over
+PTP/IP, and on an R6 over WPD raw ioctl, it was right every time either way (40 calls per build).
+Wherever it was logged, every 5× pan of the other checks returned where the body landed, with both
+builds. An earlier sitting on a slower link, aimed at the centre, gave 20 in 20 against 12 in 20.
 
 That last row of the pan table above cost a whole measurement pass. Asking for "the far corner" with a big number such as
 9999 moves nothing at all, and since the previous position is still reported it looks exactly like a
