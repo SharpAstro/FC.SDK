@@ -158,6 +158,31 @@ public class ScriptTests
     }
 
     [Fact]
+    public async Task Cfn_reads_one_value_as_a_number_and_several_as_text()
+    {
+        var camera = new FakeCamera();
+        camera.CustomFunctions[0x0101] = [1];
+        camera.CustomFunctions[0x0106] = [3, 0];
+
+        var (result, _, _) = await RunAsync("""
+            expect cfn 0x0101 == 1
+            log cfn 0x0106
+            """, camera);
+
+        result.Succeeded.ShouldBeTrue(result.Summary);
+        result.Steps[1].Detail.ShouldBe("\"3,0\"");
+    }
+
+    [Fact]
+    public async Task Cfn_of_an_id_the_block_does_not_hold_stops_the_run()
+    {
+        var (result, _, _) = await RunAsync("log cfn 0x0502");
+
+        result.Stopped.ShouldNotBeNull();
+        result.Stopped.ShouldContain("holds no 0x0502");
+    }
+
+    [Fact]
     public async Task Frames_with_a_minimum_is_a_check_and_without_one_is_a_reading()
     {
         var camera = new FakeCamera { FramesPerCount = 12 };
@@ -327,6 +352,11 @@ internal sealed class FakeCamera : IScriptCamera
 
     public Task<uint?> ReadPropertyAsync(ushort code, CancellationToken ct) =>
         Task.FromResult(Properties.TryGetValue(code, out var value) ? value : (uint?)null);
+
+    public Dictionary<uint, uint[]> CustomFunctions { get; } = new();
+
+    public Task<IReadOnlyList<uint>?> ReadCustomFunctionAsync(uint functionId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<uint>?>(CustomFunctions.TryGetValue(functionId, out var values) ? values : null);
 
     public Task<EdsError> WritePropertyAsync(ushort code, uint value, CancellationToken ct)
     {
