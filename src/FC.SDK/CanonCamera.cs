@@ -1841,7 +1841,8 @@ public sealed class CanonCamera : IAsyncDisposable
     /// waits out its 3 s timeout and answers <c>OK</c> with the whole-sensor rect, as every 1× pan
     /// does; only <see cref="CanonEvfFrameInfo.Magnifier"/> read afterwards shows that the magnifier
     /// did not move (from the code: a dropped verified pan was not timed). Zoom with the default
-    /// <c>verify</c>, which waits for the 1× frame, before panning.
+    /// <c>verify</c>, which waits for the 1× frame, before panning: a pan sent right after such a
+    /// zoom from 5× landed 20 times in 20 on an R6 over WPD raw ioctl (<c>pan</c>, check C1).
     /// </para>
     /// </remarks>
     /// <param name="verify">

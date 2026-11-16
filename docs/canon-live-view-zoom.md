@@ -147,7 +147,8 @@ builds. An earlier sitting on a slower link, aimed at the centre, gave 20 in 20 
 
 **An R6 drops a pan sent 13–17 ms after zooming out from 5× to 1×** (0 of 4, WPD raw ioctl, landed
 when sent 111 ms after); a 6D lands it 4 of 4 at 3–4 ms. `FC.SDK.Diagnostics zoompan` measures it.
-Zoom with `verify`, which waits for the 1× frame, before panning.
+Zoom with `verify`, which waits for the 1× frame, before panning; `pan` does, and on an R6 over WPD
+raw ioctl a pan sent right after such a zoom from 5× landed 20 times in 20.
 
 That last row of the pan table above cost a whole measurement pass. Asking for "the far corner" with a big number such as
 9999 moves nothing at all, and since the previous position is still reported it looks exactly like a

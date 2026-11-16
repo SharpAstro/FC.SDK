@@ -111,7 +111,7 @@ hostOpt.Recursive = releaseOpt.Recursive = transportOpt.Recursive = true;
     ("evfout",   "Evf_OutputDevice across live-view start and stop: restored? Body controls alive? (#21)", [shootOpt, ptpReleaseOpt]),
     ("zoom",     "Why a zoom is ignored: sweep factors and LV AF systems against the zoom rect.", []),
     ("zoompan",  "Is a 0x9159 sent just after a 0x9158 zoom change dropped? Zoom pair x delay x target, judged on record 13.", [roundsOpt]),
-    ("pan",      "SetEvfZoomPositionAsync at 1x and 5x: timed, judged on record 13, numbered checks (#21); P5, a verified pan 0.3 s after a raw one (#30).", [roundsOpt]),
+    ("pan",      "SetEvfZoomPositionAsync at 1x and 5x: timed, judged on record 13, numbered checks (#21); P5, a verified pan 0.3 s after a raw one, and C1/C5, the centring after a verified zoom (#30).", [roundsOpt]),
     ("rec10",    "Record 10 across every frame, at rest and across raw 0x9159 pans with their send times (#30).", [roundsOpt]),
     ("zoompix",  "Visual proof of magnification and panning — writes JPEGs to compare.", [avOpt, tvOpt, isoOpt]),
     ("lens",     "Dump the lens / focus properties. Run with no lens, lens at AF, lens at MF and diff.", []),
@@ -1686,7 +1686,9 @@ try
         // which does not move there, so every 1x pan ran the 3 s timeout out (issue #21). P1-P4 pass
         // under 700 ms, the most any pan took over WPD on a 6D or an R6 (raw ioctl and COM). In P1-P4
         // each target differs from the position before it, so a frame from before the move cannot
-        // pass for the landing; P5 is the case where it can (issue #30).
+        // pass for the landing; P5 is the case where it can (issue #30). C1 and C5 check that the
+        // centring after each verified zoom landed, which is what the advice for the R6's drop after
+        // a zoom-out rests on (issue #30, `zoompan`).
         const long MaxMs = 700;
         int rounds = parse.GetValue(roundsOpt);
         Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
@@ -1720,14 +1722,24 @@ try
         var (cx, cy) = ((sensor.Width - m0.Width) / 2, (sensor.Height - m0.Height) / 2);
         Log($"sensor {sensor.Width}x{sensor.Height}, magnifier {m0.Width}x{m0.Height}, centre ({cx},{cy})");
 
+        var rows = new List<(string Check, string Expect, long Ms, bool Ok)>();
+
         async Task ZoomCentred(uint z)
         {
-            Log($"  zoom {z} = {await camera!.SetEvfZoomAsync(z, verify: false)}");
+            // Verified, so the pan below goes out after the body shows the new magnification: an R6
+            // drops a pan sent 13-17 ms after zooming out to 1x (issue #30, `zoompan`). Judged on
+            // record 13 in a frame read after the settle; the time is the verified zoom's own.
+            var sw = ClockWatch.StartNew(time);
+            var ze = await camera!.SetEvfZoomAsync(z);
+            var zms = sw.ElapsedMilliseconds;
             await camera.SetEvfZoomPositionAsync(cx, cy, verify: false);
             await Settle();
+            var at = (await Info())?.Magnifier;
+            var ok = ze is EdsError.OK && at is { } c && c.X == cx && c.Y == cy;
+            rows.Add(($"C{z} zoom {z}, then centre", $"record 13 at ({cx},{cy}) 1.5 s after the pan; zoom time, no bound", zms, ok));
+            Log($"  zoom {z} = {ze}, {zms} ms; centre ({cx},{cy}): record 13 {(at is { } g ? $"({g.X},{g.Y})" : "no frame")}"
+                + $"  {(ok ? "ok" : "FAIL")}");
         }
-
-        var rows = new List<(string Check, string Expect, long Ms, bool Ok)>();
         async Task Pan(string check, string expect, uint x, uint y, Func<CanonEvfRect, bool> landedRight)
         {
             var sw = ClockWatch.StartNew(time);
