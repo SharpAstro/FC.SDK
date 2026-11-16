@@ -145,6 +145,10 @@ PTP/IP, and on an R6 over WPD raw ioctl, it was right every time either way (40 
 Wherever it was logged, every 5× pan of the other checks returned where the body landed, with both
 builds. An earlier sitting on a slower link, aimed at the centre, gave 20 in 20 against 12 in 20.
 
+**An R6 drops a pan sent 13–17 ms after zooming out from 5× to 1×** (0 of 4, WPD raw ioctl, landed
+when sent 111 ms after); a 6D lands it 4 of 4 at 3–4 ms. `FC.SDK.Diagnostics zoompan` measures it.
+Zoom with `verify`, which waits for the 1× frame, before panning.
+
 That last row of the pan table above cost a whole measurement pass. Asking for "the far corner" with a big number such as
 9999 moves nothing at all, and since the previous position is still reported it looks exactly like a
 pan that does not work — the first reading of this table recorded 9999 as "clamped to (4097,2548)"
