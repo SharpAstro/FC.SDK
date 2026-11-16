@@ -111,7 +111,7 @@ hostOpt.Recursive = releaseOpt.Recursive = transportOpt.Recursive = true;
     ("evfout",   "Evf_OutputDevice across live-view start and stop: restored? Body controls alive? (#21)", [shootOpt, ptpReleaseOpt]),
     ("zoom",     "Why a zoom is ignored: sweep factors and LV AF systems against the zoom rect.", []),
     ("zoompan",  "Is a 0x9159 sent just after a 0x9158 zoom change dropped? Zoom pair x delay x target, judged on record 13.", [roundsOpt]),
-    ("pan",      "SetEvfZoomPositionAsync at 1x and 5x: timed, judged on record 13, numbered checks (#21).", [roundsOpt]),
+    ("pan",      "SetEvfZoomPositionAsync at 1x and 5x: timed, judged on record 13, numbered checks (#21); P5, a verified pan 0.3 s after a raw one (#30).", [roundsOpt]),
     ("rec10",    "Record 10 across every frame, at rest and across raw 0x9159 pans with their send times (#30).", [roundsOpt]),
     ("zoompix",  "Visual proof of magnification and panning — writes JPEGs to compare.", [avOpt, tvOpt, isoOpt]),
     ("lens",     "Dump the lens / focus properties. Run with no lens, lens at AF, lens at MF and diff.", []),
@@ -1683,10 +1683,10 @@ try
     {
         // SetEvfZoomPositionAsync with its default verify, timed, then judged on record 13 (the
         // magnifier) in a frame read after it returned. At 1x the settle used to wait on record 18,
-        // which does not move there, so every 1x pan ran the 3 s timeout out (issue #21). A check
-        // passes under 700 ms, the most any pan took over WPD on a 6D or an R6 (raw ioctl and COM).
-        // Each target differs from the position before it: a frame from before the move then cannot
-        // pass for the landing.
+        // which does not move there, so every 1x pan ran the 3 s timeout out (issue #21). P1-P4 pass
+        // under 700 ms, the most any pan took over WPD on a 6D or an R6 (raw ioctl and COM). In P1-P4
+        // each target differs from the position before it, so a frame from before the move cannot
+        // pass for the landing; P5 is the case where it can (issue #30).
         const long MaxMs = 700;
         int rounds = parse.GetValue(roundsOpt);
         Log($"StartLiveView = {await camera.StartLiveViewAsync()}");
@@ -1731,13 +1731,15 @@ try
         async Task Pan(string check, string expect, uint x, uint y, Func<CanonEvfRect, bool> landedRight)
         {
             var sw = ClockWatch.StartNew(time);
-            var (e, _) = await camera!.SetEvfZoomPositionAsync(x, y);
+            var (e, returned) = await camera!.SetEvfZoomPositionAsync(x, y);
             var ms = sw.ElapsedMilliseconds;
             var now = (await Info())?.Magnifier;
             var ok = e is EdsError.OK && ms < MaxMs && now is { } r && landedRight(r);
             rows.Add((check, expect, ms, ok));
-            Log($"  {check}: ({x},{y}) = {e}, {ms} ms, record 13 {(now is { } g ? $"({g.X},{g.Y})" : "no frame")}"
-                + $"  {(ok ? "ok" : "FAIL")}");
+            // What the call returned is logged as well: the zoom rect of the frame it settled on, which
+            // at 5x is the magnifier's position and at 1x the whole sensor.
+            Log($"  {check}: ({x},{y}) = {e}, {ms} ms, returned {(returned is { } q ? $"({q.X},{q.Y})" : "no frame")}, "
+                + $"record 13 {(now is { } g ? $"({g.X},{g.Y})" : "no frame")}  {(ok ? "ok" : "FAIL")}");
         }
 
         for (int round = 1; round <= rounds; round++)
@@ -1757,6 +1759,28 @@ try
             await Pan("P4 5x, to (0,0), clamped",
                 "record 13 near (0,0): (271,364) on a 6D with a lens, (196,212) on an R6, (0,0) bare; under 0.7 s",
                 0, 0, r => r.X <= 600 && r.Y <= 600);
+
+            // P5 is the stale start of issue #30: an unverified pan, then 0.3 s later a verified one.
+            // Over PTP/IP an R6 hands out the first pan's landing after the second command went out,
+            // and judged on arrival it passed for the second one's. The target is new to each round
+            // and no other pan visits it, so no frame from before the move can show it: a call that
+            // returns it saw the landing, and one that runs out its timeout on an old frame fails.
+            // Judged on what the call returned (record 18 at 5x is the magnifier's position); record
+            // 13 is read afterwards too, to say where the body went.
+            var step = 100u * (uint)((round - 1) % 10);
+            var (tx, ty) = (1500u + step, 800u + step);
+            await camera.SetEvfZoomPositionAsync(3000, 2000, verify: false);
+            for (var t = ClockWatch.StartNew(time); t.ElapsedMilliseconds < 300;) await Info();
+            var quick = ClockWatch.StartNew(time);
+            var (qe, landed) = await camera.SetEvfZoomPositionAsync(tx, ty);
+            var qms = quick.ElapsedMilliseconds;
+            var after = (await Info())?.Magnifier;
+            var qok = qe is EdsError.OK && landed is { } l && l.X == tx && l.Y == ty;
+            rows.Add(("P5 5x, new target 0.3 s after a raw pan", "returns the target, not (3000,2000); no time bound", qms, qok));
+            Log($"  P5 5x, ({tx},{ty}) 0.3 s after a raw pan to (3000,2000): = {qe}, {qms} ms, "
+                + $"returned {(landed is { } lr ? $"({lr.X},{lr.Y})" : "no frame")}, "
+                + $"record 13 after {(after is { } a ? $"({a.X},{a.Y})" : "no frame")}  {(qok ? "ok" : "FAIL")}");
+            await Settle();
         }
 
         await ZoomCentred(1);
