@@ -173,7 +173,7 @@ and watching which tracked:
 | **8** | `count, state, 1, x, y, w, h` | **the AF frame**; state 16 at rest, 17 while focus is achieved |
 | **7** | `1` / `2` | **AF busy**: 2 while the body drives AF |
 | **17** | 4096 bytes | **exposure histogram** — 4 channels × 256 bins × uint32, decoded and confirmed |
-| 10 | `0x6A70974B, …` | a Unix timestamp and a counter |
+| **10** | `seconds, ms` | **when the body made the frame**: its own wall clock in local time, counted like a Unix time, then 0–999 ms (issue #30) |
 | 0xFFFFFFFF | 32–56 bytes | frame header |
 | 12 | `0` | not identified (a 6D sends it, an R6 does not) |
 

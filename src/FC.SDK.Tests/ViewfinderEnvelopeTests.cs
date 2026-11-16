@@ -37,7 +37,7 @@ public class ViewfinderEnvelopeTests
             (12, U32(0)),
             (13, U32(2184, 1456, 1104, 736)),
             (14, U32(SensorWidth, SensorHeight)),
-            (10, U32(0x6A70974B, 0x29C)),                        // a Unix timestamp, and a counter
+            (10, U32(0x6A70974B, 0x29C)),                        // when the frame was made: seconds of the body's clock, then 668 ms
             (7, U32(1)),
             (17, new byte[4096]),                                // histogram: 4 x 256 x uint32
             (0, []),

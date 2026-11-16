@@ -61,7 +61,7 @@ also unblocks §2.
 > (0x9158 / 0x9159), not a property, so the point/rect accessor TianWen was waiting for was never
 > needed. What actually blocks magnification is `Evf_AFMode` (0xD1BA), which silently discards the
 > zoom in its default setting. Full measurements in **`docs/canon-live-view-zoom.md`**. Live-view AF
-> (`AutoFocusLiveViewAsync`, 0x9154) works too. Records 4, 7, 8 and 13 are decoded as `CanonEvfFrameInfo` (issue #21); still undecoded: 12 on
+> (`AutoFocusLiveViewAsync`, 0x9154) works too. Records 4, 7, 8, 10 and 13 are decoded as `CanonEvfFrameInfo` (issues #21 and #30); still undecoded: 12 on
 > both bodies, and 16, 19, 20, 21, 22, 24, 28 and 29, which only an R6 sends.
 >
 > **The histogram (record 17) is now decoded too** — `CanonEvfHistogram` /
@@ -80,7 +80,7 @@ Functionally the biggest gap, and the one a consumer has already hit (see below)
 is how you focus on a star, and it is the only planetary regime a DSLR has.**
 
 - **The envelope is parsed for the image record and nothing else.** *(Closed: `GetLiveViewFrameAndInfoAsync`
-  returns the JPEG with records 4, 7, 8, 13, 14 and 18 from one walk over the envelope, issue #21.)*
+  returns the JPEG with records 4, 7, 8, 10, 13, 14 and 18 from one walk over the envelope, issues #21 and #30.)*
   Before that, `CanonViewfinderFrame.ExtractJpeg` walked `[length][type][payload]` records looking
   for types 1/9/11 and stepped past the rest: focus points, histogram, zoom metadata. EDSDK surfaces
   these as properties on the EVF image ref.

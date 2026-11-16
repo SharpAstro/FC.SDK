@@ -80,8 +80,9 @@ Full write-up in **`docs/canon-live-view-zoom.md`**. Three things that are easy 
   was asked for. **But 18 is the origin of the image sent plus the size of the area shown, and at
   10× the JPEG is still the 5× image**, so 18 reads the 5× origin with the 10× size. Where the
   magnifier (and so a pan) actually is, at every magnification 1× included, is record 13.
-  `GetLiveViewFrameAndInfoAsync` decodes 4, 7, 8, 13, 14 and 18 from the same envelope as the
-  frame; panning is exact and silently clamped, and record 13 reports where it landed.
+  `GetLiveViewFrameAndInfoAsync` decodes 4, 7, 8, 10, 13, 14 and 18 from the same envelope as the
+  frame; panning is exact and silently clamped, and record 13 reports where it landed. Record 10
+  is when the body made the frame.
 
 **Allowed values are what you may *write*, not what a property can *report*.** `Evf_AFMode`/`AFMode`
 (0xD108) follows the lens's own AF/MF switch and reads `ManualFocus` when it is at MF — a value
