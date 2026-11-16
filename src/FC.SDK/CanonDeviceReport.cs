@@ -271,7 +271,7 @@ public static class CanonDeviceReport
         foreach (var entry in block.Entries)
         {
             report.AppendLine(
-                $"| {entry.MenuNumber} | C.Fn {entry.GroupId} | `0x{entry.FunctionId:X4}` | {entry.Value} |");
+                $"| {entry.MenuNumber} | C.Fn {entry.GroupId} | `0x{entry.FunctionId:X4}` | {string.Join(", ", entry.Values)} |");
         }
         report.AppendLine();
 
