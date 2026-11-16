@@ -1567,12 +1567,53 @@ public sealed class CanonCamera : IAsyncDisposable
     public async Task<(EdsError Error, ReadOnlyMemory<byte> Jpeg, CanonEvfFrameInfo Info)> GetLiveViewFrameAndInfoAsync(
         CancellationToken ct = default)
     {
+        var requested = _time.GetTimestamp();
         var (err, envelope) = await _canon.GetViewfinderEnvelopeAsync(ct);
         if (err is not EdsError.OK || envelope.Length is 0) return (err, ReadOnlyMemory<byte>.Empty, default);
 
         var jpeg = CanonViewfinderFrame.Decode(envelope, out var info);
+        if (info.MadeAt is { } madeAt) LearnFrameClock(requested, madeAt);
         return (EdsError.OK, jpeg, info);
     }
+
+    // Host time minus body time, in ticks: the smallest (request time - record 10) of any frame read
+    // through GetLiveViewFrameAndInfoAsync, a pan's own reads included. GetLiveViewFrameAsync and
+    // the other readers do not feed it. A frame made before its request gives at least the true
+    // offset, so the freshest such frame sets it. Its error can go either way (issue #30):
+    // - Late: a session that has seen only stale frames (an R6 over PTP/IP handed out frames up to
+    //   9.6 s old) reads made times late, so a frame made just before a pan can pass as made after
+    //   it, which is how every frame was judged before.
+    // - Early: a frame the body makes while its own poll is in flight gives up to that poll's
+    //   length less, so made times read early. A pan's first frames can then be taken for its
+    //   start, and a pan the body clamps runs out the settle timeout.
+    // This timestamp and a pan's send time are both taken before PtpSession's half-duplex gate, so
+    // a GetEvent in flight widens both errors. It is never reset: a body clock set back mid-session
+    // would leave every later frame "made before", and every verified pan to a clamped target would
+    // run out its timeout. long.MaxValue until a frame with record 10 arrives.
+    private long _frameClockOffsetTicks = long.MaxValue;
+
+    private void LearnFrameClock(long requested, TimeSpan madeAt)
+    {
+        var offset = (HostTime(requested) - madeAt).Ticks;
+        var seen = Interlocked.Read(ref _frameClockOffsetTicks);
+        while (offset < seen)
+        {
+            var was = Interlocked.CompareExchange(ref _frameClockOffsetTicks, offset, seen);
+            if (was == seen) break;
+            seen = was;
+        }
+    }
+
+    private TimeSpan HostTime(long timestamp) => _time.GetElapsedTime(0, timestamp);
+
+    /// <summary>
+    /// When a frame was made, on the host clock, or null when it carries no record 10 or no offset
+    /// has been learnt yet.
+    /// </summary>
+    private TimeSpan? MadeOnHost(CanonEvfFrameInfo info) =>
+        info.MadeAt is { } madeAt && Interlocked.Read(ref _frameClockOffsetTicks) is var offset && offset != long.MaxValue
+            ? madeAt + TimeSpan.FromTicks(offset)
+            : null;
 
     // --- Live view magnification ---
     //
@@ -1795,12 +1836,22 @@ public sealed class CanonCamera : IAsyncDisposable
     /// </remarks>
     /// <param name="verify">
     /// Wait for the move to appear in the magnifier rect (record 13), or in the zoom rect when the
-    /// body sends no record 13, and return the zoom rect of that frame. On by default: the body
-    /// streams pre-move frames afterwards (for up to a second over WPD, up to 2 s on an R6 over
-    /// PTP/IP), so an immediate read reports the <i>previous</i> position — which looks exactly like a
-    /// pan that did not work. Settling on record 13 is what makes a 1× pan return at once: on record
-    /// 18, which does not move at 1×, it waited out the whole 3 s timeout (3021–3144 ms on an R6 and a
-    /// 6D over WPD raw ioctl before; 151–408 ms after).
+    /// body sends no record 13, and return the zoom rect of that frame. On by default: frames made
+    /// before the move keep arriving after it (on an R6 over PTP/IP, up to 2.7 s after they were made
+    /// in one run and 9.6 s on a congested link), so an immediate read reports the <i>previous</i>
+    /// position — which looks exactly like a pan that did not work. When the body stamps its frames
+    /// (record 10, <see cref="CanonEvfFrameInfo.MadeAt"/>), only a frame made after the command can
+    /// settle the call; one made before it only updates where the pan started. The two clocks are
+    /// matched on frames read through <see cref="GetLiveViewFrameAndInfoAsync"/>, this call's own
+    /// reads included. The body still takes its own time to show a pan, inside the 3 s timeout:
+    /// 60–120 ms on an R6 over WPD raw ioctl and 150–270 ms over PTP/IP, 140–350 ms on a 6D over WPD
+    /// raw ioctl (about 300 ms at 5×, issue #30). <b>A pan sent within that delay after an
+    /// unverified one can still settle on the earlier pan's landing</b>, since the body makes that
+    /// frame after the command: a 6D's capture in issue #30 has one, made 26 ms after a pan sent
+    /// 306 ms after an unverified one. Verify each pan, or wait that delay out, before the next.
+    /// Settling on record 13 is what makes a 1× pan return at once: on record 18, which does not
+    /// move at 1×, it waited out the whole 3 s timeout (3021–3144 ms on an R6 and a 6D over WPD raw
+    /// ioctl before; 151–408 ms after).
     /// At 1× the returned rect is the whole sensor; the magnifier is in
     /// <see cref="CanonEvfFrameInfo.Magnifier"/>.
     /// </param>
@@ -1829,6 +1880,7 @@ public sealed class CanonCamera : IAsyncDisposable
             }
         }
 
+        var sent = HostTime(_time.GetTimestamp());
         var err = await _canon.EvfZoomPositionAsync(x, y, ct);
         if (err is not EdsError.OK)
         {
@@ -1841,9 +1893,24 @@ public sealed class CanonCamera : IAsyncDisposable
         // Settled on the magnifier rect (record 13) when the body sends it: a pan moves it at every
         // magnification, where the zoom rect (record 18) stays the whole sensor at 1x and used to run
         // the whole settle timeout out. See CanonViewfinderFrame.PanSettled.
+        //
+        // A frame made before the command went out cannot show the pan, wherever it arrives: it
+        // only says where the magnifier was, so it becomes the start instead. Over PTP/IP an R6 hands
+        // out frames up to 2.7 s after it made them (9.6 s on a congested link), and judged on
+        // arrival alone an earlier pan's landing passed for this one's (5 false settles in 40 pans
+        // replayed over PTP/IP, issue #30). An earlier pan's landing that the body makes after the
+        // command still passes; see the verify remarks. A body without record 10 is judged on
+        // arrival, as before.
         var from = start ?? default;
-        var settled = await WaitForFrameInfoAsync(
-            i => CanonViewfinderFrame.PanSettled(from, i, x, y), ZoomSettleTimeout, ct);
+        var settled = await WaitForFrameInfoAsync(i =>
+        {
+            if (MadeOnHost(i) is { } made && made < sent)
+            {
+                from = i;
+                return false;
+            }
+            return CanonViewfinderFrame.PanSettled(from, i, x, y);
+        }, ZoomSettleTimeout, ct);
 
         if (settled?.Magnifier is { } m && (m.X != x || m.Y != y))
             _logger.LogDebug("SetEvfZoomPosition({X},{Y}) clamped to ({LX},{LY})", x, y, m.X, m.Y);

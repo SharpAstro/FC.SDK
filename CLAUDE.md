@@ -82,7 +82,10 @@ Full write-up in **`docs/canon-live-view-zoom.md`**. Three things that are easy 
   magnifier (and so a pan) actually is, at every magnification 1× included, is record 13.
   `GetLiveViewFrameAndInfoAsync` decodes 4, 7, 8, 10, 13, 14 and 18 from the same envelope as the
   frame; panning is exact and silently clamped, and record 13 reports where it landed. Record 10
-  is when the body made the frame.
+  is when the body made the frame, and `SetEvfZoomPositionAsync` settles only on frames made after
+  its command: an R6 over PTP/IP hands out frames up to 2.7 s late, 9.6 s on a congested link
+  (issue #30). A pan sent within the body's own delay after an unverified one can still settle on
+  that pan's landing, which the body makes after the command.
 
 **Allowed values are what you may *write*, not what a property can *report*.** `Evf_AFMode`/`AFMode`
 (0xD108) follows the lens's own AF/MF switch and reads `ManualFocus` when it is at MF — a value
