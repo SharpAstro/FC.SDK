@@ -134,6 +134,57 @@ That means extending `CanonCustomFunctionId` to a new body no longer needs someo
 analyser to hand over a raw hex id — a reporter can dump the block (already logged by the viewer's
 C.Fn action) and say which menu number does what, read straight off the camera's own menu.
 
+## A 6D sends one group at a time: the one last shown in its menu
+
+Measured 2026-11-16 on an EOS 6D over WPD raw ioctl with `FC.SDK.Diagnostics watch`, which holds a
+session open (so the body's own menus work, where a cabled 6D with no session answers every button
+"busy") and prints each `0xD1A0` the body announces, diffed entry by entry. The operator stepped
+through every item of the camera's C.Fn menu and said what was changed.
+
+**`0xD1A0` on a 6D carries a single group, and which one is whatever the camera's C.Fn menu last
+displayed.** Opening C.Fn I replaced the five-entry group 4 block (156 bytes) with a six-entry group 1
+block (96 bytes); opening C.Fn II replaced it with group 3 (188 bytes). Each change inside the shown
+group is announced at once on the event stream. Consequences:
+
+- A dump shows one group, so a device report from a 6D lists whatever group the reporter last had
+  open, and a write can only reach an entry of that group: `SetValue` is false for an id not in the
+  block. Nothing writes a 6D C.Fn today (its NR and mirror lockup are properties), so nothing broke.
+- **The group id is not the menu's roman numeral.** The 6D's menu has three groups, I, II and III, sent
+  as wire groups 1, 3 and 4. Wire group 2 (Image on a 450D) has no menu group on this body. Entry order
+  inside a group does match the menu's item order.
+- The 450D sent all four groups in one block, so this is a property of the body, not of the protocol.
+- The earlier note that the still/movie lever "changes the block from 156 to 188 bytes" is most likely
+  this: 188 bytes is group 3, so that run caught the body showing a different C.Fn group.
+
+| Menu | Wire id | Item (6D menu) | Values seen and their meaning |
+|---|---|---|---|
+| I-1 | `0x0101` | Exposure level increments | 1 → 0 (same id as the 450D's C.Fn 1, same setting) |
+| I-2 | `0x0102` | ISO speed setting increments | 0 ↔ 1 |
+| I-3 | `0x0104` | Bracketing auto cancel | 0 ↔ 1 |
+| I-4 | `0x0105` | Bracketing sequence | 0 `0,-,+` · 1 `-,0,+` · 2 `+,0,-` (from the menu order; not changed on the wire) |
+| I-5 | `0x0106` | Number of bracketed shots | two words, `3,0`; first word 0 = 3 · 1 = 2 · 2 = 5 · 3 = 7 (menu order; not changed on the wire) |
+| I-6 | `0x0108` | Safety shift | 0 → 1 → 2 → 0 (off, Tv/Av, ISO) |
+| II-1 | `0x0502` | Tracking sensitivity | set to +1 reads 1; probably signed, a negative step not yet seen |
+| II-2 | `0x0518` | Accel./decel. tracking | 0, not changed |
+| II-3 | `0x0519` | AI Servo 1st image priority | 0, not changed |
+| II-4 | `0x051A` | AI Servo 2nd image priority | 0 → 2 |
+| II-5 | `0x050E` | AF-assist beam firing | 0 → 1 (same id as the 450D's C.Fn 7, same setting) |
+| II-6 | `0x0505` | Lens drive when AF impossible | 0 → 1 |
+| II-7 | `0x0516` | Orientation linked AF point | 0 → 1 |
+| II-8 | `0x0510` | Superimposed display | 0 → 1 |
+| II-9 | `0x0507` | AF Microadjustment | 16 words; the first went 0 → 1 → 0 → 1 (the mode), the sixth reads 2 throughout |
+| III-1 | `0x0706` | Dial direction during Tv/Av | 0 normal → 1 reverse |
+| III-2 | `0x080B` | Focusing screen | 0 Eg-A II · 1 Eg-D · 2 Eg-S (0 → 1 seen) |
+| III-3 | `0x070F` | Multi function lock | two words; the second is a mask, bit 0 main dial · bit 1 quick control dial · bit 2 multi-controller (2 → 7 with all three ticked). The first word, 0, is unexplained |
+| III-4 | `0x040A` | Warnings in viewfinder | a mask of the four checkboxes (monochrome, WB correction, ISO expansion, spot meter); 3 → 11 seen, which box is which bit not yet settled |
+| III-5 | `0x070C` | Custom Controls | 19 words, not changed; not decoded |
+
+**Two settings now carry the same wire id on two bodies** (`0x0101` and `0x050E`, a 450D and a 6D),
+which does not fit the "per-model ids" reading this document started from. Two matches are not a
+rule, and `MirrorLockupIdFor` stays verified-bodies-only. But if the ids are Canon-wide setting codes,
+a 200D II's mirror lockup is `0x060F` like the 450D's, and a device report from that body (issue #1)
+would show whether it is.
+
 ## EDSDK's property table, separately
 
 While reading `.rdata` for the above, the same pass recovered EDSDK's PTP-code ↔ `EdsPropertyId`

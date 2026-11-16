@@ -218,8 +218,10 @@ allowed-value list got that one wrong.
   position still delivers image record 1. Record 9 presumably needs actual movie *recording*, which we
   cannot start (`Record`, 0x510, has no PTP pairing in EDSDK's table either). Corrected accordingly.
 - Movie position also narrows `Tv` (52 values down to 22) and `ISOSpeed`, moves `MeteringMode` 4 → 5,
-  empties `AFMode`'s allowed list, and changes the C.Fn block size at 0xD1A0 from 156 to 188 bytes.
-  All consequences of the lever rather than indicators of it.
+  and empties `AFMode`'s allowed list. All consequences of the lever rather than indicators of it.
+  (This used to add that the lever changes the C.Fn block at 0xD1A0 from 156 to 188 bytes. A 6D sends
+  only the C.Fn group its menu last showed, and 188 bytes is its group 3, so that was most likely the
+  body showing another group; see `docs/canon-custom-functions.md`.)
 
 ## Mirror-lockup capture, and why its cleanup is the caller's job
 
@@ -961,7 +963,7 @@ explanations and the tempting one is wrong more often than not:
   loudly only at level 0 and adds a milder note at level 1 (libgphoto2 reads 1 as half charged, see
   "EOS R6 over WPD"), and that note is still worth heeding — just do not let it end the investigation.
 
-Test targets so far: Canon EOS 6D (USB VID=0x04A9, PID=0x3215, WiFi AP at 192.168.0.1) and
+Test targets so far: Canon EOS 6D (USB VID=0x04A9, PID=0x3250, WiFi AP at 192.168.0.1) and
 EOS 450D (USB PID=0x3145) — the 450D is the body most of the WPD, live-view, C.Fn and raw-ioctl
 findings were verified on, and being DIGIC III it is the strictest of the three. EOS R6 (DIGIC X,
 USB PID=0x32F5) is verified over WPD raw ioctl: see "EOS R6 over WPD" above. It is also verified over
