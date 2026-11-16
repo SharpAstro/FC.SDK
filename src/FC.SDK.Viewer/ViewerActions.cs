@@ -343,6 +343,8 @@ public sealed partial class ViewerActions(
             state.SerialNumber = null;
             state.Readings.Clear();
             state.RawProperties = [];
+            state.CustomFunctions = [];
+            state.CfnTrial = null;
             state.StatusMessage = "Disconnected.";
         }
     }
@@ -441,6 +443,8 @@ public sealed partial class ViewerActions(
         _logger.LogInformation("CloseSession = {Error}", err);
         state.SessionOpen = false;
         state.RemoteMode = false;
+        state.CustomFunctions = [];
+        state.CfnTrial = null;
         state.StatusMessage = $"Session closed ({err}).";
     });
 
@@ -1418,6 +1422,98 @@ public sealed partial class ViewerActions(
         // Far too chatty for the info level — the camera re-announces dozens of properties per second
         // while live view runs — but invaluable at debug level in the log file.
         _logger.LogDebug("PropertyChanged: {PropertyId} = 0x{Value:X}", e.PropertyId, e.Value);
+
+        // The camera announces 0xD1A0 whenever its menu shows another C.Fn group or the operator
+        // changes an item, so the panel follows the camera's own screen. Read from the cache the
+        // event just filled: re-requesting here would make the camera announce it again.
+        if (e.PtpCode == 0xD1A0 && sender is CanonCamera camera)
+        {
+            _ = Task.Run(async () =>
+            {
+                var (err, block) = await camera.GetCustomFunctionBlockAsync();
+                if (err is EdsError.OK && block is not null)
+                {
+                    state.CustomFunctions = block.Entries;
+                    state.Invalidate();
+                }
+            });
+        }
+    }
+
+    // --- Custom Functions, checked against the camera's own menu ---
+
+    /// <summary>Reads the C.Fn block afresh into <see cref="ViewerState.CustomFunctions"/>.</summary>
+    public void RefreshCustomFunctions() => Enqueue("Read C.Fn", async ct =>
+    {
+        if (state.Camera is not { } camera) return;
+        var (err, block) = await camera.GetCustomFunctionBlockAsync(refresh: true, ct);
+        if (err is EdsError.OK && block is not null) state.CustomFunctions = block.Entries;
+        else state.StatusMessage = $"C.Fn block: {err}";
+    });
+
+    /// <summary>
+    /// Writes one C.Fn value so the operator can check the camera's menu shows what
+    /// <paramref name="shown"/> says. The previous value is kept and written back by
+    /// <see cref="AnswerCustomFunction"/>.
+    /// </summary>
+    public void TryCustomFunction(CanonCustomFunctionInfo info, uint value, string shown) =>
+        Enqueue($"C.Fn {info.MenuLabel} = {value}", async ct =>
+        {
+            if (state.Camera is not { } camera || state.CfnTrial is not null) return;
+            var (err, block) = await camera.GetCustomFunctionBlockAsync(refresh: true, ct);
+            if (err is not EdsError.OK || block?.Entries.FirstOrDefault(e => e.FunctionId == info.FunctionId) is not { MenuNumber: > 0 } entry)
+            {
+                state.StatusMessage = $"{info.MenuLabel} is not in the block the camera sent: open its group on the camera.";
+                return;
+            }
+
+            var previous = entry.Values[info.Word];
+            var (kept, readBack) = await WriteCustomFunctionAsync(camera, block, info, value, ct);
+            state.CfnTrial = new CustomFunctionTrial(info.FunctionId, info.Word, previous, value, kept, shown);
+            _logger.LogInformation("C.Fn {Label} 0x{Id:X4}: wrote {Value} ({Shown}), read back {ReadBack}{Kept}",
+                info.MenuLabel, info.FunctionId, value, shown, readBack?.ToString() ?? "nothing",
+                kept ? "" : ": the camera KEPT its old value");
+            state.StatusMessage = kept
+                ? $"{info.MenuLabel}: reopen it on the camera. Does it show \"{shown}\"?"
+                : $"{info.MenuLabel}: the camera kept its old value. A 6D may not take this write.";
+        });
+
+    /// <summary>Records whether the camera's menu showed the trial value, then writes the previous one back.</summary>
+    public void AnswerCustomFunction(bool matches) => Enqueue("C.Fn answer", async ct =>
+    {
+        if (state.Camera is not { } camera || state.CfnTrial is not { } trial) return;
+        var info = CanonCustomFunctionCatalog.Describe(camera.Model, trial.FunctionId);
+        var label = info?.MenuLabel ?? $"0x{trial.FunctionId:X4}";
+        _logger.LogInformation("C.Fn {Label} 0x{Id:X4} = {Value} (\"{Shown}\"): operator says the camera {Verdict}",
+            label, trial.FunctionId, trial.Written, trial.Shown,
+            !trial.Kept ? "was not asked (the write did not take)" : matches ? "SHOWS it" : "does NOT show it");
+
+        var (err, block) = await camera.GetCustomFunctionBlockAsync(refresh: true, ct);
+        var restored = err is EdsError.OK && block is not null && info is not null
+            && (await WriteCustomFunctionAsync(camera, block, info, trial.Previous, ct)).Kept;
+        _logger.LogInformation("C.Fn {Label}: restored {Previous}: {Result}", label, trial.Previous, restored ? "kept" : "NOT restored, set it by hand");
+        state.StatusMessage = restored
+            ? $"{label}: recorded \"{(matches ? "matches" : "does not match")}\" and put back {trial.Previous}."
+            : $"{label}: recorded, but putting back {trial.Previous} did not take. Set it on the camera.";
+        state.CfnTrial = null;
+    });
+
+    private async Task<(bool Kept, uint? ReadBack)> WriteCustomFunctionAsync(
+        CanonCamera camera, CanonCustomFunctionBlock block, CanonCustomFunctionInfo info, uint value, CancellationToken ct)
+    {
+        if (!block.SetValue(info.FunctionId, info.Word, value)) return (false, null);
+        var err = await camera.SetCustomFunctionBlockAsync(block, ct);
+        if (err is not EdsError.OK) { _logger.LogWarning("C.Fn write answered {Error}", err); return (false, null); }
+
+        // A body echoes a written value before deciding whether to keep it, so wait out that window
+        // and read afresh; the response code proves nothing on these bodies.
+        await Task.Delay(TimeSpan.FromMilliseconds(2500), _time, ct);
+        var (readErr, after) = await camera.GetCustomFunctionBlockAsync(refresh: true, ct);
+        if (readErr is not EdsError.OK || after is null) return (false, null);
+        state.CustomFunctions = after.Entries;
+        var entry = after.Entries.FirstOrDefault(e => e.FunctionId == info.FunctionId);
+        var back = entry.MenuNumber > 0 ? entry.Values[info.Word] : (uint?)null;
+        return (back == value, back);
     }
 
     private void OnStateChanged(object? sender, CanonStateChangedEventArgs e)

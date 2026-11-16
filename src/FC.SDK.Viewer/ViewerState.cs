@@ -40,6 +40,15 @@ public sealed record HdrRaster(int Width, int Height, float[] Rgba, SdlVulkan.Re
 /// </summary>
 public enum PreviewPane { LiveView, Capture }
 
+/// <summary>A Custom Function value written for the operator to check on the camera's menu.</summary>
+/// <param name="FunctionId">The entry written.</param>
+/// <param name="Word">Which of its values.</param>
+/// <param name="Previous">What it held before, written back once the operator answers.</param>
+/// <param name="Written">What was written.</param>
+/// <param name="Kept">Whether a fresh read-back showed <paramref name="Written"/>; a body can answer OK and keep its old value.</param>
+/// <param name="Shown">What the menu should now show, in the menu's words.</param>
+public sealed record CustomFunctionTrial(uint FunctionId, int Word, uint Previous, uint Written, bool Kept, string Shown);
+
 /// <summary>
 /// Everything the UI draws. Mutated only from the render thread or from the action queue's
 /// completion callbacks, both of which set <see cref="NeedsRedraw"/>.
@@ -66,6 +75,18 @@ public sealed class ViewerState
 
     public Dictionary<EdsPropertyId, ControlReading> Readings { get; } = [];
     public IReadOnlyList<CanonPropertySnapshot> RawProperties { get; set; } = [];
+
+    /// <summary>
+    /// The Custom Function entries the camera last sent. A 6D sends only the group its menu last
+    /// showed, so this is that group, not every C.Fn the body has.
+    /// </summary>
+    public IReadOnlyList<CanonCustomFunctionEntry> CustomFunctions { get; set; } = [];
+
+    /// <summary>
+    /// A value written to check it against the camera's own menu, waiting for the operator to say
+    /// whether the menu shows it. Answering writes <see cref="CustomFunctionTrial.Previous"/> back.
+    /// </summary>
+    public CustomFunctionTrial? CfnTrial { get; set; }
 
     public bool LiveViewActive { get; set; }
     public Raster? LiveViewFrame { get; set; }

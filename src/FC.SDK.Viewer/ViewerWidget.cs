@@ -555,6 +555,8 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             }
         }
 
+        AddCustomFunctionRows(rows);
+
         rows.Add(SectionHeader($"Event-stream property cache ({_state.RawProperties.Count})"));
         if (_state.RawProperties.Count == 0)
         {
@@ -619,6 +621,106 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             .Pad(3f)
             .RowH(ViewerTheme.Metrics.ItemHeight);
     }
+
+    /// <summary>
+    /// The Custom Functions the camera last sent, in its own menu's words, each settable from here so
+    /// the operator can check the camera's menu shows what was written. A write waits for "Matches" or
+    /// "Doesn't match" and is then undone, so the panel measures and leaves the body as it was.
+    /// </summary>
+    /// <remarks>
+    /// A 6D sends only the group its menu last showed, so the header names that group and the rows
+    /// follow the camera's screen as it moves between groups.
+    /// </remarks>
+    private void AddCustomFunctionRows(List<Layout.Node> rows)
+    {
+        var entries = _state.CustomFunctions;
+        var catalog = CanonCustomFunctionCatalog.For(_state.Model);
+        var shownGroup = entries.Count > 0 && catalog.FirstOrDefault(i => i.FunctionId == entries[0].FunctionId) is { } first
+            ? first.Group
+            : entries.Count > 0 ? $"group {entries[0].GroupId}" : null;
+        rows.Add(SectionHeader(shownGroup is null ? "Custom Functions" : $"Custom Functions: {shownGroup}"));
+
+        var trial = _state.CfnTrial;
+        var unavailable = !_state.SessionOpen ? "Open a session first"
+            : trial is not null ? "Answer the open check first"
+            : _state.BusyOperation is { } busy ? $"Waiting for {busy}"
+            : null;
+
+        rows.Add(Button(entries.Count == 0 ? "Read C.Fn from the camera" : "Read C.Fn again", "cfn-read",
+            _actions.RefreshCustomFunctions, !_state.SessionOpen ? "Open a session first" : null,
+            tooltip: "Open a C.Fn group on the camera to show it here"));
+        if (entries.Count == 0) return;
+        if (catalog.Count == 0)
+            rows.Add(Note($"No names for {_state.Model ?? "this body"} yet; raw values below."));
+
+        foreach (var entry in entries)
+        {
+            var info = catalog.FirstOrDefault(i => i.FunctionId == entry.FunctionId);
+            var value = info is null ? entry.Value : entry.Values[info.Word];
+            var label = info is null ? $"0x{entry.FunctionId:X4}" : $"{info.MenuLabel} {info.Name}";
+
+            if (info is null || info.Options.Count == 0)
+            {
+                rows.Add(CfnRow(label, string.Join(",", entry.Values), ViewerTheme.Palette.DimText, StepSpacer(), StepSpacer()));
+            }
+            else if (info.IsMask)
+            {
+                rows.Add(CfnRow(label, $"mask 0x{value:X}" + (info.Guess ? " (bit order unconfirmed)" : ""),
+                    ViewerTheme.Palette.HeaderText, StepSpacer(), StepSpacer()));
+                for (int bit = 0; bit < info.Options.Count; bit++)
+                {
+                    var mask = 1u << bit;
+                    var on = (value & mask) != 0;
+                    var next = value ^ mask;
+                    var shown = $"{info.Options[bit]} {(on ? "unticked" : "ticked")}";
+                    var box = Layout.Builder.Checkbox(info.Options[bit], on,
+                            _ => { if (unavailable is null) _actions.TryCustomFunction(info, next, shown); },
+                            ViewerTheme.Checkbox, SmallFontSize, new HitResult.ButtonHit($"cfn-{entry.FunctionId:X4}-{bit}"))
+                        .PadX(18f)
+                        .RowH(ViewerTheme.Metrics.ItemHeight);
+                    rows.Add(unavailable is null ? box : box.Disabled(unavailable));
+                }
+            }
+            else
+            {
+                var count = (uint)info.Options.Count;
+                string Show(uint v) => v < count ? info.Options[(int)v] : $"value {v}";
+                var text = Show(value) + (info.Guess ? " (guess)" : "");
+                var prev = (value + count - 1) % count;
+                var next = (value + 1) % count;
+                rows.Add(CfnRow(label, text, info.Guess ? ViewerTheme.Warn : ViewerTheme.Palette.HeaderText,
+                    StepButton(Layout.IconKind.CaretLeft, $"cfn-{entry.FunctionId:X4}-prev", unavailable,
+                        () => _actions.TryCustomFunction(info, prev, Show(prev))),
+                    StepButton(Layout.IconKind.CaretRight, $"cfn-{entry.FunctionId:X4}-next", unavailable,
+                        () => _actions.TryCustomFunction(info, next, Show(next)))));
+            }
+
+            if (trial is not null && trial.FunctionId == entry.FunctionId)
+            {
+                rows.Add(Note(trial.Kept
+                    ? $"Reopen {info?.MenuLabel} on the camera. Does it show \"{trial.Shown}\"?"
+                    : "The camera kept its old value. Undo puts the table back."));
+                rows.Add(Layout.Builder.HStack(
+                        Button(trial.Kept ? "✓ Matches" : "Undo", "cfn-yes", () => _actions.AnswerCustomFunction(true)).WStar().HStar(),
+                        Button("✗ Doesn't match", "cfn-no", () => _actions.AnswerCustomFunction(false),
+                            trial.Kept ? null : "Nothing to compare: the write did not take",
+                            background: ViewerTheme.DangerBg).WStar().HStar())
+                    .WithGap(4f)
+                    .RowH(ViewerTheme.Metrics.ItemHeight));
+            }
+        }
+    }
+
+    /// <summary>A C.Fn row: the same columns as <see cref="ControlRow"/>, so the panel's values line up.</summary>
+    private Layout.Node CfnRow(string label, string value, RGBAColor32 valueColor, Layout.Node back, Layout.Node forward) =>
+        Layout.Builder.HStack(
+                Layout.Builder.Text(label, SmallFontSize, ViewerTheme.Palette.BodyText).WStar(1.15f).HStar().WithTooltip(label),
+                Layout.Builder.Text(value, SmallFontSize, valueColor).WStar(1.5f).HStar().WithTooltip(value),
+                back,
+                forward)
+            .WithGap(4f)
+            .Pad(3f)
+            .RowH(ViewerTheme.Metrics.ItemHeight);
 
     // ---------------------------------------------------------------- log panel
 
