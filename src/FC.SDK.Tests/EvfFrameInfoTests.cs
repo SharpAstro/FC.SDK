@@ -319,6 +319,31 @@ public class EvfFrameInfoTests
         CanonViewfinderFrame.PanSettled(before, after, 1000, 1000).ShouldBeTrue();
     }
 
+    /// <summary>
+    /// Record 10 is when the body made the frame, seconds then milliseconds of its own clock, not a
+    /// counter: no stamp repeated or went back in thousands of frames on an R6 and a 6D (issue #30).
+    /// </summary>
+    [Fact]
+    public void Record_10_is_when_the_frame_was_made()
+    {
+        Info(R61x()).MadeAt.ShouldBe(TimeSpan.FromSeconds(0x6AF7A355) + TimeSpan.FromMilliseconds(250));   // 55A3F76A FA000000
+        Info(R61xPannedTo1000()).MadeAt.ShouldBeNull();   // no record 10
+    }
+
+    /// <summary>
+    /// Record 10's second word is milliseconds, and it never reached 1000 in any frame of issue #30.
+    /// One that does, or a record too short for two words, is not read as a time: the pan settle
+    /// trusts a made time, so none is better than a wrong one.
+    /// </summary>
+    [Fact]
+    public void A_record_10_that_is_not_seconds_and_milliseconds_is_not_a_time()
+    {
+        Info(Envelope((1, "JPEG"), (10, "55A3F76AE7030000"))).MadeAt
+            .ShouldBe(TimeSpan.FromSeconds(0x6AF7A355) + TimeSpan.FromMilliseconds(999));
+        Info(Envelope((1, "JPEG"), (10, "55A3F76AE8030000"))).MadeAt.ShouldBeNull();   // 1000
+        Info(Envelope((1, "JPEG"), (10, "55A3F76A"))).MadeAt.ShouldBeNull();           // one word
+    }
+
     [Fact]
     public void A_pan_that_has_not_shown_up_yet_is_not_settled()
     {

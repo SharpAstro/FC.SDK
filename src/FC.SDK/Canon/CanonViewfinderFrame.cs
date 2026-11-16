@@ -52,6 +52,13 @@ internal static class CanonViewfinderFrame
     /// <summary>Four uint32s: the magnifier rect, x, y, width, height.</summary>
     private const uint MagnifierRecord = 13;
 
+    /// <summary>
+    /// Two uint32s: when the body made the frame, as seconds and milliseconds of its own clock. The
+    /// seconds are the body's local wall clock counted like a Unix time, so they order frames and
+    /// measure intervals but are not host time (issue #30).
+    /// </summary>
+    private const uint MadeAtRecord = 10;
+
     /// <summary>Record 8's length when it carries exactly one frame: seven uint32s.</summary>
     private const int OneAfFrameLength = 7 * sizeof(uint);
 
@@ -67,8 +74,9 @@ internal static class CanonViewfinderFrame
     /// </para>
     /// <para>
     /// Records 4, 7, 8 and 13 were identified on an EOS R6 and an EOS 6D (issue #21) by driving the
-    /// bodies through known zoom, pan and focus states while the bytes were watched. A record that is
-    /// missing, or shorter than the layout read here, leaves its field null rather than guessed.
+    /// bodies through known zoom, pan and focus states while the bytes were watched, and record 10
+    /// on the same two bodies from its stamps across thousands of frames (issue #30). A record that
+    /// is missing, or shorter than the layout read here, leaves its field null rather than guessed.
     /// </para>
     /// </remarks>
     internal static ReadOnlyMemory<byte> Decode(byte[] payload, out CanonEvfFrameInfo info)
@@ -86,6 +94,7 @@ internal static class CanonViewfinderFrame
         bool? afBusy = null;
         CanonEvfAfFrame? afFrame = null;
         var afFrames = ReadOnlyMemory<byte>.Empty;
+        TimeSpan? madeAt = null;
 
         var offset = 0;
         while (offset + RecordHeaderSize <= payload.Length)
@@ -124,12 +133,18 @@ internal static class CanonViewfinderFrame
                 case SensorSizeRecord when s.Length >= 8:
                     sensor = new CanonEvfSize(Read(s, 0), Read(s, 4));
                     break;
+                case MadeAtRecord when s.Length >= 8 && Read(s, 4) < 1000:
+                    madeAt = TimeSpan.FromSeconds(Read(s, 0)) + TimeSpan.FromMilliseconds(Read(s, 4));
+                    break;
             }
 
             offset += (int)length;
         }
 
-        info = new CanonEvfFrameInfo(magnification, magnifier, imageOrigin, shownSize, sensor, afBusy, afFrame, afFrames);
+        info = new CanonEvfFrameInfo(magnification, magnifier, imageOrigin, shownSize, sensor, afBusy, afFrame, afFrames)
+        {
+            MadeAt = madeAt,
+        };
         return jpeg;
 
         static uint Read(ReadOnlySpan<byte> s, int at) => BinaryPrimitives.ReadUInt32LittleEndian(s[at..]);
@@ -276,7 +291,7 @@ internal static class CanonViewfinderFrame
     /// </summary>
     /// <remarks>
     /// Exposed undecoded, for identifying records: that needs a body driven through known states
-    /// while the bytes are watched, which is how 4, 7, 8, 13, 14, 17 and 18 were pinned (see
+    /// while the bytes are watched, which is how 4, 7, 8, 10, 13, 14, 17 and 18 were pinned (see
     /// <see cref="Decode"/> and <see cref="TryGetHistogram"/>). libgphoto2 is no help here: its
     /// <c>camera_capture_preview</c> dumps every non-JPEG record to a debug log without
     /// interpreting any of them.
@@ -468,7 +483,28 @@ public readonly record struct CanonEvfFrameInfo(
     CanonEvfSize? Sensor,
     bool? AfBusy,
     CanonEvfAfFrame? AfFrame,
-    ReadOnlyMemory<byte> AfFrames);
+    ReadOnlyMemory<byte> AfFrames)
+{
+    /// <summary>
+    /// Record 10: when the body made this frame, on its own clock, to the millisecond. Null when the
+    /// body did not send it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two uint32s, seconds then milliseconds (always 0–999). Measured on an EOS R6 over PTP/IP and
+    /// WPD raw ioctl and on an EOS 6D over WPD raw ioctl (issue #30): no stamp repeats or goes back,
+    /// steps are whole multiples of a sensor readout (~16.7 ms on the R6, 33 ms on the 6D), and the
+    /// clock runs at the host's rate. This corrects the earlier reading of it as "a Unix timestamp
+    /// and a counter".
+    /// </para>
+    /// <para>
+    /// The seconds are the body's own wall clock in local time, counted like a Unix time, so they
+    /// are not host time: an R6 read an hour off UTC and 2 s behind the PC, a 6D 50 minutes behind.
+    /// Use it to order frames and measure intervals, or put it on the host clock with an offset.
+    /// </para>
+    /// </remarks>
+    public TimeSpan? MadeAt { get; init; }
+}
 
 /// <summary>
 /// The exposure histogram the camera computes for its own live-view display: four 256-bin channels
