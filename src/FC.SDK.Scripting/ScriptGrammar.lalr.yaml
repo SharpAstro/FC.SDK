@@ -5,7 +5,7 @@
 #   - Every statement starts with its own keyword and needs no terminator. Newlines are plain
 #     whitespace. An expression can never start with a statement keyword, so "where does this
 #     statement end" is always decided by one token of lookahead.
-#   - `read` and `ask` are expression keywords only. An `ask` STATEMENT would collide with
+#   - `read`, `cfn` and `ask` are expression keywords only. An `ask` STATEMENT would collide with
 #     `start-liveview` followed by an optional expression; `log ask "..."` records an answer.
 #   - Operator precedence is stratified into Cmp > Or > And > Unary > Primary, loosest first, so
 #     `read 0xD1B0 == rest | pc` is (read 0xD1B0) == (rest | pc) with no derivation hints.
@@ -39,6 +39,7 @@ symbols:
   - 'for'
   - 'in'
   - 'read'
+  - 'cfn'
   - 'ask'
   - '='
   - '=='
@@ -112,6 +113,7 @@ productions:
       - { lhs: Unary,   rhs: [Primary],          action: unaryPrimary }
       - { lhs: Unary,   rhs: ['~', Unary],       action: bitNot }
       - { lhs: Unary,   rhs: ['read', Unary],    action: readExpr }
+      - { lhs: Unary,   rhs: ['cfn', Unary],     action: cfnExpr }
       - { lhs: Primary, rhs: [number],           action: numberLit }
       - { lhs: Primary, rhs: [string],           action: stringLit }
       - { lhs: Primary, rhs: [ident],            action: nameRef }
@@ -141,6 +143,7 @@ lexer:
     - { symbol: 'for',            match: 'for' }
     - { symbol: 'in',             match: 'in' }
     - { symbol: 'read',           match: 'read' }
+    - { symbol: 'cfn',            match: 'cfn' }
     - { symbol: 'ask',            match: 'ask' }
     - { symbol: '==',             match: '==' }
     - { symbol: '!=',             match: '!=' }

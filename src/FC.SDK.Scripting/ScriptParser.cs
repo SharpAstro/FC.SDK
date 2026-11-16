@@ -101,6 +101,9 @@ internal static class ScriptParser
                 case ReadExpr e:
                     Check(e.Code);
                     break;
+                case CfnExpr e:
+                    Check(e.Id);
+                    break;
                 case NotExpr e:
                     Check(e.Operand);
                     break;
@@ -219,6 +222,8 @@ internal static class ScriptParser
         public object Visit(ScriptGrammar.BitNot node) => new NotExpr(Line(node.Arg0), (Expr)node.Arg1.Content);
 
         public object Visit(ScriptGrammar.ReadExpr node) => new ReadExpr(Line(node.Arg0), (Expr)node.Arg1.Content);
+
+        public object Visit(ScriptGrammar.CfnExpr node) => new CfnExpr(Line(node.Arg0), (Expr)node.Arg1.Content);
 
         public object Visit(ScriptGrammar.NumberLit node)
         {

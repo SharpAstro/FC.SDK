@@ -230,6 +230,14 @@ public sealed partial class ViewerActions
                 return err is EdsError.OK && bytes.Length >= 4 ? BinaryPrimitives.ReadUInt32LittleEndian(bytes) : null;
             }, ct);
 
+        public Task<IReadOnlyList<uint>?> ReadCustomFunctionAsync(uint functionId, CancellationToken ct) =>
+            actions.GatedAsync<IReadOnlyList<uint>?>($"Script: C.Fn 0x{functionId:X4}", async token =>
+            {
+                var (err, block) = await camera.GetCustomFunctionBlockAsync(refresh: true, token);
+                return err is EdsError.OK && block?.Entries.FirstOrDefault(e => e.FunctionId == functionId) is { MenuNumber: > 0 } entry
+                    ? entry.Values : null;
+            }, ct);
+
         public Task<EdsError> WritePropertyAsync(ushort code, uint value, CancellationToken ct) =>
             actions.GatedAsync($"Script: set 0x{code:X4}", token => camera.SetRawPropertyAsync(code, value, token), ct);
 

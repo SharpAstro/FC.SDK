@@ -1,0 +1,86 @@
+# Decodes the EOS 6D's Custom Function values that changing them by hand left open, then puts back
+# what earlier sessions changed. Operator at the body; every step reads the C.Fn entry afresh.
+#
+# A 6D sends only the C.Fn group its menu last showed (docs/canon-custom-functions.md), so each
+# prompt names the menu item: having it on screen is what puts its group in the block.
+# The restore checks at the end hold the values this body had on 2026-11-16 before any of it.
+
+# ---- C.Fn I: Exposure --------------------------------------------------------------------------
+confirm "C.Fn I-5 Number of bracketed shots: set it to 3 shots"
+log cfn 0x0106
+confirm "C.Fn I-5: set it back to 7 shots"
+log cfn 0x0106
+confirm "C.Fn I-4 Bracketing sequence: set it to  -,0,+"
+log cfn 0x0105
+confirm "C.Fn I-4: set it back to  0,-,+"
+log cfn 0x0105
+
+# ---- C.Fn II: Autofocus ------------------------------------------------------------------------
+confirm "C.Fn II-1 Tracking sensitivity: set it to -1"
+log cfn 0x0502
+confirm "C.Fn II-1: set it to 0"
+log cfn 0x0502
+confirm "C.Fn II-2 Accel./decel. tracking: set it to +1"
+log cfn 0x0518
+confirm "C.Fn II-2: set it back to 0"
+log cfn 0x0518
+confirm "C.Fn II-3 AI Servo 1st image priority: move it one step"
+log cfn 0x0519
+confirm "C.Fn II-3: set it back"
+log cfn 0x0519
+confirm "C.Fn II-9 AF Microadjustment: choose 'All by same amount' and set +1"
+log cfn 0x0507
+confirm "C.Fn II-9: set it to +3, still 'All by same amount'"
+log cfn 0x0507
+confirm "C.Fn II-9: choose Disable"
+log cfn 0x0507
+
+# ---- C.Fn III: Operation/Others ----------------------------------------------------------------
+confirm "C.Fn III-4 Warnings: untick all four boxes"
+log cfn 0x040A
+confirm "C.Fn III-4: tick ONLY 'When monochrome set'"
+log cfn 0x040A
+confirm "C.Fn III-4: tick ONLY 'When WB is corrected'"
+log cfn 0x040A
+confirm "C.Fn III-4: tick ONLY 'When ISO expansion is used'"
+log cfn 0x040A
+confirm "C.Fn III-4: tick ONLY 'When spot meter is set'"
+log cfn 0x040A
+confirm "C.Fn III-5 Custom Controls: set the shutter half-press to 'Metering and AF start'"
+log cfn 0x070C
+confirm "C.Fn III-5: set the shutter half-press back to 'Metering start'"
+log cfn 0x070C
+confirm "C.Fn III-5: set the AF-ON button to 'Metering start' (not AF)"
+log cfn 0x070C
+confirm "C.Fn III-5: set the AF-ON button back to 'Metering and AF start'"
+log cfn 0x070C
+confirm "C.Fn III-5: set the SET button to anything other than OFF"
+log cfn 0x070C
+confirm "C.Fn III-5: set the SET button back to OFF"
+log cfn 0x070C
+
+# ---- Put back what earlier sessions changed ----------------------------------------------------
+confirm "C.Fn I-1 Exposure level increments: set it to what you shoot with (it was 1/2-stop before)"
+expect cfn 0x0101 == 1
+confirm "C.Fn II-4 AI Servo 2nd image priority: set the first option"
+expect cfn 0x051A == 0
+confirm "C.Fn II-5 AF-assist beam firing: set Enable (the first option)"
+expect cfn 0x050E == 0
+confirm "C.Fn II-6 Lens drive when AF impossible: set the first option"
+expect cfn 0x0505 == 0
+confirm "C.Fn II-7 Orientation linked AF point: set the first option"
+expect cfn 0x0516 == 0
+confirm "C.Fn II-8 Superimposed display: set the first option"
+expect cfn 0x0510 == 0
+confirm "C.Fn II-9 AF Microadjustment: check it shows Disable"
+expect cfn 0x0507 == "0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0"
+confirm "C.Fn III-1 Dial direction during Tv/Av: check it shows Normal"
+expect cfn 0x0706 == 0
+confirm "C.Fn III-2 Focusing screen: check it shows Eg-A II"
+expect cfn 0x080B == 0
+confirm "C.Fn III-3 Multi function lock: tick only the quick control dial"
+expect cfn 0x070F == "0,2"
+confirm "C.Fn III-4 Warnings: tick the boxes you want (the body started on two of them)"
+log cfn 0x040A
+confirm "C.Fn III-5 Custom Controls: check it is as in your photo (back-button AF)"
+expect cfn 0x070C == "0,1,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0"

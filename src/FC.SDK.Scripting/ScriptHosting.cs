@@ -16,6 +16,12 @@ public interface IScriptCamera
     /// </summary>
     Task<uint?> ReadPropertyAsync(ushort code, CancellationToken ct);
 
+    /// <summary>
+    /// Every value of one Custom Function entry, from a block the camera has just been asked to emit
+    /// again. Null when the block does not hold the id.
+    /// </summary>
+    Task<IReadOnlyList<uint>?> ReadCustomFunctionAsync(uint functionId, CancellationToken ct);
+
     /// <summary>Writes a scalar property.</summary>
     Task<EdsError> WritePropertyAsync(ushort code, uint value, CancellationToken ct);
 

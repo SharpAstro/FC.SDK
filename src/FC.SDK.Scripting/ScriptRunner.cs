@@ -253,6 +253,18 @@ public sealed class ScriptRunner(IScriptCamera camera, IScriptHost host, TimePro
                     ?? throw new ScriptStopException($"line {e.Line}: the camera did not answer a read of 0x{code:X4}");
             }
 
+            case CfnExpr e:
+            {
+                var id = await NumberAsync(e.Id, ct);
+                // Absent is a finding too: a 6D sends only the C.Fn group its menu last showed, so an
+                // id from another group is simply not in the block.
+                var values = await camera.ReadCustomFunctionAsync(id, ct)
+                    ?? throw new ScriptStopException(
+                        $"line {e.Line}: the camera's C.Fn block holds no 0x{id:X4} (a 6D sends only the group its menu last showed)");
+                // One value is a number, so `expect cfn 0x0101 == 1` works; several are text, "3,0".
+                return values.Count is 1 ? values[0] : string.Join(",", values);
+            }
+
             case AskExpr e:
             {
                 var answer = await host.AskAsync(e.Prompt, ct)

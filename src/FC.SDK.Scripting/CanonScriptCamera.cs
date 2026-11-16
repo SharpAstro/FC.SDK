@@ -43,6 +43,13 @@ public sealed class CanonScriptCamera : IScriptCamera, IDisposable
     }
 
     /// <inheritdoc/>
+    public async Task<IReadOnlyList<uint>?> ReadCustomFunctionAsync(uint functionId, CancellationToken ct)
+    {
+        var (err, block) = await _camera.GetCustomFunctionBlockAsync(refresh: true, ct);
+        return err is EdsError.OK ? block?.Entries.FirstOrDefault(e => e.FunctionId == functionId) is { MenuNumber: > 0 } entry ? entry.Values : null : null;
+    }
+
+    /// <inheritdoc/>
     public Task<EdsError> WritePropertyAsync(ushort code, uint value, CancellationToken ct) =>
         _camera.SetRawPropertyAsync(code, value, ct);
 

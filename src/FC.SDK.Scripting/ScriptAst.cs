@@ -15,6 +15,9 @@ internal sealed record NameExpr(int Line, string Name) : Expr(Line);
 /// <summary><c>read code</c>: the property's value on the camera now, past any cache.</summary>
 internal sealed record ReadExpr(int Line, Expr Code) : Expr(Line);
 
+/// <summary><c>cfn id</c>: a Custom Function entry's value on the camera now, read afresh.</summary>
+internal sealed record CfnExpr(int Line, Expr Id) : Expr(Line);
+
 /// <summary><c>ask "question"</c>: the operator's yes (1) or no (0).</summary>
 internal sealed record AskExpr(int Line, string Prompt) : Expr(Line);
 
