@@ -169,7 +169,7 @@ group is announced at once on the event stream. Consequences:
 | I-2 | `0x0102` | ISO speed setting increments | 0 ↔ 1 |
 | I-3 | `0x0104` | Bracketing auto cancel | 0 ↔ 1 |
 | I-4 | `0x0105` | Bracketing sequence | 0 `0,-,+` · 1 `-,0,+` · 2 `+,0,-` (from the menu order; not changed on the wire) |
-| I-5 | `0x0106` | Number of bracketed shots | two words, `3,0`; first word 0 = 3 · 1 = 2 · 2 = 5 · 3 = 7 (menu order; not changed on the wire) |
+| I-5 | `0x0106` | Number of bracketed shots | two words, **the count then its menu index**: `3,0` → `2,1` → `5,2` → `7,3` (set on the body with `watch`, 2026-11-17). *Correction*: this row said the first word was the index, from the menu order, without having seen it change |
 | I-6 | `0x0108` | Safety shift | 0 → 1 → 2 → 0 (off, Tv/Av, ISO) |
 | II-1 | `0x0502` | Tracking sensitivity | set to +1 reads 1; probably signed, a negative step not yet seen |
 | II-2 | `0x0518` | Accel./decel. tracking | 0, not changed |
@@ -245,7 +245,9 @@ What it changes:
   multiple of 768, and how it would read a word between stops is unknown. In `0x010D` the last two
   words are the set range clamped to the lens (below).
 - **Six ids name the same setting as on a 6D** (`0x0101`, `0x0104`, `0x0105`, `0x0106`, `0x0108`,
-  `0x0706`), which strengthens the "Canon-wide setting codes" reading above.
+  `0x0706`), which strengthens the "Canon-wide setting codes" reading above. The layout does not always
+  carry over: on both bodies `0x0106`'s first word is the count, but a 6D's second word is the menu
+  index (`2,1`, `5,2`, `7,3`) where an R6's stayed 0.
 
 `CanonCustomFunctionCatalog` carries this table (`For("Canon EOS R6")`), with
 `CanonCustomFunctionInfo.OptionValues` for `0x0106`, `Range` and `FormatRange` for the two ranges, and a
