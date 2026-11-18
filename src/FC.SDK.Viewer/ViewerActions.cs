@@ -891,8 +891,9 @@ public sealed partial class ViewerActions(
     /// <remarks>
     /// The PTP log answers "what happened"; this answers "what is this camera", which is the part
     /// nobody here can determine for a body they do not own — advertised operations, announced
-    /// properties, and the Custom Function block decoded in wire order so its entries line up with
-    /// the numbers on the reporter's own C.Fn menu. See <see cref="CanonDeviceReport"/>.
+    /// properties, and the Custom Function block decoded in wire order, which on a 450D lines up with
+    /// the numbers on the reporter's own C.Fn menu (on a 6D within the one group it sends; not on an
+    /// R6). See <see cref="CanonDeviceReport"/>.
     /// </remarks>
     public void SaveDeviceReport() => Enqueue("Save device report", async ct =>
     {

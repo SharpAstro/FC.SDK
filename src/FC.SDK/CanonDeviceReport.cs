@@ -256,22 +256,25 @@ public static class CanonDeviceReport
         }
 
         report.AppendLine(
-            "**Menu #** counts entries in wire order across all groups. On every body checked so far "
-            + "that is the same number the camera's own C.Fn menu shows beside the setting, and "
-            + "groups map to C.Fn I..IV in order.");
+            "**Menu #** counts entries in wire order across all groups. On a 450D that is the number "
+            + "the camera's own C.Fn menu shows beside the setting. A 6D sends one group at a time, "
+            + "the one its menu last showed, and the number is the item's number in that group (I-5 is 5). On an "
+            + "EOS R6 it is not a menu number: its groups mix items of several menu groups and its entries "
+            + "come in id order, so there the number only says where the entry sits in this block.");
         report.AppendLine();
         report.AppendLine(
-            "> If you are filing an issue: please say what each menu number is called on YOUR camera "
-            + "(e.g. \"5 = Mirror lockup\"). That is the missing half — the wire ids are here, their "
+            "> If you are filing an issue: please say which C.Fn item on YOUR camera changes which wire id "
+            + "(e.g. \"C.Fn-9 Mirror lockup = 0x060F\" on a 450D): change one item on the body and send a second "
+            + "report, or run `FC.SDK.Diagnostics watch` while you do. The wire ids are here, their "
             + "meanings are per-model and cannot be guessed.");
         report.AppendLine();
 
-        report.AppendLine("| Menu # | Group | Wire id | Value |");
+        report.AppendLine("| Menu # | Wire group | Wire id | Value |");
         report.AppendLine("|---|---|---|---|");
         foreach (var entry in block.Entries)
         {
             report.AppendLine(
-                $"| {entry.MenuNumber} | C.Fn {entry.GroupId} | `0x{entry.FunctionId:X4}` | {string.Join(", ", entry.Values)} |");
+                $"| {entry.MenuNumber} | {entry.GroupId} | `0x{entry.FunctionId:X4}` | {string.Join(", ", entry.Values)} |");
         }
         report.AppendLine();
 

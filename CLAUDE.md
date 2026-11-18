@@ -50,7 +50,7 @@ still reopens the device on a second call.
 
 - **`CanonCamera`** — Entry point. Static factories: `ConnectUsb`, `ConnectWifi`, `ConnectWpd`, `ConnectWpdIoctl`. Async session/capture/live-view/property methods. Event handlers (`PropertyChanged`, `ObjectAdded`, `StateChanged`) are subscribed for the object's whole lifetime, not just while the poller runs, because the open-session drain and property reads also pull events. Diagnostics: `DumpPropertiesAsync`, `SupportedOperations`, `GetRawPropertyAsync`/`SetRawPropertyAsync`, `GetAllowedValuesAsync`, `CreateDeviceReportAsync`.
 
-- **`CanonDeviceReport`** — the one artefact to ask a bug reporter for. Markdown: model, transport, every advertised operation, every announced property with its allowed values, and the **decoded Custom Function block in wire order with menu numbers**. That last part is the whole point — a reporter cannot know wire ids, but can read menu numbers off their own camera, and `CanonCustomFunctionBlock.Entries` preserves the order that maps between them. It also refuses to be trusted on a weak battery: a body reporting `0xD111` level 0 (libgphoto2's "low") gets a loud warning, and level 1 a milder note. The scale is not linear and 1 means half charged (see `CanonBattery`), but at level 1 a 450D has been seen to drop live view mid-stream and announce dial movements nobody made. (It does *not* stop capturing — that symptom turned out to be mirror lockup; see the Testing section.)
+- **`CanonDeviceReport`** — the one artefact to ask a bug reporter for. Markdown: model, transport, every advertised operation, every announced property with its allowed values, and the **decoded Custom Function block in wire order with menu numbers**. On a 450D that order maps straight to the camera's own menu numbers, so a reporter could name every entry from their camera; on a 6D it does within the one group the body sends (menu I, II, III come as wire groups 1, 3, 4); on an EOS R6 it does not (an R6 lists entries in id order), and the report says so — there a second report after changing one item, or a `watch` run, is what names an id. It also refuses to be trusted on a weak battery: a body reporting `0xD111` level 0 (libgphoto2's "low") gets a loud warning, and level 1 a milder note. The scale is not linear and 1 means half charged (see `CanonBattery`), but at level 1 a 450D has been seen to drop live view mid-stream and announce dial movements nobody made. (It does *not* stop capturing — that symptom turned out to be mirror lockup; see the Testing section.)
 
 ## What is still missing vs EDSDK
 
@@ -338,9 +338,22 @@ and the whole 0xD180–0xD1A0 range is absent from EDSDK's own property table).
 - **Which settings live here is per-model AND per-setting.** From the manuals: a 450D keeps long-exposure
   NR, high-ISO NR and mirror lockup as C.Fn; a 6D has all three as ordinary properties; a 200D II has
   the NR pair as properties but mirror lockup still as C.Fn-5. Do not assume they move together.
-- **Extending to a new body needs a menu number, not a raw id.** Group order and entry order match the
-  camera's own C.Fn menu (verified item-for-item on a 450D), so a reporter can dump the block — the
-  viewer's C.Fn action already logs it — and say which menu number does what.
+- **Extending to a new body needs a measurement, not a dump.** On a 450D group order and entry order
+  match the camera's own C.Fn menu (verified item-for-item), so a dump plus menu numbers was enough.
+  **Not on an EOS R6** (corrected 2026-11-17). A 6D's groups and entries follow its menu too, but it
+  sends menu I, II, III as wire groups 1, 3, 4; an EOS R6 mixes menu groups inside one wire group
+  and lists entries in ascending id order. Both send one group at a time. Map a body by changing each item on it with `FC.SDK.Diagnostics watch`
+  or `cfnwalk` running, as the R6 table in `CanonCustomFunctionCatalog` was.
+- **An R6 stores both increment items in `0x0101`**, holding whichever was set last (0 = 1/3, 1 = 1/2,
+  2 = 1-stop), so the block cannot report both; the Tv and ISO allowed lists can, until
+  something writes `0x0101`: a write moves the Av/Tv lists to the written step while the body can stay
+  where it was (written 1 from 1/3: half-stop lists, a dial still stepping in thirds, 2026-11-17).
+  Do not write it. Eleven R6 items take a
+  C.Fn write the body's menu then shows, `0x0711` (release without a lens) among them; `0x0706` and
+  `0x0106` refuse every write tried. The two ranges take writes too, but only values on the menu's
+  own scale display: the menu offers whole stops only, at either increment, and a third-stop limit
+  was stored and drawn as nonsense. Its range items
+  (`0x010C`, `0x010D`) are words of APEX × 768, and `0x0106` holds the bracketed-shot count itself.
 - **Verify writes with a fresh read-back** (request 0xD1A0 → drain, bypassing the cache) after a ~2.5 s window —
   a response code alone proves nothing on a body that also ACKs phantom property writes. `SetMirrorLockupAsync`
   returns `OperationRefused` when the camera kept its old value.

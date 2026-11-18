@@ -17,12 +17,13 @@ namespace FC.SDK.Canon;
 /// [total_size:u32]           whole block, including this word
 /// [group_count:u32]
 /// per group:
-///   [group_id:u32]           1..4, matching the camera menu's C.Fn I..IV groups
+///   [group_id:u32]           450D: 1..4 = the menu's C.Fn I..IV. 6D: menu I, II, III = 1, 3, 4, in order.
+///                            R6: 1, 2, 3, 5, not in menu order
 ///   [group_size:u32]         bytes of the group EXCLUDING this word (= 8 + Σ entry sizes)
 ///   [entry_count:u32]
 ///   per entry:
 ///     [func_id:u32]          e.g. 0x0201 = Long exposure NR on a 450D
-///     [value_count:u32]      1 for every entry seen so far
+///     [value_count:u32]      1 for most entries; 2, 4, 16 and 19 seen on a 6D and an R6
 ///     [value:u32 × value_count]
 /// </code>
 /// <para>
@@ -50,16 +51,18 @@ public sealed class CanonCustomFunctionBlock
     /// Every entry in the order the camera sent it.
     /// </summary>
     /// <remarks>
-    /// Order is the whole point of this list, and the reason it exists alongside
-    /// <see cref="Functions"/>: group order and entry-within-group order match the body's own C.Fn
-    /// menu, item for item (verified on a 450D). That is what lets a reporter who cannot know wire
-    /// ids say "menu C.Fn 5 is Mirror lockup" and have the id fall out — see
-    /// <c>docs/canon-custom-functions.md</c>. A dictionary cannot promise that ordering.
+    /// Order is the reason this list exists alongside <see cref="Functions"/>: on a 450D group order
+    /// and entry-within-group order match the body's own C.Fn menu, item for item, so a reporter who
+    /// cannot know wire ids can say "menu C.Fn 5 is Mirror lockup" and have the id fall out. A 6D's
+    /// entries follow its menu too, within the one group it sends. An EOS R6's do not (it lists entries
+    /// in id order), and an item has to be measured; see
+    /// <c>docs/canon-custom-functions.md</c>. A dictionary cannot promise any ordering.
     /// </remarks>
     public IReadOnlyList<CanonCustomFunctionEntry> Entries => _entries;
 
     /// <summary>
-    /// Function ID → the C.Fn group it belongs to (1..4, matching the camera menu's C.Fn I..IV).
+    /// Function ID → the block group it came in. That is the menu's C.Fn group on a 450D, not on a 6D
+    /// or an EOS R6 (see <see cref="CanonCustomFunctionEntry.GroupId"/>).
     /// </summary>
     public IReadOnlyDictionary<uint, uint> FunctionGroups => _groupOfFunction;
 
@@ -75,7 +78,7 @@ public sealed class CanonCustomFunctionBlock
     public bool SetValue(uint functionId, uint value)
     {
         // Offsets are recorded during Parse, so writing back does not re-walk (and cannot re-derive)
-        // the structure. Sizes never change: every entry seen carries exactly one uint32 value.
+        // the structure. Sizes never change: a write replaces the first value in place, whatever value_count is.
         if (!_valueOffset.TryGetValue(functionId, out var offset))
             return false;
 
@@ -145,7 +148,7 @@ public sealed class CanonCustomFunctionBlock
                 block._valueOffset[funcId] = entry + 8;
                 block._entries.Add(new CanonCustomFunctionEntry(groupId, funcId, value, block._entries.Count + 1) { Values = values });
 
-                // Honour value_count even though every entry observed so far carries exactly one.
+                // Entries of 2, 4, 16 and 19 values have been seen; the walk relies on value_count.
                 entry += 8 + (int)Math.Max(1u, valueCount) * 4;
             }
 
@@ -161,13 +164,18 @@ public sealed class CanonCustomFunctionBlock
 /// <summary>
 /// One Custom Function entry, as it appeared on the wire.
 /// </summary>
-/// <param name="GroupId">The C.Fn group, 1..4 — the camera menu's C.Fn I..IV.</param>
+/// <param name="GroupId">
+/// The block's group number. On a 450D it is the menu's C.Fn I..IV. On a 6D the groups keep the menu's
+/// order, but menu I, II, III come as 1, 3, 4. An EOS R6 sends items of several menu groups in one group.
+/// </param>
 /// <param name="FunctionId">The wire id, e.g. <c>0x060F</c>. Per-model; never guess one.</param>
 /// <param name="Value">The current value.</param>
 /// <param name="MenuNumber">
 /// Position in the block counting from 1 across all groups. On a 450D this is exactly the number
 /// beside the setting in the camera's own C.Fn menu, which is the one thing a reporter can read off
-/// their body without knowing anything about the protocol.
+/// their body without knowing anything about the protocol. A 6D sends one group at a time, and there it
+/// is the item's number in the group its menu shows (I-5 is 5). On an EOS R6 it is not: entries come in id
+/// order, so which item an entry is has to be measured (<c>FC.SDK.Diagnostics cfnwalk</c>).
 /// </param>
 public readonly record struct CanonCustomFunctionEntry(
     uint GroupId, uint FunctionId, uint Value, int MenuNumber)
