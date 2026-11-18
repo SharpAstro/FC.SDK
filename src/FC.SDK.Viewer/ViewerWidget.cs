@@ -635,8 +635,10 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     {
         var entries = _state.CustomFunctions;
         var catalog = CanonCustomFunctionCatalog.For(_state.Model);
-        var shownGroup = entries.Count > 0 && catalog.FirstOrDefault(i => i.FunctionId == entries[0].FunctionId) is { } first
-            ? first.Group
+        // One wire group can hold items of several menu groups (an R6 sends 1-1, 1-7 and 2-1 together).
+        var menuGroups = entries.Select(e => catalog.FirstOrDefault(i => i.FunctionId == e.FunctionId)?.Group)
+            .OfType<string>().Distinct().ToList();
+        var shownGroup = menuGroups.Count > 0 ? string.Join(" + ", menuGroups)
             : entries.Count > 0 ? $"group {entries[0].GroupId}" : null;
         rows.Add(SectionHeader(shownGroup is null ? "Custom Functions" : $"Custom Functions: {shownGroup}"));
 
@@ -655,11 +657,17 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
 
         foreach (var entry in entries)
         {
-            var info = catalog.FirstOrDefault(i => i.FunctionId == entry.FunctionId);
-            var value = info is null ? entry.Value : entry.Values[info.Word];
+            var any = catalog.FirstOrDefault(i => i.FunctionId == entry.FunctionId);
+            var value = any is null || any.Word >= entry.Values.Count ? entry.Value : entry.Values[any.Word];
+            // Two items can share an id (an R6's increments): name the one whose option the value is.
+            var info = any is null ? null : CanonCustomFunctionCatalog.Describe(_state.Model, entry.FunctionId, value);
             var label = info is null ? $"0x{entry.FunctionId:X4}" : $"{info.MenuLabel} {info.Name}";
 
-            if (info is null || info.Options.Count == 0)
+            if (info is not null && CanonCustomFunctionCatalog.FormatRange(info, entry.Values) is { } range)
+            {
+                rows.Add(CfnRow(label, range, ViewerTheme.Palette.HeaderText, StepSpacer(), StepSpacer()));
+            }
+            else if (info is null || info.Options.Count == 0)
             {
                 rows.Add(CfnRow(label, string.Join(",", entry.Values), ViewerTheme.Palette.DimText, StepSpacer(), StepSpacer()));
             }
@@ -683,17 +691,23 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             }
             else
             {
-                var count = (uint)info.Options.Count;
-                string Show(uint v) => v < count ? info.Options[(int)v] : $"value {v}";
+                // Steps go through the options in menu order, each written as its own wire value
+                // (an R6's bracketed-shot count is 3, 2, 5, 7, not 0..3).
+                var count = info.Options.Count;
+                string Show(uint v) => info.OptionFor(v) ?? $"value {v}";
                 var text = Show(value) + (info.Guess ? " (guess)" : "");
-                var prev = (value + count - 1) % count;
-                var next = (value + 1) % count;
+                var at = Enumerable.Range(0, count).FirstOrDefault(i => info.ValueOf(i) == value, -1);
+                var prev = info.ValueOf(at < 0 ? 0 : (at + count - 1) % count);
+                var next = info.ValueOf(at < 0 ? 0 : (at + 1) % count);
                 rows.Add(CfnRow(label, text, info.Guess ? ViewerTheme.Warn : ViewerTheme.Palette.HeaderText,
                     StepButton(Layout.IconKind.CaretLeft, $"cfn-{entry.FunctionId:X4}-prev", unavailable,
                         () => _actions.TryCustomFunction(info, prev, Show(prev))),
                     StepButton(Layout.IconKind.CaretRight, $"cfn-{entry.FunctionId:X4}-next", unavailable,
                         () => _actions.TryCustomFunction(info, next, Show(next)))));
             }
+
+            if (info?.Note is { } note)
+                rows.Add(Note(note));
 
             if (trial is not null && trial.FunctionId == entry.FunctionId)
             {

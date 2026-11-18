@@ -1475,7 +1475,7 @@ public sealed partial class ViewerActions(
                 kept ? "" : ": the camera KEPT its old value");
             state.StatusMessage = kept
                 ? $"{info.MenuLabel}: reopen it on the camera. Does it show \"{shown}\"?"
-                : $"{info.MenuLabel}: the camera kept its old value. A 6D may not take this write.";
+                : $"{info.MenuLabel}: the camera kept its old value. This body may not take this write.";
         });
 
     /// <summary>Records whether the camera's menu showed the trial value, then writes the previous one back.</summary>
