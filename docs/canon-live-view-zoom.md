@@ -145,8 +145,27 @@ PTP/IP, and on an R6 over WPD raw ioctl, it was right every time either way (40 
 Wherever it was logged, every 5× pan of the other checks returned where the body landed, with both
 builds. An earlier sitting on a slower link, aimed at the centre, gave 20 in 20 against 12 in 20.
 
-**An R6 drops a pan sent 13–17 ms after zooming out from 5× to 1×** (0 of 4, WPD raw ioctl, landed
-when sent 111 ms after); a 6D lands it 4 of 4 at 3–4 ms. `FC.SDK.Diagnostics zoompan` measures it.
+**An R6 drops a pan sent too soon after zooming out from 5× to 1×.** The pan answers `OK` either
+way. Measured on 2026-11-18 (firmware 1.7.0) with `FC.SDK.Diagnostics zoompan` (issue #46), times
+running from the zoom's call. Both commands pass the session gate that the event pump also takes
+every 200 ms, so a pan can wait behind a `GetEvent` and go out later than it was called:
+
+| R6, 5× → 1× | timed at | none landed | some landed | all landed |
+|---|---|---|---|---|
+| WPD raw ioctl, 3 runs | the pan's call | 8–31 ms (0 of 21) | 33–60 ms (19 of 58) | 63–119 ms (65 of 65) |
+| PTP/IP, 2 runs | the pan's call | 11–50 ms (0 of 32) | 53–74 ms (20 of 31) | 76–128 ms (57 of 57) |
+| WPD raw ioctl, 1 run | the pan's answer | 10–54 ms (0 of 17) | 55–66 ms (3 of 9) | 68–125 ms (34 of 34) |
+| PTP/IP, 1 run | the pan's answer | 18–64 ms (0 of 19) | none | 67–143 ms (41 of 41) |
+
+The answer bounds when the pan went out, and timed there the middle column all but goes. In the
+two runs that timed both, every pan that landed in the run's own middle column by call time
+(34–59 ms over WPD raw ioctl, 55–57 ms over PTP/IP) had waited 10–30 ms for its answer (6 of 6). The same pan after a zoom from 1× to 1× landed 120 times in 120 on each
+link. Over PTP/IP "not landed" means not seen within the 6 s watch: 2 landings in 240 trials showed
+only in the next trial's start read. Neither the target nor the order of the trials made a
+difference that recurred. A 6D lands it 4 of 4 at 3–4 ms (#30). To rerun the table:
+`zoompan --pairs 5:1 1:1 --delays 0 20 30 40 50 60 70 80 90 100 --rounds 3`, adding
+`--watch-ms 6000 --transport wifi:<host>` over PTP/IP.
+
 Zoom with `verify`, which waits for the 1× frame, before panning; `pan` does, and on an R6 over WPD
 raw ioctl a pan sent right after such a zoom from 5× landed 20 times in 20.
 
