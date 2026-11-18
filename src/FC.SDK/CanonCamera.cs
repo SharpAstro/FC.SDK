@@ -1842,10 +1842,13 @@ public sealed class CanonCamera : IAsyncDisposable
     /// matters and the position is not known, set it rather than inherit it.
     /// </para>
     /// <para>
-    /// <b>An EOS R6 drops a pan sent just after zooming out to 1×.</b> Sent 13–17 ms after
-    /// <c>SetEvfZoomAsync(1, verify: false)</c> from 5×, it answers <c>OK</c> and the magnifier never
-    /// moves (0 times in 4, WPD raw ioctl); sent 111 ms after, it lands. A 6D lands it 4 times in 4
-    /// at 3–4 ms (issue #30, <c>FC.SDK.Diagnostics zoompan</c>). A verified pan that the body dropped
+    /// <b>An EOS R6 drops a pan sent just after zooming out to 1×.</b> It answers <c>OK</c> and the
+    /// magnifier never moves. Timed from the call of <c>SetEvfZoomAsync(1, verify: false)</c> from 5×
+    /// to the pan's answer, no pan answered at 10–54 ms landed (0 of 17, WPD raw ioctl), nor at
+    /// 18–64 ms over PTP/IP (0 of 19); every pan answered at 68–125 ms landed (34 of 34), and at
+    /// 67–143 ms over PTP/IP (41 of 41); at 55–66 ms over WPD raw ioctl, 3 of 9 did (issue #46). A 6D
+    /// lands it 4 times in 4 at 3–4 ms (issue #30, <c>FC.SDK.Diagnostics zoompan</c>). A verified
+    /// pan that the body dropped
     /// waits out its 3 s timeout and answers <c>OK</c> with the whole-sensor rect, as every 1× pan
     /// does; only <see cref="CanonEvfFrameInfo.Magnifier"/> read afterwards shows that the magnifier
     /// did not move (from the code: a dropped verified pan was not timed). Zoom with the default
