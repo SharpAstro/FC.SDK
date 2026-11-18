@@ -242,8 +242,10 @@ came from rather than generalising from one.
 
 If you have a body not listed, `CreateDeviceReportAsync` (or the viewer's device report) is the one artefact
 worth attaching to an issue. It dumps every advertised operation, every announced property with its allowed
-values, and the decoded Custom Function block **in wire order with menu numbers**, which is what makes it
-possible to add a model without owning it, since a reporter can read menu numbers off their own camera.
+values, and the decoded Custom Function block **in wire order with its raw bytes**, which is what makes it
+possible to add a model without owning it. On a 450D the wire order is the camera's own menu order, and on a 6D
+it is within the one group the body sends; on an EOS R6 it is not, and naming an id takes a second report
+after changing one item on the body.
 
 ## Docs
 

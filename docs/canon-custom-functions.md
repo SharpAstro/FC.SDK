@@ -118,7 +118,7 @@ hand, the same position this SDK is already in with
 `CanonCustomFunctionId.MirrorLockupIdFor`/`HighIsoNrIdFor`. Confirms the CLAUDE.md rule to never
 guess an id for an unverified body; there is no shortcut through the SDK to find one.
 
-## The practical upshot: ask for a menu number, not a raw id
+## The practical upshot (450D): ask for a menu number, not a raw id
 
 Because the group/entry layout is now confirmed against real EDSDK internals rather than a single
 dump, `FunctionGroups` and entry order can be trusted for any body, and the on-camera menu number is
@@ -133,6 +133,13 @@ menu C.Fn 9  = group 3, entry 3  →  wire id from the dump
 That means extending `CanonCustomFunctionId` to a new body no longer needs someone with a protocol
 analyser to hand over a raw hex id — a reporter can dump the block (already logged by the viewer's
 C.Fn action) and say which menu number does what, read straight off the camera's own menu.
+
+**Correction (2026-11-17): this holds on a 450D only.** A 6D's groups and entries follow its menu
+too, but it sends one group at a time and numbers its menu I, II, III as wire groups 1, 3, 4 (see
+below). An EOS R6 breaks the rule: its groups mix items of several menu groups and list their
+entries in ascending id order, so neither the group nor the position names the menu item. On an R6
+the mapping has to be measured by changing each item on the body and watching which
+id moves (`FC.SDK.Diagnostics watch`, or `cfnwalk`, which steps through a whole menu).
 
 ## A 6D sends one group at a time: the one last shown in its menu
 
@@ -184,6 +191,193 @@ which does not fit the "per-model ids" reading this document started from. Two m
 rule, and `MirrorLockupIdFor` stays verified-bodies-only. But if the ids are Canon-wide setting codes,
 a 200D II's mirror lockup is `0x060F` like the 450D's, and a device report from that body (issue #1)
 would show whether it is.
+
+## An EOS R6: every value set on the body, and an id order that is not the menu's
+
+Measured 2026-11-17 on an EOS R6 over WPD raw ioctl (`ConnectWpdAutoAsync`), FC.SDK alone, with
+`FC.SDK.Diagnostics cfnwalk`: for each value of each item, in the order of the camera's menu, the
+operator set it on the body and the tool filed whatever arrived (property and state events, the
+`0xD1A0` block diffed every second, the Av/Tv/ISO/exposure-compensation allowed lists). One pass per
+value; the walk's transcripts and JSON lines are the record.
+
+| Menu | Wire group | Wire id | Item (R6 menu) | Values set and read |
+|---|---|---|---|---|
+| 1-1 | 1 | `0x0101` | Exposure level increments | 0 = 1/3 · 1 = 1/2, **shared with 1-2**, see below |
+| 1-2 | 1 | `0x0101` | ISO speed setting increments | 0 = 1/3 · 2 = 1-stop, **shared with 1-1** |
+| 1-3 | — | — | Speed from metering/ISO Auto | nothing in the block, no property |
+| 1-4 | 2 | `0x0104` | Bracketing auto cancel | 0 = ON · 1 = OFF |
+| 1-5 | 2 | `0x0105` | Bracketing sequence | 0 `0,-,+` · 1 `-,0,+` · 2 `+,0,-` |
+| 1-6 | 2 | `0x0106` | Number of bracketed shots | two words; the first is **the count itself**: 3, 2, 5, 7. The second read 0 throughout |
+| 1-7 | 1 | `0x0108` | Safety shift | 0 OFF · 1 Tv/Av · 2 ISO |
+| 2-1 | 1 | `0x0112` | Same expo. for new aperture | 0 OFF · 1 ISO · 2 Tv · 3 ISO/Tv (bit 0 ISO, bit 1 Tv; the menu lists ISO/Tv before Tv) |
+| 2-2 | 3 | `0x0114` | AE lock meter. mode after focus | a mask, one bit per checkbox in menu order: evaluative 1 · partial 2 · spot 4 · centre-weighted 8 |
+| 2-3 | 3 | `0x010C` | Set shutter speed range | four words, `[fastest, slowest, fastest, slowest]`, on the APEX scale below |
+| 2-4 | 3 | `0x010D` | Set aperture range | four words, `[smallest aperture, largest aperture, clamped smallest, clamped largest]`: the last two are the set range clamped to the lens (below) |
+| 3-1 | 5 | `0x0706` | Dial direction during Tv/Av | 0 normal · 1 reverse (the 6D's id for the same item) |
+| 3-2 | 5 | `0x0712` | Control ring rotation | 0 normal · 1 reverse |
+| 3-3, 3-4 | — | — | Customize buttons, Customize dials | opening either sends nothing |
+| 4-1 | 5 | `0x080E` | Add cropping information | 0 OFF · 1..6 = 6:6, 3:4, 4:5, 6:7, 5:6, 5:7 |
+| 4-2 | — | — | Audio compression | nothing in the block, both values |
+| 4-3 | 5 | `0x0813` | Default Erase option | 0 Cancel · 1 Erase · 2 Erase RAW · 3 Erase non-RAW |
+| 4-4 | 5 | `0x0711` | Release shutter w/o lens | 0 OFF · 1 ON (the body measured was on ON) |
+| 4-5 | 5 | `0x0814` | Retract lens on power off | 0 ON · 1 OFF |
+| 4-6 | 5 | `0x0815` | Add IPTC information | 0 OFF · 1 ON |
+
+What it changes:
+
+- **Neither the group nor the position names the item.** Wire group 1 holds 1-1/1-2, 1-7 and 2-1;
+  group 2 holds 1-4..1-6; group 3 holds 2-2..2-4; group 5 holds all of C.Fn3 and C.Fn4. Within every
+  group the entries come in ascending id order. Like a 6D, the body sends one group at a time,
+  apparently the one holding the item its menu last showed; group 4 never appeared.
+- **`0x0101` is shared by two items and holds whichever was set last**, on one scale (0 = 1/3, 1 = 1/2,
+  2 = 1-stop). From (1/2, 1-stop) it read 2 after the ISO item was set and 1 after the exposure item
+  was set again to the 1/2 it already had. So the block cannot report both settings. The allowed lists
+  can: a 1/2-stop exposure gives a Tv list stepping by 4 (`0x10, 0x14, 0x18…`), a 1-stop ISO an ISO
+  list stepping by 8 (`0x48, 0x50…`). No `0x0102` exists on this body.
+- **The range words are APEX × 768, signed.** Eight values were
+  set and all eight fit exactly: 1/8000 = 9984 and 1/4000 = 9216 (Tv 13 and 12), 30 s = -3840 and
+  15 s = -3072 (Tv -5 and -4), f/91 = 9984, f/64 = 9216, f/1.0 = 0, f/1.4 = 768. The Tv allowed list
+  agrees: it lost `0x10`/`0x14` (30", 20") when the slowest limit went to 15 s, and `0x9C`/`0xA0`
+  (1/6000, 1/8000) when the fastest went to 1/4000. Two more set on 2026-11-18 fit too: 1/2000 = 8448
+  and f/22 = 6912 (Tv 11, Av 9: the nominal stop, where f/22 is really Av 8.92). **Both range menus
+  offer whole stops only**, at 1/3 and at 1/2 exposure increments alike (checked on the body the same
+  day: 1/8000, 1/4000, 1/2000…, f/1.0, f/1.4, f/2…), so every word the body itself produces is a
+  multiple of 768, and how it would read a word between stops is unknown. In `0x010D` the last two
+  words are the set range clamped to the lens (below).
+- **Six ids name the same setting as on a 6D** (`0x0101`, `0x0104`, `0x0105`, `0x0106`, `0x0108`,
+  `0x0706`), which strengthens the "Canon-wide setting codes" reading above.
+
+`CanonCustomFunctionCatalog` carries this table (`For("Canon EOS R6")`), with
+`CanonCustomFunctionInfo.OptionValues` for `0x0106`, `Range` and `FormatRange` for the two ranges, and a
+`Note` on the shared id.
+
+### Writes on an R6
+
+Measured 2026-11-17 on the same body and link with `FC.SDK.Diagnostics cfnmenu`: for each item it
+writes the next option (each checkbox in turn for a mask), reads the block back past the cache 2.5 s
+later, draws the menu screen the value should give, and asks the operator, who reopens the item on
+the body; then it writes the original back. **One try per item**, the operator showing the item on
+the body (menu open) before each write. The two ranges were written later (below).
+
+| Item | Id | Written | Read back | The body's menu |
+|---|---|---|---|---|
+| 1-4 Bracketing auto cancel | `0x0104` | 0 | 0 | matches |
+| 1-5 Bracketing sequence | `0x0105` | 1 | 1 | matches |
+| 1-7 Safety shift | `0x0108` | 1 | 1 | matches |
+| 2-1 Same expo. for new aperture | `0x0112` | 1 | 1 | matches |
+| 2-2 AE lock meter. mode | `0x0114` | 1, 2, 4, 8 | each | boxes 1, 2, 3, 4 ticked in turn |
+| 3-2 Control ring rotation | `0x0712` | 1 | 1 | matches |
+| 4-1 Add cropping information | `0x080E` | 1 | 1 | matches |
+| 4-3 Default Erase option | `0x0813` | 1 | 1 | matches |
+| 4-4 Release shutter w/o lens | `0x0711` | 1 | 1 | matches |
+| 4-5 Retract lens on power off | `0x0814` | 1 | 1 | matches |
+| 4-6 Add IPTC information | `0x0815` | 1 | 1 | matches |
+| 3-1 Dial direction during Tv/Av | `0x0706` | 1 | **0, kept its value** | — |
+| 1-6 Number of bracketed shots | `0x0106` | 2 (the count) | **3,0, kept its value** | — |
+| 1-1 Exposure level increments | `0x0101` | 1 | 1 | **still 1/3** (see the retries below) |
+| 1-2 ISO speed setting increments | `0x0101` | 2 | **1** | — (see below) |
+
+Every restore that was read back came back as written; the one for `0x0815` found nothing to read,
+the body no longer showing its group, which is why `cfnmenu` now asks the operator to show the item
+again before a restore. So eleven items take a write that the body's own menu then shows, `0x0711`
+among them. Whether a written `0x0711` lets the body release with no lens was not tried: only the
+menu was looked at.
+
+**Retried the same evening, the operator closing the menu after showing the item** (`cfnmenu
+--first <row> --rows 1`, which now also logs the Av/Tv/ISO/exposure-compensation allowed lists
+around every write):
+
+- **`0x0706` and `0x0106` refuse writes.** `0x0706` kept 0 when given 1, 2 tries of 2; `0x0106` kept
+  `3,0` when given the count 2 (2 of 2) and when given the menu index 1 (`--value 1`, 1 of 1). Open or
+  closed menu made no difference. Whether another value or a different word would take is untried.
+- **Do not write `0x0101`: a write moves the allowed lists, not necessarily the setting.**
+  *Correction*: this bullet first said a write "sets the exposure increment", judged on the Av/Tv
+  allowed lists. The operator then checked the body itself, setting each starting value on the camera
+  and counting main-dial clicks from 1/125 to 1/250 (3 clicks = 1/3-stop, 2 = 1/2-stop):
+
+  | Body before (menu) | `0x0101` written | Read back | Av and Tv lists | Body after |
+  |---|---|---|---|---|
+  | exposure 1/3 | 1 | 1 | 1/3-stop (22 Av values) → 1/2-stop (15) | menu 1/3, **3 clicks: still 1/3**, 2 tries |
+  | exposure 1/2 | 0 | 0 | 1/2-stop → 1/3-stop | menu 1/3 (clicks not counted), 2 tries |
+  | ISO 1-stop (C.Fn1-2 showing) | 0 | 0 | 1/2-stop → 1/3-stop | ISO menu still 1-stop, 2 tries |
+  | ISO 1-stop | 2 | **1** | 1/3-stop → 1/2-stop | not looked at |
+
+  So the lists follow the written value both ways, but the body's own setting moved only from 1/2 to
+  1/3, as far as its menu shows, and a write of 1 left a body at 1/3 dialling in thirds while
+  announcing half-stop lists — **after a write the lists can lie**, so a host reading them would offer
+  values the dial does not step through. The ISO list (`0xD103`) and the ISO item never moved on any
+  write. Writing 2 reads back 1. n is two or fewer per row and the 1/2 → 1/3 row has no click count, so
+  the asymmetry is an observation, not a rule.
+
+**The two ranges take writes, but only whole stops display** (same body, 2026-11-17, `cfnmenu --first 9`
+and `--first 10`, one limit moved at a time, the body at 1/2-stop exposure increments throughout).
+A first pass moved each limit by a third of a stop; a second by a whole stop:
+
+| Limit | Third-stop write | Its menu | Whole-stop write | Its menu |
+|---|---|---|---|---|
+| fastest speed | 1/4000 → 1/3200 | "highest 15\"" ✗ | 1/8000 → 1/4000 | matches |
+| slowest speed | 15" → 13" | "lowest 30\"" ✗ | 30" → 15" | matches |
+| smallest aperture | f/64 → f/57 | "min 1.4" ✗ | f/64 → f/45 | matches |
+| largest aperture | f/1.4 → f/1.6 | "max 1.0" ✗ | f/1.0 → f/1.4 | matches |
+
+Every write and every restore read back as written, and the Tv allowed list followed each one (the
+speeds beyond a new limit left it: `0x9C`, `0xA0` for a fastest limit of 1/4000, `0x98` for 1/3200).
+The Av list moved only where the new limit fell inside the lens's own range (f/1.4–f/16): `0x10`,
+f/1.4, left it when the largest aperture closed to f/1.6, and it did not move for f/64 → f/57,
+f/64 → f/45 or f/1.0 → f/1.4. So the body stores whatever is written. **But the menu offers whole
+stops only, and a third-stop value written to it is drawn as values nobody set**; every whole-stop
+write showed correctly. A third run, started from a fastest limit left at 1/3200 by an earlier write,
+wrote 1/1600 (drawn as "15″, 15″") and then a slowest limit of 8" (drawn as "low 8″", correct,
+beside the still wrong fastest one). *Correction*: this paragraph first put the nonsense down to the
+body being at 1/2-stop increments. The menus were then checked at both increments (2026-11-18) and
+offer whole stops either way, so a third-stop write is off the menu's scale on any setting. The
+third-stop words were written as APEX × 768 at 256 a third, which the body never produces itself.
+
+**The shutter limits are real, checked on the dial** (the `0x0101` lesson: lists alone are not
+enough). In Tv mode, the operator turned the main dial to both ends before the run (1/8000 to 30"),
+after each write, and after the restore (1/8000 to 30" again):
+
+| `0x010C` written | Dial in Tv mode |
+|---|---|
+| fastest limit 1/4000 | stops at 1/4000 |
+| slowest limit 15" | stops at 15" |
+
+One run, 2026-11-17.
+
+**The aperture limits are real too.** Same body, Sigma 35mm F1.4 on it (f/1.4–f/16), limits written
+inside the lens's range with `cfnmenu --first 10 --rows 1 --value <v> --word <n>`, one limit per run;
+in Av mode the dial ran f/1.4 to f/16 before the first run:
+
+| `0x010D` written | Read back | Dial in Av mode | Av allowed list |
+|---|---|---|---|
+| word 0 = 4608, smallest aperture f/8 | `4608,0,4608,768` | stops at f/8 | ends at `0x38` (f/8) |
+| word 1 = 2304, largest aperture f/2.8 | `9216,2304,6144,2304` | stops at f/2.8 | starts at `0x20` (f/2.8) |
+
+Words 2 and 3 followed as the clamp predicts. After each restore the block read `9216,0,6144,768`
+again and the Av list went back to f/1.4–f/16; the dial was not re-checked after the second run.
+One run each.
+
+The words the body wrote itself:
+
+- **`0x010C`**: every write to word 0 or 1 came back copied into word 2 or 3.
+- **`0x010D`**: during the `cfnmenu` runs word 2 stayed 6144 (f/16); word 3 stayed 768 (f/1.4) with
+  word 1 at f/1.0 or f/1.4, and followed word 1 to 1024 when it was set to f/1.6. f/16 and f/1.4 are the limits of
+  the lens on the body (Sigma 35mm F1.4 DG HSM Art, EF, on the EF-EOS R adapter). **Words 2 and 3
+  are the set range clamped to the lens on the body**, checked by changing the lens with `watch`
+  running and the set range at f/64–f/1.0 (`9216,0`), nothing written:
+
+  | On the body (`LensStatus` 0xD1A8) | `0x010D` | Words 2, 3 |
+  |---|---|---|
+  | Sigma 35mm F1.4 (1) | `9216,0,6144,768` | f/16, f/1.4 |
+  | no lens (0) | `9216,0,9216,0` | f/64, f/1.0: the set range itself |
+  | Sigma 24-70mm F2.8 DG OS HSM Art (1) | `9216,0,6912,2304` | f/22, f/2.8 |
+  | no lens (0) | `9216,0,9216,0` | f/64, f/1.0 |
+  | Sigma 35mm F1.4 again (1) | `9216,0,6144,768` | f/16, f/1.4 |
+
+  Each change showed in the block within 1.5 s of the lens announcement. So word 2 is the narrower of
+  the set limit and the lens's smallest aperture, word 3 the wider-numbered of the set limit and the
+  lens's largest one (the f/1.6 write above came back as f/1.6 for the same reason). Read only: what a
+  write to words 2 or 3 does is untried.
 
 ## EDSDK's property table, separately
 
