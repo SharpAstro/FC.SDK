@@ -484,7 +484,22 @@ reads 0 at rest and the rule is "what it shows now, plus the host"; a caller who
 button during live view must ask for `TFT | PC`. That is n=1 with a control either side, and the
 default has not been changed on it. An earlier run saw a stop fail to restore after a body press
 at `TFT | PC`; it did not recur here (the stop put back 0) and the likeliest cause was a button
-still held. **Not re-measured on an R6 at all**: that is with the issue's reporter.
+still held.
+
+**An R6 answers the same way**, measured with the same script (firmware 1.7.0): on 2026-11-13 in
+the viewer over WPD COM, once with the shutter button and once with the wired remote (issue #21),
+and on 2026-11-18 from the console over WPD raw ioctl with the shutter button (issue #46). The
+remote run and the 2026-11-18 run reworded only its prompts, for the remote and for a body whose own
+screen shows the scene at rest:
+
+| R6, at rest `1` | reads | shutter button (2 runs) | wired remote (1 run) | rear screen shows live view |
+|---|---|---|---|---|
+| live view off (control) | `1` | released | released | |
+| live view, `PC` | `2` | **nothing in 10 s** | **nothing in 10 s** | no |
+| live view, `TFT \| PC` | `3` | released | released | yes |
+
+Every stop put back `1`, after a press at `TFT | PC` too. A default start writes the same `3` as
+`TFT | PC`; no press was tried during one.
 
 **Both outputs are reachable from every front end.** A script writes `start-liveview` for the
 default or `start-liveview EvfOutputDevice.TFT | EvfOutputDevice.PC` (any mask) for an explicit one.
