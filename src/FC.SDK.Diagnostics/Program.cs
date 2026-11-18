@@ -80,6 +80,48 @@ var secondsOpt = new Option<int>("--seconds")
 };
 var isoOpt = new Option<EdsISOSpeed>("--iso") { Description = "ISO.", DefaultValueFactory = _ => EdsISOSpeed.ISO_400 , HelpName = "iso" };
 
+// zoompan's knobs. The defaults are the run of issue #30; narrowing the R6's zoom-out drop (#46) takes
+// delays under 100 ms, the 5x->1x pair beside its 1x->1x control, and a longer watch over PTP/IP.
+var delaysOpt = new Option<int[]>("--delays")
+{
+    Description = "Milliseconds from the zoom's answer to the pan, e.g. 20 40 60 80 100.",
+    AllowMultipleArgumentsPerToken = true,
+    DefaultValueFactory = _ => [0, 100, 300, 1000],
+};
+delaysOpt.Validators.Add(result =>
+{
+    if (result.GetValueOrDefault<int[]>() is { } delays && delays.Any(ms => ms < 0))
+        result.AddError("--delays takes milliseconds of 0 or more.");
+});
+var pairsOpt = new Option<(uint From, uint To)[]>("--pairs")
+{
+    Description = "Zoom changes to try, as from:to, e.g. 5:1 1:1. The default is 5:1 1:5 1:1 5:5.",
+    AllowMultipleArgumentsPerToken = true,
+    DefaultValueFactory = _ => [(5, 1), (1, 5), (1, 1), (5, 5)],
+    CustomParser = r =>
+    {
+        var pairs = new List<(uint, uint)>();
+        foreach (var token in r.Tokens)
+            if (token.Value.Split(':') is [var f, var t]
+                && uint.TryParse(f, CultureInfo.InvariantCulture, out var from)
+                && uint.TryParse(t, CultureInfo.InvariantCulture, out var to))
+                pairs.Add((from, to));
+            else
+                r.AddError($"--pairs takes from:to, e.g. 5:1, not '{token.Value}'.");
+        return [.. pairs];
+    },
+};
+var watchMsOpt = new Option<int>("--watch-ms")
+{
+    Description = "Milliseconds to watch record 13 after each pan. Over PTP/IP an R6 frame can arrive seconds late (#30): give it more.",
+    DefaultValueFactory = _ => 2500,
+};
+watchMsOpt.Validators.Add(result =>
+{
+    if (result.GetValueOrDefault<int>() <= 0)
+        result.AddError("--watch-ms takes milliseconds above 0.");
+});
+
 // Which link to the body. WPD is the default and what every experiment was first measured over;
 // `wifi:<host>` runs the same experiment over PTP/IP, so a finding made on one link can be re-asked
 // on the other without a scratch probe (issue #29).
@@ -115,7 +157,7 @@ hostOpt.Recursive = releaseOpt.Recursive = transportOpt.Recursive = true;
     ("evf",      "String properties, live-view zoom / pan / autofocus, envelope record dump.", []),
     ("evfout",   "Evf_OutputDevice across live-view start and stop: restored? Body controls alive? (#21)", [shootOpt, ptpReleaseOpt]),
     ("zoom",     "Why a zoom is ignored: sweep factors and LV AF systems against the zoom rect.", []),
-    ("zoompan",  "Is a 0x9159 sent just after a 0x9158 zoom change dropped? Zoom pair x delay x target, judged on record 13.", [roundsOpt]),
+    ("zoompan",  "Is a 0x9159 sent just after a 0x9158 zoom change dropped? Zoom pair x delay x target, judged on record 13.", [roundsOpt, pairsOpt, delaysOpt, watchMsOpt]),
     ("pan",      "SetEvfZoomPositionAsync at 1x and 5x: timed, judged on record 13, numbered checks (#21); P5, a verified pan 0.3 s after a raw one, and C1/C5, the centring after a verified zoom (#30).", [roundsOpt]),
     ("rec10",    "Record 10 across every frame, at rest and across raw 0x9159 pans with their send times (#30).", [roundsOpt]),
     ("zoompix",  "Visual proof of magnification and panning — writes JPEGs to compare.", [avOpt, tvOpt, isoOpt]),
@@ -2228,9 +2270,15 @@ try
     {
         // Seen in rec10 (#30): a pan sent 5 ms after zooming 5x -> 1x never moved record 13, where the
         // same pan after a zoom that changed nothing did. Each trial starts settled at a known zoom and
-        // position, sends the zoom, waits, sends the pan, and watches record 13 for 2.5 s. The 1->1 and
+        // position, sends the zoom, waits, sends the pan, and watches record 13. The 1->1 and
         // 5->5 pairs are the controls: the same zoom command, no change of magnification.
+        // A trial is judged on record 13 reaching the target, not on leaving the start: over PTP/IP an
+        // R6 hands out frames seconds late (#30), so the settled start can be a stale frame, and a drop
+        // judged against it reads as a move. Both targets lie inside the sensor, where a pan lands exactly.
         int rounds = parse.GetValue(roundsOpt);
+        var pairs = parse.GetValue(pairsOpt)!;
+        var delays = parse.GetValue(delaysOpt)!;
+        int watchMs = parse.GetValue(watchMsOpt);
         static uint U32(ReadOnlySpan<byte> s, int at) => BitConverter.ToUInt32(s[at..(at + 4)]);
 
         async Task<((uint X, uint Y)? Mag, uint? Zoom, (uint W, uint H)? Sensor, (uint W, uint H)? Size)> Frame()
@@ -2274,11 +2322,10 @@ try
         }
         var centre = ((sz.W - m0.W) / 2, (sz.H - m0.H) / 2);
         Log($"sensor {sz.W}x{sz.H}, magnifier {m0.W}x{m0.H}, centre {centre}");
+        Log($"pairs {string.Join(" ", pairs.Select(p => $"{p.From}:{p.To}"))}, delays {string.Join(" ", delays)} ms, watch {watchMs} ms, {rounds} round(s)");
 
-        var trials = new List<(string Pair, int Delay, string Target, bool Moved, long FirstMoveMs, string Detail)>();
+        var trials = new List<(string Pair, int Delay, string Target, bool Landed, long PanAt, long PanTook, string Detail)>();
         (uint, uint)[] targets = [centre, (1000, 1000)];
-        (uint From, uint To)[] pairs = [(5, 1), (1, 5), (1, 1), (5, 5)];
-        int[] delays = [0, 100, 300, 1000];
         for (int round = 1; round <= rounds; round++)
         {
             Log($"--- round {round}");
@@ -2295,26 +2342,33 @@ try
 
                 var sw = ClockWatch.StartNew(time);
                 var zErr = await camera.SetEvfZoomAsync(to, verify: false);
-                if (delay > 0) await Task.Delay(TimeSpan.FromMilliseconds(delay), time);
+                var zoomAt = sw.ElapsedMilliseconds;
+                // Task.Delay moves in 15.6 ms steps on Windows (20 ms waits about 30, 50 and 60 both
+                // about 62), too coarse for delays under 100 ms: sleep to within two steps, then yield.
+                if (delay > 32) await Task.Delay(TimeSpan.FromMilliseconds(delay - 32), time);
+                while (sw.ElapsedMilliseconds - zoomAt < delay) await Task.Yield();
+                // Timed at its call and at its answer: the event pump takes the same session gate every
+                // 200 ms, so a pan can wait for a GetEvent in flight, and it reaches the wire between the two.
                 var panAt = sw.ElapsedMilliseconds;
                 var (pErr, _) = await camera.SetEvfZoomPositionAsync(target.Item1, target.Item2, verify: false);
+                var panAnsweredAt = sw.ElapsedMilliseconds;
                 var panSent = ClockWatch.StartNew(time);
 
-                long firstMove = -1;
+                long firstAt = -1;
                 ((uint X, uint Y)? Mag, uint? Zoom) last = (null, null);
-                while (panSent.ElapsedMilliseconds < 2500)
+                while (panSent.ElapsedMilliseconds < watchMs)
                 {
                     var f = await Frame();
                     if (f.Mag is null) continue;
                     last = (f.Mag, f.Zoom);
-                    if (firstMove < 0 && f.Mag != start.Mag) firstMove = panSent.ElapsedMilliseconds;
+                    if (firstAt < 0 && f.Mag == target) firstAt = panSent.ElapsedMilliseconds;
                 }
-                var moved = last.Mag is { } l && l != start.Mag;
+                var landed = last.Mag == target;
                 var pair = $"{from}x->{to}x";
                 var t = $"({target.Item1},{target.Item2})";
-                var detail = $"start {start.Mag} z{start.Zoom}, zoom={zErr}, pan at +{panAt} ms ={pErr}, end {last.Mag} z{last.Zoom}";
-                trials.Add((pair, delay, t, moved, firstMove, detail));
-                Log($"  {pair} delay {delay,4} ms target {t,-12} {(moved ? $"moved, first at {firstMove} ms" : "NOT MOVED")}   {detail}");
+                var detail = $"start {start.Mag} z{start.Zoom}, zoom={zErr} at +{zoomAt} ms, pan at +{panAt} ms ={pErr} at +{panAnsweredAt} ms, end {last.Mag} z{last.Zoom}";
+                trials.Add((pair, delay, t, landed, panAt, panAnsweredAt - panAt, detail));
+                Log($"  {pair} delay {delay,4} ms target {t,-12} {(landed ? $"landed, first seen at {firstAt} ms" : "NOT LANDED")}   {detail}");
             }
         }
 
@@ -2326,8 +2380,9 @@ try
         Console.WriteLine();
         Log("================ ZOOM THEN PAN ================");
         foreach (var g in trials.GroupBy(r => (r.Pair, r.Delay)))
-            Log($"{g.Key.Pair,-7} delay {g.Key.Delay,4} ms: moved {g.Count(r => r.Moved)}/{g.Count()}"
-                + $"  ({string.Join(", ", g.GroupBy(r => r.Target).Select(tg => $"{tg.Key} {tg.Count(r => r.Moved)}/{tg.Count()}"))})");
+            Log($"{g.Key.Pair,-7} delay {g.Key.Delay,4} ms: landed {g.Count(r => r.Landed)}/{g.Count()}"
+                + $", pan at +{g.Min(r => r.PanAt)}-{g.Max(r => r.PanAt)} ms, answered {g.Min(r => r.PanTook)}-{g.Max(r => r.PanTook)} ms later"
+                + $"  ({string.Join(", ", g.GroupBy(r => r.Target).Select(tg => $"{tg.Key} {tg.Count(r => r.Landed)}/{tg.Count()}"))})");
         return 0;
     }
 
