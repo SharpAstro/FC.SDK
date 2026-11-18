@@ -133,6 +133,16 @@ public class CustomFunctionCatalogTests
         info.ValueOf(2).ShouldBe(5u);
     }
 
+    /// <summary>A 6D sends the same count in word 0 (then the menu index in word 1): 3,0 is "3 shots", not "7 shots".</summary>
+    [Fact]
+    public void A_6D_reads_the_bracketed_shot_count_too()
+    {
+        var info = CanonCustomFunctionCatalog.Describe("Canon EOS 6D", 0x0106).ShouldNotBeNull();
+        info.Word.ShouldBe(0);
+        info.OptionFor(3).ShouldBe("3 shots");
+        info.OptionFor(2).ShouldBe("2 shots");
+    }
+
     [Fact]
     public void Release_without_a_lens_is_0x0711()
     {

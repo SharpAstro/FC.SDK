@@ -25,7 +25,12 @@ public static class CanonCustomFunctionCatalog
         new(Exposure, 2, 0x0102, "ISO speed setting increments", 0, ["1/3-stop", "1-stop"]),
         new(Exposure, 3, 0x0104, "Bracketing auto cancel", 0, ["On", "Off"]),
         new(Exposure, 4, 0x0105, "Bracketing sequence", 0, ["0, -, +", "-, 0, +", "+, 0, -"]),
-        new(Exposure, 5, 0x0106, "Number of bracketed shots", 0, ["3 shots", "2 shots", "5 shots", "7 shots"]),
+        // Measured 2026-11-17 with `watch`: 3,0 -> 2,1 -> 5,2 -> 7,3. The menu's own index is word 1.
+        new(Exposure, 5, 0x0106, "Number of bracketed shots", 0, ["3 shots", "2 shots", "5 shots", "7 shots"])
+        {
+            OptionValues = [3, 2, 5, 7],
+            Note = "Two words: the number of shots, then its place in the menu (0..3). A write that changes only one of them has not been tried.",
+        },
         new(Exposure, 6, 0x0108, "Safety shift", 0, ["Disable", "Shutter speed/Aperture", "ISO speed"]),
         new(Autofocus, 1, 0x0502, "Tracking sensitivity", 0, ["0", "+1", "+2"]) { Guess = true },
         new(Autofocus, 2, 0x0518, "Acceleration/deceleration tracking", 0, ["0", "+1", "+2"]) { Guess = true },
