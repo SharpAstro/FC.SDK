@@ -78,6 +78,19 @@ var secondsOpt = new Option<int>("--seconds")
     Description = "Stop after this many seconds. 0, the default, runs until Enter (or Ctrl+C).",
     DefaultValueFactory = _ => 0,
 };
+var firstRowOpt = new Option<int>("--first") { Description = "First row of the body's C.Fn table (1-based).", DefaultValueFactory = _ => 1 };
+var rowsOpt = new Option<int>("--rows") { Description = "How many rows of the C.Fn table; 0, the default, goes to the end.", DefaultValueFactory = _ => 0 };
+var cfnValueOpt = new Option<uint?>("--value")
+{
+    Description = "Write this value (decimal, or hex with 0x) instead of each item's own trial.",
+    CustomParser = r => r.Tokens[0].Value is var v && v.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+        ? uint.Parse(v[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture)
+        : uint.Parse(v, CultureInfo.InvariantCulture),
+};
+var cfnWordOpt = new Option<int?>("--word")
+{
+    Description = "With --value: the word of the entry to write (a range limit is word 0 or 1). Default: the catalog's.",
+};
 var isoOpt = new Option<EdsISOSpeed>("--iso") { Description = "ISO.", DefaultValueFactory = _ => EdsISOSpeed.ISO_400 , HelpName = "iso" };
 
 // zoompan's knobs. The defaults are the run of issue #30; narrowing the R6's zoom-out drop (#46) takes
@@ -169,7 +182,8 @@ hostOpt.Recursive = releaseOpt.Recursive = transportOpt.Recursive = true;
     ("mlushot",  "TakePictureWithMirrorLockupAsync: does it deliver, and does it restore what it changed?", []),
     ("movie",    "Is the still/movie lever readable? Dump every property + LV record types; run per position.", [tagOpt, shootOpt]),
     ("watch",    "Hold a session open and print every change the body announces, C.Fn entries diffed. Changes nothing.", [secondsOpt]),
-    ("cfnmenu",  "6D C.Fn: write a value, draw the menu screen it should give, ask the operator; then restore.", []),
+    ("cfnmenu",  "C.Fn writes on any body the catalog knows: write a value, draw the menu it should give, ask the operator; then restore.", [firstRowOpt, rowsOpt, cfnValueOpt, cfnWordOpt]),
+    ("cfnwalk",  "R6 C.Fn: step through every value in menu order, the operator sets it, incoming data filed per step. Changes nothing.", [firstRowOpt, rowsOpt]),
 ];
 
 string? mode = null;
@@ -347,7 +361,23 @@ if (mode is "cfnmenu")
     Log($"Model: {camera.Model}  Serial: {camera.SerialNumber}  Battery: {camera.BatteryLevelPercent}%");
     try
     {
-        return await CfnMenu.RunAsync(camera, Log, time, Path.Combine(outDir, "cfnmenu.txt"));
+        return await CfnMenu.RunAsync(camera, Log, time, Path.Combine(outDir, "cfnmenu.txt"), parse.GetValue(firstRowOpt), parse.GetValue(rowsOpt), parse.GetValue(cfnValueOpt), parse.GetValue(cfnWordOpt));
+    }
+    finally
+    {
+        await camera.StopEventPollingAsync();
+        Log($"CloseSession = {await camera.CloseSessionAsync()}");
+        await camera.DisposeAsync();
+    }
+}
+
+if (mode is "cfnwalk")
+{
+    // Writes nothing: the operator changes the menu, the walk files what the body announces.
+    Log($"Model: {camera.Model}  Serial: {camera.SerialNumber}  Battery: {camera.BatteryLevelPercent}%");
+    try
+    {
+        return await CfnWalk.RunAsync(camera, Log, time, outDir, parse.GetValue(firstRowOpt), parse.GetValue(rowsOpt));
     }
     finally
     {
@@ -378,6 +408,7 @@ if (mode is "watch")
 
     static string Key(CanonCustomFunctionEntry e) => $"C.Fn {e.GroupId} #{e.MenuNumber} 0x{e.FunctionId:X4}";
     Dictionary<string, string>? lastCfn = null;
+    string? lastCfnHex = null;
     async Task DiffCfnAsync(string why)
     {
         var (cfnErr, block) = await camera.GetCustomFunctionBlockAsync(refresh: true);
@@ -395,6 +426,11 @@ if (mode is "watch")
                 else if (was != v) Log($"  C.Fn CHANGED {k}: {was}  ->  {v}");
             foreach (var k in lastCfn.Keys.Except(now.Keys)) Log($"  C.Fn GONE {k} (was {lastCfn[k]})");
         }
+        // The block as received, whenever it differs from the last one: the decoded lines above are an
+        // interpretation, and these bytes are what a test fixture or a second opinion needs.
+        var hex = Convert.ToHexString(block.RawData);
+        if (hex != lastCfnHex) Log($"  C.Fn raw ({block.RawData.Length} bytes): {hex}");
+        lastCfnHex = hex;
         lastCfn = now;
     }
 
