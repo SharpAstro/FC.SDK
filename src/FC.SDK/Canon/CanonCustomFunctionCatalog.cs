@@ -86,8 +86,8 @@ public static class CanonCustomFunctionCatalog
 
     private static readonly CanonCustomFunctionInfo[] EosR6 =
     [
-        new("C.Fn1", 1, 0x0101, "Exposure level increments", 0, ["1/3-stop", "1/2-stop"]) { OptionValues = [0, 1], Note = Shared0101 },
-        new("C.Fn1", 2, 0x0101, "ISO speed setting increments", 0, ["1/3-stop", "1-stop"]) { OptionValues = [0, 2], Note = Shared0101 },
+        new("C.Fn1", 1, 0x0101, "Exposure level increments", 0, ["1/3-stop", "1/2-stop"]) { OptionValues = [0, 1], Note = Shared0101, Writable = false },
+        new("C.Fn1", 2, 0x0101, "ISO speed setting increments", 0, ["1/3-stop", "1-stop"]) { OptionValues = [0, 2], Note = Shared0101, Writable = false },
         new("C.Fn1", 4, 0x0104, "Bracketing auto cancel", 0, ["On", "Off"]),
         new("C.Fn1", 5, 0x0105, "Bracketing sequence", 0, ["0, -, +", "-, 0, +", "+, 0, -"]),
         new("C.Fn1", 6, 0x0106, "Number of bracketed shots", 0, ["3 shots", "2 shots", "5 shots", "7 shots"])
@@ -266,6 +266,12 @@ public sealed record CanonCustomFunctionInfo(
     /// needs confirming on the body.
     /// </summary>
     public bool Guess { get; init; }
+
+    /// <summary>
+    /// False where a remote write is known to leave the body inconsistent (an R6's shared <c>0x0101</c>):
+    /// the viewer shows the value and offers no write, and <c>cfnmenu</c> skips the item unless asked.
+    /// </summary>
+    public bool Writable { get; init; } = true;
 
     /// <summary>The menu counts items 1..n across every group (a 450D), not from 1 in each (a 6D).</summary>
     public bool NumberedAcrossGroups { get; init; }

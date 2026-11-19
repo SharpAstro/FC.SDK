@@ -87,6 +87,10 @@ var cfnValueOpt = new Option<uint?>("--value")
         ? uint.Parse(v[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture)
         : uint.Parse(v, CultureInfo.InvariantCulture),
 };
+var cfnUnwritableOpt = new Option<bool>("--include-unwritable")
+{
+    Description = "Also write the items the catalog marks as not writable (an R6's shared 0x0101), which a write is known to leave inconsistent.",
+};
 var cfnWordOpt = new Option<int?>("--word")
 {
     Description = "With --value: the word of the entry to write (a range limit is word 0 or 1). Default: the catalog's.",
@@ -182,7 +186,7 @@ hostOpt.Recursive = releaseOpt.Recursive = transportOpt.Recursive = true;
     ("mlushot",  "TakePictureWithMirrorLockupAsync: does it deliver, and does it restore what it changed?", []),
     ("movie",    "Is the still/movie lever readable? Dump every property + LV record types; run per position.", [tagOpt, shootOpt]),
     ("watch",    "Hold a session open and print every change the body announces, C.Fn entries diffed. Changes nothing.", [secondsOpt]),
-    ("cfnmenu",  "C.Fn writes on any body the catalog knows: write a value, draw the menu it should give, ask the operator; then restore.", [firstRowOpt, rowsOpt, cfnValueOpt, cfnWordOpt]),
+    ("cfnmenu",  "C.Fn writes on any body the catalog knows: write a value, draw the menu it should give, ask the operator; then restore.", [firstRowOpt, rowsOpt, cfnValueOpt, cfnWordOpt, cfnUnwritableOpt]),
     ("cfnwalk",  "R6 C.Fn: step through every value in menu order, the operator sets it, incoming data filed per step. Changes nothing.", [firstRowOpt, rowsOpt]),
 ];
 
@@ -361,7 +365,7 @@ if (mode is "cfnmenu")
     Log($"Model: {camera.Model}  Serial: {camera.SerialNumber}  Battery: {camera.BatteryLevelPercent}%");
     try
     {
-        return await CfnMenu.RunAsync(camera, Log, time, Path.Combine(outDir, "cfnmenu.txt"), parse.GetValue(firstRowOpt), parse.GetValue(rowsOpt), parse.GetValue(cfnValueOpt), parse.GetValue(cfnWordOpt));
+        return await CfnMenu.RunAsync(camera, Log, time, Path.Combine(outDir, "cfnmenu.txt"), parse.GetValue(firstRowOpt), parse.GetValue(rowsOpt), parse.GetValue(cfnValueOpt), parse.GetValue(cfnWordOpt), parse.GetValue(cfnUnwritableOpt));
     }
     finally
     {
