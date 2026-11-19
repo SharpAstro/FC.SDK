@@ -1461,6 +1461,11 @@ public sealed partial class ViewerActions(
         Enqueue($"C.Fn {info.MenuLabel} = {value}", async ct =>
         {
             if (state.Camera is not { } camera || state.CfnTrial is not null) return;
+            if (!info.Writable)
+            {
+                state.StatusMessage = $"{info.MenuLabel} is not written from here: {info.Note ?? "a write is known to leave the camera inconsistent."}";
+                return;
+            }
             var (err, block) = await camera.GetCustomFunctionBlockAsync(refresh: true, ct);
             if (err is not EdsError.OK || block?.Entries.FirstOrDefault(e => e.FunctionId == info.FunctionId) is not { MenuNumber: > 0 } entry)
             {

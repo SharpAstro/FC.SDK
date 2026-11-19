@@ -22,7 +22,7 @@ internal static class CfnMenu
         [("Canon EOS 6D", 0x0502)] = 0xFFFFFFFF,
     };
 
-    public static async Task<int> RunAsync(CanonCamera camera, Action<string> log, TimeProvider time, string transcriptPath, int first, int rows, uint? value, int? forcedWord = null)
+    public static async Task<int> RunAsync(CanonCamera camera, Action<string> log, TimeProvider time, string transcriptPath, int first, int rows, uint? value, int? forcedWord = null, bool includeUnwritable = false)
     {
         if (Console.IsInputRedirected)
         {
@@ -60,6 +60,11 @@ internal static class CfnMenu
                 Console.WriteLine();
                 Note($"==== row {row}: {label}");
                 if (info.Note is { } note) Note($"  note: {note}");
+                if (!info.Writable && !includeUnwritable)
+                {
+                    Note("  not writable (a write is known to leave the body inconsistent): skipped; --include-unwritable writes it");
+                    continue;
+                }
                 if (!Prompt($"Show {info.MenuLabel} \"{info.Name}\" on the camera, then press Enter (s skip, a abort)", out var go)) return Finish(1);
                 if (go == "s") { Note("  skipped"); continue; }
 

@@ -311,6 +311,10 @@ around every write):
   write. Writing 2 reads back 1. n is two or fewer per row and the 1/2 → 1/3 row has no click count, so
   the asymmetry is an observation, not a rule.
 
+  The catalog marks both `0x0101` rows `Writable = false` (#51): the viewer's Custom Functions panel
+  shows the value and this note with no step buttons, and `cfnmenu` skips them unless given
+  `--include-unwritable`, which is how the table above was measured.
+
 **The two ranges take writes, but only whole stops display** (same body, 2026-11-17, `cfnmenu --first 9`
 and `--first 10`, one limit moved at a time, the body at 1/2-stop exposure increments throughout).
 A first pass moved each limit by a third of a stop; a second by a whole stop:

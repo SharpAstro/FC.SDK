@@ -83,6 +83,18 @@ public class CustomFunctionCatalogTests
         info.OptionFor(value).ShouldBe(option);
     }
 
+    /// <summary>
+    /// A write of 0x0101 moved the Av/Tv lists while the body kept its increment (#47), so neither item
+    /// sharing it is offered for writing; every other R6 item is.
+    /// </summary>
+    [Fact]
+    public void Only_the_shared_increment_id_is_not_writable()
+    {
+        var table = CanonCustomFunctionCatalog.For(R6);
+        table.Where(i => !i.Writable).Select(i => (i.FunctionId, i.Number)).ShouldBe([(0x0101u, 1), (0x0101u, 2)]);
+        CanonCustomFunctionCatalog.For("Canon EOS 6D").ShouldAllBe(i => i.Writable);
+    }
+
     /// <summary>0 is 1/3-stop for either increment item, so it cannot say which one was set last.</summary>
     [Fact]
     public void The_shared_increment_id_names_no_item_for_a_value_both_have() =>

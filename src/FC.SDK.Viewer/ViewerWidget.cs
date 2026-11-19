@@ -689,6 +689,11 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
                     rows.Add(unavailable is null ? box : box.Disabled(unavailable));
                 }
             }
+            else if (!info.Writable)
+            {
+                // Known to leave the body inconsistent when written (an R6's 0x0101): shown, not offered.
+                rows.Add(CfnRow(label, info.OptionFor(value) ?? $"value {value}", ViewerTheme.Palette.HeaderText, StepSpacer(), StepSpacer()));
+            }
             else
             {
                 // Steps go through the options in menu order, each written as its own wire value
