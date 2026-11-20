@@ -93,6 +93,28 @@ public class CustomFunctionCatalogTests
         var table = CanonCustomFunctionCatalog.For(R6);
         table.Where(i => !i.Writable).Select(i => (i.FunctionId, i.Number)).ShouldBe([(0x0101u, 1), (0x0101u, 2)]);
         CanonCustomFunctionCatalog.For("Canon EOS 6D").ShouldAllBe(i => i.Writable);
+        // The 450D family's table is the third one: nothing in it is held back either.
+        var rebel = CanonCustomFunctionCatalog.For("Canon EOS 450D");
+        rebel.ShouldNotBeEmpty();
+        rebel.ShouldAllBe(i => i.Writable);
+    }
+
+    /// <summary>
+    /// What the viewer's row for a shared value rests on (FC.SDK #53): at 0, an R6's factory state, both items
+    /// sharing 0x0101 have an option, it is the same words for both, and they carry the same note. So the row can
+    /// name both items, show that one option and print that one note, where it used to show the raw id and number.
+    /// </summary>
+    [Fact]
+    public void The_items_sharing_an_id_agree_on_the_value_neither_can_claim()
+    {
+        var sharing = CanonCustomFunctionCatalog.For(R6).Where(i => i.FunctionId == 0x0101 && i.OptionFor(0) is not null).ToList();
+        sharing.Select(i => i.MenuLabel).ShouldBe(["C.Fn1-1", "C.Fn1-2"]);
+        sharing.Select(i => i.OptionFor(0)).Distinct().ShouldBe(["1/3-stop"]);
+        sharing.Select(i => i.Note).Distinct().Count().ShouldBe(1);
+        sharing[0].Note.ShouldNotBeNullOrEmpty();
+        // 1 and 2 each belong to one item only, so those rows keep the single item's name.
+        CanonCustomFunctionCatalog.Describe(R6, 0x0101, 1)!.Number.ShouldBe(1);
+        CanonCustomFunctionCatalog.Describe(R6, 0x0101, 2)!.Number.ShouldBe(2);
     }
 
     /// <summary>0 is 1/3-stop for either increment item, so it cannot say which one was set last.</summary>

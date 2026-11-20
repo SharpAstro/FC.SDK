@@ -313,7 +313,8 @@ around every write):
 
   The catalog marks both `0x0101` rows `Writable = false` (#51): the viewer's Custom Functions panel
   shows the value and this note with no step buttons, and `cfnmenu` skips them unless given
-  `--include-unwritable`, which is how the table above was measured.
+  `--include-unwritable`, which is how to repeat the table above (it was measured on 2026-11-17, before the flag
+  existed, when `cfnmenu` wrote every item).
 
 **The two ranges take writes, but only whole stops display** (same body, 2026-11-17, `cfnmenu --first 9`
 and `--first 10`, one limit moved at a time, the body at 1/2-stop exposure increments throughout).
