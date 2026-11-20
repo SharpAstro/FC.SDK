@@ -861,6 +861,11 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             // the pane is painted, which is what the composite needs.
             _renderer.DrawHdrImage(tex, x, y, w, h, hdr.Primaries, hdr.PeakNits);
         }
+        else if (image is HdrPlanes planes && tex.MeasuredPeak is { } peak)
+        {
+            // The same, from the texture the GPU converted; it is shown only once its peak is known.
+            _renderer.DrawHdrImage(tex, x, y, w, h, planes.Primaries, HeifPreview.PeakNits(peak));
+        }
         else
         {
             _renderer.DrawTexture(tex.DescriptorSet, x, y, w, h);
@@ -1047,6 +1052,11 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
     /// by hand for a frame, which covered in-flight frames and not the one being recorded.
     /// </para>
     /// <para>
+    /// <see cref="HdrPlanes"/> are converted by the upload itself (a compute dispatch), and shown only once that
+    /// frame has retired and the peak it measured is known: two or three frames, during which the previous texture
+    /// keeps showing as it does for any upload.
+    /// </para>
+    /// <para>
     /// One upload in flight at a time. A raster that arrives while one is queued waits for the next
     /// frame, when the host submits the newest again; replacing a texture the queue still holds would
     /// dispose it under the queue.
@@ -1088,24 +1098,47 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             // Same instance as last time means nothing changed, so skip the upload entirely.
             if (_incoming is not null || ReferenceEquals(image, _submitted)) return;
 
-            var texture = image switch
-            {
-                // The 8-bit path, exactly as before HDR existed.
-                Raster raster => VkTexture.CreateDeferred(context, raster.Rgba, raster.Width, raster.Height,
-                    VkFormat.R8G8B8A8Unorm),
-                // Half-float RGBA, for DrawHdrImage.
-                HdrRaster hdr => VkTexture.CreateDeferredFromRgbaFloat(context, hdr.Rgba, hdr.Width, hdr.Height),
-                _ => throw new ArgumentOutOfRangeException(nameof(image), image.GetType().Name, "unknown preview image kind"),
-            };
+            _submitted = image;
+            var texture = Create(ref image);
             context.QueueTextureUpload(texture);
             _incoming = texture;
             _incomingImage = image;
-            _submitted = image;
+        }
+
+        /// <summary>The texture for <paramref name="image"/>, which becomes what it is drawn as when that changes.</summary>
+        private VkTexture Create(ref PreviewImage image)
+        {
+            switch (image)
+            {
+                // The 8-bit path, exactly as before HDR existed.
+                case Raster raster:
+                    return VkTexture.CreateDeferred(context, raster.Rgba, raster.Width, raster.Height, VkFormat.R8G8B8A8Unorm);
+                // Half-float RGBA, for DrawHdrImage.
+                case HdrRaster hdr:
+                    return VkTexture.CreateDeferredFromRgbaFloat(context, hdr.Rgba, hdr.Width, hdr.Height);
+                // Y'CbCr planes, converted and reduced by a compute dispatch in the upload's frame.
+                case HdrPlanes planes:
+                    try
+                    {
+                        return VkTexture.CreateDeferredFromYCbCr(context, planes.Planes, planes.Reduce);
+                    }
+                    catch (NotSupportedException)
+                    {
+                        // A device that cannot run the conversion: the processor converts, once, here.
+                        var raster = planes.CpuFallback();
+                        image = raster;
+                        return VkTexture.CreateDeferredFromRgbaFloat(context, raster.Rgba, raster.Width, raster.Height);
+                    }
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(image), image.GetType().Name, "unknown preview image kind");
+            }
         }
 
         private void Promote()
         {
             if (_incoming is not { IsUploaded: true } ready) return;
+            // Planes are drawn with the peak their conversion measured, known once its frame has retired.
+            if (_incomingImage is HdrPlanes && ready.MeasuredPeak is null) return;
 
             _shown?.Dispose();
             _shown = ready;

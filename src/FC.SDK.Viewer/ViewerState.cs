@@ -35,6 +35,16 @@ public sealed record HdrRaster(int Width, int Height, float[] Rgba, SdlVulkan.Re
     : PreviewImage(Width, Height);
 
 /// <summary>
+/// A picture as its decoded Y'CbCr planes, converted to linear light and reduced by <paramref name="Reduce"/> on the GPU
+/// (<c>VkTexture.CreateDeferredFromYCbCr</c>), then drawn as an <see cref="HdrRaster"/> is. The GPU also measures the
+/// peak the SDR tone curve needs, so it is known only once the conversion has run.
+/// </summary>
+/// <param name="CpuFallback">The same picture converted on the processor, for a device that cannot run the conversion.</param>
+public sealed record HdrPlanes(SdlVulkan.Renderer.YCbCrPlanes Planes, int Reduce, SdlVulkan.Renderer.HdrPrimaries Primaries,
+    Func<HdrRaster> CpuFallback)
+    : PreviewImage(Planes.Width / Reduce, Planes.Height / Reduce);
+
+/// <summary>
 /// Which image the preview pane shows. One at a time on purpose: stacked panes halved both images
 /// and made a dark live-view frame indistinguishable from "no frame yet".
 /// </summary>
