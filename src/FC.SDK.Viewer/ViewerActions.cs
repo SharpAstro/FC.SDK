@@ -1457,15 +1457,20 @@ public sealed partial class ViewerActions(
     /// <paramref name="shown"/> says. The previous value is kept and written back by
     /// <see cref="AnswerCustomFunction"/>.
     /// </summary>
-    public void TryCustomFunction(CanonCustomFunctionInfo info, uint value, string shown) =>
+    public void TryCustomFunction(CanonCustomFunctionInfo info, uint value, string shown)
+    {
+        // Refused before it is queued, so a press that cannot write does not take the action gate. No button reaches
+        // this today (an unwritable row has no steps and is not a mask), so it is a guard. The reason is the note
+        // under the row, which is some 400 characters: the one-line status bar points at it and does not repeat it.
+        if (!info.Writable)
+        {
+            state.StatusMessage = $"{info.MenuLabel} is not written from here, see the note under it.";
+            return;
+        }
+
         Enqueue($"C.Fn {info.MenuLabel} = {value}", async ct =>
         {
             if (state.Camera is not { } camera || state.CfnTrial is not null) return;
-            if (!info.Writable)
-            {
-                state.StatusMessage = $"{info.MenuLabel} is not written from here: {info.Note ?? "a write is known to leave the camera inconsistent."}";
-                return;
-            }
             var (err, block) = await camera.GetCustomFunctionBlockAsync(refresh: true, ct);
             if (err is not EdsError.OK || block?.Entries.FirstOrDefault(e => e.FunctionId == info.FunctionId) is not { MenuNumber: > 0 } entry)
             {
@@ -1483,6 +1488,7 @@ public sealed partial class ViewerActions(
                 ? $"{info.MenuLabel}: reopen it on the camera. Does it show \"{shown}\"?"
                 : $"{info.MenuLabel}: the camera kept its old value. This body may not take this write.";
         });
+    }
 
     /// <summary>Records whether the camera's menu showed the trial value, then writes the previous one back.</summary>
     public void AnswerCustomFunction(bool matches) => Enqueue("C.Fn answer", async ct =>

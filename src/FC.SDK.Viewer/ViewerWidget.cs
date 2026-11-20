@@ -662,10 +662,21 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
             // Two items can share an id (an R6's increments): name the one whose option the value is.
             var info = any is null ? null : CanonCustomFunctionCatalog.Describe(_state.Model, entry.FunctionId, value);
             var label = info is null ? $"0x{entry.FunctionId:X4}" : $"{info.MenuLabel} {info.Name}";
+            // A value two items share names neither of them (an R6's 0x0101 at 0, its factory state: 1/3-stop for
+            // both increments), but it is still their value. The row then names both items with the option they
+            // agree on and carries their note, where it used to be the raw id and number with no note at all.
+            var sharing = info is null && any is not null
+                ? catalog.Where(i => i.FunctionId == entry.FunctionId && i.OptionFor(value) is not null).ToList()
+                : [];
 
             if (info is not null && CanonCustomFunctionCatalog.FormatRange(info, entry.Values) is { } range)
             {
                 rows.Add(CfnRow(label, range, ViewerTheme.Palette.HeaderText, StepSpacer(), StepSpacer()));
+            }
+            else if (sharing.Count > 1)
+            {
+                rows.Add(CfnRow(string.Join(", ", sharing.Select(i => i.MenuLabel)), sharing[0].OptionFor(value) ?? $"value {value}",
+                    ViewerTheme.Palette.HeaderText, StepSpacer(), StepSpacer()));
             }
             else if (info is null || info.Options.Count == 0)
             {
@@ -711,7 +722,7 @@ public sealed class ViewerWidget : PixelWidgetBase<VulkanContext>
                         () => _actions.TryCustomFunction(info, next, Show(next)))));
             }
 
-            if (info?.Note is { } note)
+            if ((info ?? (sharing.Count > 1 ? sharing[0] : null))?.Note is { } note)
                 rows.Add(Note(note));
 
             if (trial is not null && trial.FunctionId == entry.FunctionId)
