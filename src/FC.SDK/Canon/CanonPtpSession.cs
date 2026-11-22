@@ -50,6 +50,35 @@ internal sealed class CanonPtpSession(PtpSession ptp, TimeProvider? time = null)
     internal string? SerialNumber { get; private set; }
     internal string? Model { get; private set; }
 
+    // Set once a body has shown it has no 0xD1A6 (a 6D), so later measurements go straight to 0x5001.
+    private bool _batteryInfoAbsent;
+
+    /// <summary>
+    /// Makes the body measure its battery and returns the percentage: <c>BatteryInfo</c> (0xD1A6), whose read makes
+    /// an EOS R6 measure and re-send 0xD21C, or on a body without it the standard 0x5001 asked for again, which a 6D
+    /// answers fresh. Updates the figures <see cref="BatteryCapacityPercent"/> and <see cref="BatteryLevelPercent"/>
+    /// read from. See <see cref="CanonBattery"/>.
+    /// </summary>
+    internal async Task<(EdsError Error, byte? Percent)> MeasureBatteryPercentAsync(CancellationToken ct = default)
+    {
+        if (!_batteryInfoAbsent)
+        {
+            var (error, value) = await GetPropertyBytesAsync(CanonBattery.InfoCode, refresh: true, ct);
+            if (error == EdsError.OK && CanonBattery.PercentFromInfo(value) is { } measured)
+                return (EdsError.OK, measured);
+            if (error == EdsError.DeviceBusy)
+                return (error, null);
+            // Anything else (no record, a refusal) is a body without the property; do not ask it again.
+            _batteryInfoAbsent = true;
+        }
+
+        var (resp, data) = await ptp.SendCommandReceiveDataAsync(PtpOperationCode.GetDevicePropValue, ct, StandardPtpBatteryLevel);
+        if (!resp.IsSuccess) return (resp.ToEdsError(), null);
+        if (data.Length < 1) return (EdsError.DevicePropNotSupported, null);
+        BatteryLevelPercent = data[0];
+        return (EdsError.OK, data[0]);
+    }
+
     /// <summary>
     /// PTP operation codes the camera advertises in GetDeviceInfo. Empty until the session is open.
     /// EOS bodies typically do NOT list GetDevicePropValue (0x1015), which is why property reads
