@@ -1094,8 +1094,9 @@ public sealed class CanonCamera : IAsyncDisposable
     /// <remarks>
     /// An EOS R6 sends the name of a Sigma 35mm F1.4 DG HSM Art behind a 0 byte
     /// (<c>00 "35mm"</c>, where a 6D sends <c>"35mm"</c>). That byte is skipped when
-    /// <c>LensStatus</c> (0xD1A8) says a lens is fitted, and only then: on a bare mount the bytes
-    /// after it are the previous lens's name (issue #28). <see cref="GetPropertyStringAsync"/> on
+    /// <c>LensStatus</c> (0xD1A8) says a lens is fitted, and only then: on a bare mount a 0 leads
+    /// too, and the bytes after it are the previous lens's name on a 6D and non-text bytes on an R6
+    /// (issue #28). <see cref="GetPropertyStringAsync"/> on
     /// <see cref="EdsPropertyId.LensName"/> still stops at the first 0.
     /// </remarks>
     public async Task<(EdsError Error, string? Value)> GetLensNameAsync(CancellationToken ct = default)

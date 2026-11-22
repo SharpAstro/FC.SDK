@@ -99,7 +99,8 @@ cases an AF command answers `OK` and moves nothing.
 2026-11-14), read raw and carried as `CanonFocusState.LensPresent`; the name decides only on a body
 that does not report it. The name alone fails: an R6 sends a Sigma 35mm F1.4 Art's name as
 `00 "35mm"` (a 6D sends `"35mm"`), and a leading 0 is also how both bodies mark the name of a lens
-that came off, with the old name still behind it. So `GetLensNameAsync` skips one leading 0 only
+that came off: a 6D keeps the old name behind it, an R6 62 non-text bytes that are not the old name
+(2026-11-15). So `GetLensNameAsync` skips one leading 0 only
 when the status says a lens is fitted (`CanonLens`, `CanonLensTests`). The focus mode fails too: a
 bare mount read `OneShot` on a 6D on 2026-08-03 and `ManualFocus` on a 6D and an R6 on 2026-11-14,
 cause not found. Both readings follow a lens change only while events are drained.
