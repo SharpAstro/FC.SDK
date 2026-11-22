@@ -94,16 +94,33 @@ public sealed class CanonCamera : IAsyncDisposable
     public string DeviceId => _transport.DeviceId;
 
     /// <summary>
-    /// Battery level (0–100%). The remaining capacity Canon's <c>BatteryInfoEx</c> (0xD21C) last announced on the
-    /// event stream, which is the figure the body's own "Battery info" menu shows; otherwise the standard PTP property
-    /// 0x5001, read on session open. Null when neither is available.
+    /// Battery level (0–100%) as last known, with no I/O: the remaining capacity Canon's <c>BatteryInfoEx</c> (0xD21C)
+    /// last announced on the event stream, otherwise the standard PTP property 0x5001 as last read (on session open, or
+    /// by <see cref="ReadBatteryLevelPercentAsync"/>). Null when neither is available.
     /// </summary>
     /// <remarks>
-    /// The two are not equally precise. An EOS R6 refuses 0x5001 (this used to stay null there) and answers 0xD21C
-    /// exactly as its menu does: 8, 94 and 96 %, LP-E6N and LP-E6NH. An EOS 6D has no 0xD21C and answers 0x5001 with a
-    /// coarse level: 100 while its menu showed 88 %. See <see cref="CanonBattery"/>.
+    /// <b>It can be well behind the battery.</b> An EOS R6 announces 0xD21C only when it measures, which it does not do
+    /// by itself in a session: 99 % stood for 65 minutes of live view while the battery went to 67 (issue #57). A 6D's
+    /// 0x5001 is read once on session open and stood at 100 while the body said 75. Call
+    /// <see cref="ReadBatteryLevelPercentAsync"/> for a current figure; it refreshes this one too. The two bodies are
+    /// not equally precise either: an R6 refuses 0x5001 and its measured 0xD21C matches its menu (8, 94 and 96 %), while
+    /// a 6D has no 0xD21C and answers 0x5001 with a coarse level (100 while its menu showed 88 %). See
+    /// <see cref="CanonBattery"/>.
     /// </remarks>
     public byte? BatteryLevelPercent => _canon.BatteryCapacityPercent ?? _canon.BatteryLevelPercent;
+
+    /// <summary>
+    /// Makes the body measure its battery now and returns the percentage, refreshing <see cref="BatteryLevelPercent"/>.
+    /// </summary>
+    /// <remarks>
+    /// On a body with <c>BatteryInfo</c> (0xD1A6, an EOS R6) this reads it, and that read is what makes the body
+    /// measure and re-send 0xD21C: it has a side effect, which is why it is a call and not a property. On a body without
+    /// it (an EOS 6D) it asks for the standard 0x5001 again, which a 6D answers fresh mid-session. Reading every 30 s
+    /// for 30 minutes of live view kept an R6 within a point of its own menu and did not disturb live view (issue #57).
+    /// <see cref="EdsError.DeviceBusy"/> with a null percentage when the body was busy; try again later.
+    /// </remarks>
+    public Task<(EdsError Error, byte? Percent)> ReadBatteryLevelPercentAsync(CancellationToken ct = default) =>
+        _canon.MeasureBatteryPercentAsync(ct);
 
     /// <summary>Camera serial number from PTP GetDeviceInfo. Available after session open.</summary>
     public string? SerialNumber => _canon.SerialNumber;

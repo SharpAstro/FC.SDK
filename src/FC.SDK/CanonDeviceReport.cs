@@ -47,7 +47,9 @@ public static class CanonDeviceReport
             // line of its own: it is the one piece of the story the reporter cannot see afterwards.
             report.AppendLine($"  - Raw ioctl was rejected: {fallback}");
         }
-        report.AppendLine($"- Battery: {(camera.BatteryLevelPercent is { } b ? $"{b}%" : "not reported")}");
+        // Measured for the report: the cached figure can be far behind the battery (issue #57).
+        var battery = (await camera.ReadBatteryLevelPercentAsync(ct).ConfigureAwait(false)).Percent ?? camera.BatteryLevelPercent;
+        report.AppendLine($"- Battery: {(battery is { } b ? $"{b}%" : "not reported")}");
         report.AppendLine();
 
         await AppendBodyStringsAsync(report, camera, ct).ConfigureAwait(false);

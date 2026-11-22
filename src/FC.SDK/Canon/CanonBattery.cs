@@ -3,10 +3,21 @@ using System.Buffers.Binary;
 namespace FC.SDK.Canon;
 
 /// <summary>
-/// The two Canon battery properties: <c>BatteryPower</c> (0xD111), a coarse level, and <c>BatteryInfoEx</c> (0xD21C),
-/// which carries the remaining capacity in percent (libgphoto2 names; libgphoto2 decodes neither structure field).
+/// The Canon battery properties: <c>BatteryPower</c> (0xD111), a coarse level, and <c>BatteryInfoEx</c> (0xD21C) and
+/// <c>BatteryInfo</c> (0xD1A6), which carry the remaining capacity in percent (libgphoto2 names; libgphoto2 decodes
+/// no structure field).
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>0xD21C is the figure of the body's last measurement, not a live one</b> (issue #57, an EOS R6, firmware 1.9.0).
+/// The body sends it when it measures and not otherwise: it read 99 % for 65 minutes of live view while 0xD111 stepped
+/// from 2 to 4 on its own, and neither a 0x9127 request, a half press, autofocus, a capture nor a new session moved
+/// it (a new session re-sends the stored figure). <b>Reading 0xD1A6 makes the body measure</b>: it answered 67 and
+/// 0xD21C followed to 67 in the same second, and a 0xD1A6 read every 30 s kept both within a point of the body's own
+/// "Battery info" menu for 30 minutes. So a read of 0xD1A6 is a read with a side effect, which is why only
+/// <see cref="CanonCamera.ReadBatteryLevelPercentAsync"/> does it, and never a cached property.
+/// </para>
+/// <para>
 /// The standard PTP battery property 0x5001 is no substitute: an EOS R6 refuses it, and an EOS 6D answers it with a
 /// coarse level (100 while its "Battery info" menu showed 88 %, <c>BatteryPower</c> 2). The 6D has no 0xD21C (nor
 /// <c>BatteryInfo</c> 0xD1A6), so its menu percentage is not readable as a property at all. Measured on an EOS R6 over
@@ -19,6 +30,11 @@ namespace FC.SDK.Canon;
 /// and 0xD111 stepping 2 → 4 → 1 → 5 → 0 as the screen went from four bars to one and then to low, with no value in
 /// between. Those are exactly libgphoto2's labels for <c>BatteryPower</c> (<c>_get_Canon_EOS_BatteryLevel</c>):
 /// 0 Low, 1 50%, 2 100%, 4 75%, 5 25%. The 6D reads 2 at four bars too; the 450D's scale has not been checked.
+/// </para>
+/// <para>
+/// On a 6D, 0x5001 asked for again mid-session is fresh: it went 100 to 75 in the minute 0xD111 stepped 2 to 4,
+/// after 38 minutes of live view (issue #57), while the figure read on session open stayed 100.
+/// </para>
 /// </remarks>
 internal static class CanonBattery
 {
@@ -27,6 +43,9 @@ internal static class CanonBattery
 
     /// <summary><c>BatteryInfoEx</c>, libgphoto2 <c>PTP_DPC_CANON_EOS_BatteryInfoEx</c> (not <c>BatteryInfo</c>, which is 0xD1A6).</summary>
     internal const ushort InfoExCode = 0xD21C;
+
+    /// <summary><c>BatteryInfo</c>, libgphoto2 <c>PTP_DPC_CANON_EOS_BatteryInfo</c>. Reading it makes the body measure.</summary>
+    internal const ushort InfoCode = 0xD1A6;
 
     /// <summary>The level <see cref="PowerCode"/> reports for a battery about to run out.</summary>
     internal const uint PowerLow = 0;
@@ -42,6 +61,19 @@ internal static class CanonBattery
         uint count = BinaryPrimitives.ReadUInt32LittleEndian(value);
         uint percent = BinaryPrimitives.ReadUInt32LittleEndian(value[4..]);
         return count >= 1 && percent <= 100 ? (byte)percent : null;
+    }
+
+    /// <summary>
+    /// Remaining capacity from <c>BatteryInfo</c>: <c>[size:u32][percent:u32]</c>, eight zero bytes, then the battery
+    /// model in ASCII (an EOS R6 sends 26 bytes, size 26, "LP-E6NH"). Null when the value is too short, its size word
+    /// disagrees with its length, or the percentage is above 100.
+    /// </summary>
+    internal static byte? PercentFromInfo(ReadOnlySpan<byte> value)
+    {
+        if (value.Length < 8) return null;
+        uint size = BinaryPrimitives.ReadUInt32LittleEndian(value);
+        uint percent = BinaryPrimitives.ReadUInt32LittleEndian(value[4..]);
+        return size == value.Length && percent <= 100 ? (byte)percent : null;
     }
 
     /// <summary>libgphoto2's label for a <c>BatteryPower</c> level; the raw number for one it does not know (3 included).</summary>

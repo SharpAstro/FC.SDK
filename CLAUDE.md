@@ -313,7 +313,8 @@ All PTP property codes MUST be verified against [libgphoto2 ptp.h](https://githu
 | 0xD11C | SaveTo | Capture destination |
 | 0xD120 | ImageQuality | libgphoto2 `ImageFormat`: a structure, read it with `GetImageFormatAsync` (`CanonImageFormat`). 0xD121/0xD122 (`ImageFormatCF`/`SD`) carry the same layout |
 | 0xD138 | *(unmapped)* | libgphoto2 `AEModeDial`: the physical mode dial. EOS R6: Tv 1, Av 2, M 3, B 4, C1 7. Read it with `GetRawPropertyAsync`; `AEModeSelect` is not mapped to it because the pairing is inferred, not extracted |
-| 0xD21C | *(unmapped)* | libgphoto2 `BatteryInfoEx` (not `BatteryInfo`, 0xD1A6): `[count][percent]…`, behind `BatteryLevelPercent` on EOS bodies |
+| 0xD21C | *(unmapped)* | libgphoto2 `BatteryInfoEx` (not `BatteryInfo`, 0xD1A6): `[count][percent]…`, behind `BatteryLevelPercent` on EOS bodies; the last measurement, not a live figure |
+| 0xD1A6 | *(unmapped)* | libgphoto2 `BatteryInfo`: `[size][percent]`, 8 zero bytes, the battery model. **Reading it makes an R6 measure** and re-send 0xD21C; `ReadBatteryLevelPercentAsync` reads it (#57) |
 | 0xD13A | MirrorUpSetting | MLU on/off |
 | 0xD178 | NoiseReduction | High ISO NR |
 | 0xD1AB | TempStatus | Sensor/body temperature |
@@ -548,11 +549,17 @@ the body and diffing `DumpPropertiesAsync` / `GetRawPropertyBytesAsync` before a
 - **Image quality is a structure** (0xD120–0xD122, same bytes in all three whatever the two card slots say), decoded
   by `CanonImageFormat` and pinned in `ImageFormatTests`. HEIF (with HDR PQ on) is type 8, which libgphoto2 does not
   list. Some readings carry trailing bytes after the last entry.
-- **Battery**: 0x5001 is refused; `BatteryInfoEx` (0xD21C) carries the exact percentage of the body's "Battery info"
-  menu (8, 94 and 96 % checked, LP-E6N and LP-E6NH), and `BatteryPower` (0xD111) steps 2 → 4 → 1 → 5 → 0 as bars go
+- **Battery**: 0x5001 is refused; `BatteryInfoEx` (0xD21C) carries the percentage of the body's last measurement,
+  which matches its "Battery info" menu (8, 94 and 96 % checked, LP-E6N and LP-E6NH) when fresh. **It is not fresh
+  for long**: the body measures when something reads `BatteryInfo` (0xD1A6) and not otherwise, so 0xD21C stood at 99 %
+  for 65 minutes of live view while the battery went to 67, and a 0x9127 request, AF, a capture or a new session did
+  not move it (issue #57, firmware 1.9.0). A read of 0xD1A6 is a read with a side effect, so only
+  `ReadBatteryLevelPercentAsync` does it; `BatteryLevelPercent` stays the last known figure. And `BatteryPower` (0xD111) steps 2 → 4 → 1 → 5 → 0 as bars go
   from four to one and then low — libgphoto2's 100/75/50/25/low. That is why `CanonDeviceReport` no longer calls
   level 1 "nearly flat". See `CanonBattery`. **A 6D is the other way round**: no 0xD21C (nor 0xD1A6), and 0x5001
-  answers a coarse 100 while the menu shows 88 %, so `BatteryLevelPercent` prefers 0xD21C when a body has both.
+  answers a coarse 100 while the menu shows 88 %, so `BatteryLevelPercent` prefers 0xD21C when a body has both. A 6D's
+  0x5001 asked for again mid-session is fresh (100 to 75 after 38 minutes of live view, #57), which is what
+  `ReadBatteryLevelPercentAsync` does on a body without 0xD1A6.
 - **Pulling the cable is invisible to the cache.** A property read still answers OK from it; the first real
   transaction (`GetEvent`, `DumpPropertiesAsync`) throws `IOException` "WPD ioctl failed with Win32 error 995", and
   the body leaves `EnumerateWpdCameras` within 5 s. The event pump now stops on that exception and raises

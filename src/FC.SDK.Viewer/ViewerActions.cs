@@ -370,7 +370,8 @@ public sealed partial class ViewerActions(
         state.RemoteMode = remoteMode;
         state.Model = camera.Model;
         state.SerialNumber = camera.SerialNumber;
-        state.BatteryPercent = camera.BatteryLevelPercent;
+        // Measured, not the session-open figure: an R6 re-sends a stale one there (issue #57).
+        state.BatteryPercent = (await camera.ReadBatteryLevelPercentAsync(ct)).Percent ?? camera.BatteryLevelPercent;
         state.SupportedOperations = camera.SupportedOperations;
 
         _logger.LogInformation("Model={Model} Serial={Serial} Battery={Battery}%",
@@ -517,7 +518,7 @@ public sealed partial class ViewerActions(
         await ApplyCustomFunctionFallbacksAsync(camera, ct);
 
         state.RawProperties = await camera.DumpPropertiesAsync(ct);
-        state.BatteryPercent = camera.BatteryLevelPercent;
+        state.BatteryPercent = (await camera.ReadBatteryLevelPercentAsync(ct)).Percent ?? camera.BatteryLevelPercent;
         state.StatusMessage = $"Read {ok} properties, {failed} unavailable; {state.RawProperties.Count} in the event cache.";
         _logger.LogInformation("Property sweep: {Ok} readable, {Failed} unavailable, {Cached} codes in cache",
             ok, failed, state.RawProperties.Count);
