@@ -1997,7 +1997,9 @@ public sealed class CanonCamera : IAsyncDisposable
     /// Returns when the camera accepts the command, not when focus is achieved. That distinction
     /// matters: tearing down live view while a hunt is still running left a 6D answering
     /// <see cref="EdsError.DeviceBusy"/> to every release for three minutes. Watch the event stream,
-    /// and call <see cref="CancelAutoFocusAsync"/> before stopping live view.
+    /// and call <see cref="CancelAutoFocusAsync"/> before stopping live view; on an EOS R6 a cancel
+    /// sent later, even in a new session, still ends the refused writes described in its remarks:
+    /// the next start answered OK, in 3 runs of 3 (issue #60).
     /// </para>
     /// </remarks>
     public async Task<EdsError> AutoFocusLiveViewAsync(CancellationToken ct = default)
@@ -2122,7 +2124,12 @@ public sealed class CanonCamera : IAsyncDisposable
     /// <remarks>
     /// Required, not optional, after <see cref="AutoFocusLiveViewAsync"/>: that call returns on
     /// acceptance rather than on focus, and stopping live view with a hunt still in flight left a 6D
-    /// answering <see cref="EdsError.DeviceBusy"/> to every release for three minutes.
+    /// answering <see cref="EdsError.DeviceBusy"/> to every release for three minutes. On an EOS R6
+    /// the AF locks (the AF frame's <see cref="CanonEvfAfFrame.InFocus"/>) and stays locked until this
+    /// call, through a release (record 8 logged in 1 run), and while it does the body refuses
+    /// <c>Evf_OutputDevice</c> writes (the stop's restore, and every start), across a new session: for
+    /// at least 136 s after a reopen, in 1 run. After this call, sent in the new session, the next
+    /// start answered OK, in 3 runs of 3 (issue #60).
     /// </remarks>
     public Task<EdsError> CancelAutoFocusAsync(CancellationToken ct = default) => _canon.AfCancelAsync(ct);
 
